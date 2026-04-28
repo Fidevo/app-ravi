@@ -1,10 +1,12 @@
 # --- Tietokanta + kerätty data (EI MENE GITHUBIIN) ---
-data/
-data/raw/
-data/logs/
-data/ravit.db
-data/ravit.db-wal
-data/ravit.db-shm
+# HUOM: /-prefix on PAKOLLINEN - "data/" matchaisi myös src/data/
+# (joka on lähdekoodia ja PITÄÄ mennä gittiin).
+/data/
+/data/raw/
+/data/logs/
+/data/ravit.db
+/data/ravit.db-wal
+/data/ravit.db-shm
 
 # --- Python ---
 .venv/
