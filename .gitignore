@@ -1,0 +1,33 @@
+# --- Tietokanta + kerätty data (EI MENE GITHUBIIN) ---
+data/
+data/raw/
+data/logs/
+data/ravit.db
+data/ravit.db-wal
+data/ravit.db-shm
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# --- Lokit + ympäristö ---
+*.log
+.env
+.env.local
