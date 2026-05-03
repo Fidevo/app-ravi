@@ -9,6 +9,14 @@ Kaksi job-funktiota (Step 2):
 
 Closing odds -jobi (b) tulee Step 3:ssa erikseen.
 
+# TODO Hetzner-deployn jälkeen: lisää toinen result-fetch +3h tai
+# +6h lähdön jälkeen, koska ATG:n /races/{id} täyttää data vaiheittain.
+# T+30min: vain odds + top-3 sijoitukset, EI km-aikoja.
+# T+useita tunteja: kaikki sijoitukset 1-N + kmTime-objektit.
+# Vaihtoehtoisesti päivittäinen retry-jobi joka käy läpi viim. 7 päivän
+# racet joilla on NULL kilometer_time_seconds tai vajaita finish_positions
+# ja yrittää hakea ATG:lta uudelleen.
+
 Käyttö:
   python -m src.data.scheduler run-once [--date YYYY-MM-DD]
   python -m src.data.scheduler run-forever
