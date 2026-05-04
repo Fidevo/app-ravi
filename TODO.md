@@ -1,6 +1,10 @@
 # TODO — ravit-edge
 
-Tunnetut, dokumentoidut tehtävät joita EI tehdä Hetzner-MVP-deploymentissa
+> Korkean tason aikataulu ja faasit: katso [ROADMAP.md](ROADMAP.md)
+> Tämä tiedosto sisältää konkreettiset tekniset tehtävät
+> yksityiskohtineen ja perusteluineen.
+
+Tunnetut, dokumentoidut tehtävät joita EI tehty Hetzner-MVP-deploymentissa
 mutta jotka pitää muistaa. Järjestys = prioriteetti.
 
 ## Datan kattavuus
@@ -49,12 +53,6 @@ gallop-rivit voi suodattaa pois ML-treenissä.
 
 ## Schedulerin robusttius
 
-### 4. Auto-restart kaatumisen jälkeen
-Nykyinen `run_forever` ei käynnisty automaattisesti uudelleen jos
-prosessi kaatuu (esim. uncaught exception, OOM). Hetzner-deployssa
-tämä hoituu **systemd**-yksiköllä `Restart=on-failure` ja
-`RestartSec=30s`. Dokumentoi systemd-template README:ssä.
-
 ### 5. Persistentit job-storet
 Nykyinen `BlockingScheduler` käyttää `MemoryJobStore`-oletusta —
 ajastetut jobit häviävät restartissa. `_initial_setup` korjaa tämän
@@ -78,3 +76,17 @@ ovat moduulin nimisiä loggereita, eivät `ravit_edge.scheduler`:n
 alapuussa. Stderriin tulostuvat, mutta eivät päädy `data/logs/scheduler.log`-
 tiedostoon. Jos halutaan keskitetty loki: lisää nämä loggerit
 `setup_logging()`:hin.
+
+---
+
+## Tehty
+
+### ✅ #4. Auto-restart kaatumisen jälkeen — TEHTY systemd:llä Hetzner-deployssa (4.5.2026)
+Toteutettu `/etc/systemd/system/ravit-edge.service` -yksikössä:
+- `Restart=on-failure`
+- `RestartSec=10s`
+- `TimeoutStopSec=30s`
+- `journalctl -u ravit-edge` -lokit
+
+Lisäksi cron-pohjainen päivittäinen DB-backup klo 04:00 Stockholm-aikaa,
+14 vrk säilytys, `/home/ravi/backups/`-hakemistossa.
