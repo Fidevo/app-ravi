@@ -41,7 +41,6 @@ joka on minimi mielekkääseen ML-mallin treenaukseen.
 
 - TODO #3: Galoppirata-suodatus (Bro Park, Jägersro Galopp pois)
 - TODO #2: Shoes/sulky-piirteiden lisäys + takautuva Travsport-uudelleenajo
-- TODO #1: Result-haku double-trigger T+3h:lla
 
 **Tehdään loput viikot 2-5:**
 

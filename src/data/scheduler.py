@@ -9,18 +9,21 @@ Kaksi job-funktiota (Step 2):
 
 Closing odds -jobi (b) tulee Step 3:ssa erikseen.
 
-# TODO Hetzner-deployn jälkeen: lisää toinen result-fetch +3h tai
-# +6h lähdön jälkeen, koska ATG:n /races/{id} täyttää data vaiheittain.
-# T+30min: vain odds + top-3 sijoitukset, EI km-aikoja.
-# T+useita tunteja: kaikki sijoitukset 1-N + kmTime-objektit.
-# Vaihtoehtoisesti päivittäinen retry-jobi joka käy läpi viim. 7 päivän
-# racet joilla on NULL kilometer_time_seconds tai vajaita finish_positions
-# ja yrittää hakea ATG:lta uudelleen.
+ATG:n /races/{id} täyttää data vaiheittain:
+  T+0…30min: vain odds + top-3 sijoitukset, EI km-aikoja
+  T+1…2h:    kaikki sijoitukset 1-N
+  T+useita tunteja - useita päiviä: kmTime-objektit täyttyvät
+
+Tästä syystä +30min fetch_results täydennetään päivittäisellä
+retry_incomplete_results -jobilla klo 04:30 Stockholm-aikaa, joka käy
+läpi viim. 7 päivän racet joilla on NULL kilometer_time_seconds tai
+vajaita finish_positions ja yrittää hakea ATG:lta uudelleen.
 
 Käyttö:
   python -m src.data.scheduler run-once [--date YYYY-MM-DD]
   python -m src.data.scheduler run-forever
   python -m src.data.scheduler fetch-results --race-id RACE_ID
+  python -m src.data.scheduler retry-incomplete [--lookback 7]
 
 Production-deployment:
   systemd: ks. README "Scheduler-deploy" -osio
@@ -747,6 +750,91 @@ def capture_odds_snapshot(
     return stats
 
 
+def retry_incomplete_results(
+    db_path: str = DB_PATH,
+    lookback_days: int = 7,
+    atg: ATGClient | None = None,
+) -> dict:
+    """Käy läpi viim. N päivän racet joilla on vajaita tulostietoja ja
+    yritä hakea ATG:lta uudelleen.
+
+    ATG:n /races/{id} -vastaus täyttyy vaiheittain (ks. moduulin docstring).
+    Pelkkä T+30min fetch_results ei aina saa kaikkea: km-ajat ja sijoitukset
+    4+ ilmaantuvat tunteja-päiviä myöhemmin. Tämä jobi ajaa fetch_results:n
+    uudelleen jokaiselle racelle joka on edelleen vajaa.
+
+    "Vajaa" = on ainakin yksi runner jolla finish_position IS NULL TAI
+    kilometer_time_seconds IS NULL. (Galopin osalta kmTime puuttuu aina —
+    TODO #3 erottelee disipliinit, ja sen jälkeen tämä kysely voi rajata
+    vain trottiraceihin. Nykyisellään kmTime-NULL aiheuttaa galopin
+    re-fetchin joka päivä, mutta on idempotentti eikä aiheuta haittaa.)
+
+    Idempotentti: fetch_results upsertit eivät duplikoi mitään.
+
+    Args:
+        lookback_days: kuinka pitkä aikaikkuna nykyhetkestä taaksepäin
+            (oletus 7 — ATG ei tyypillisesti enää muutu sen jälkeen)
+
+    Returns:
+        dict: yhteenveto {races_checked, races_updated, errors}
+    """
+    cutoff = (datetime.now(ATG_TZ).date() - timedelta(days=lookback_days)).isoformat()
+    logger.info(
+        "retry_incomplete_results: lookback=%d days, cutoff>=%s",
+        lookback_days, cutoff,
+    )
+
+    own_client = atg is None
+    client = atg or ATGClient()
+    Session_ = sessionmaker(bind=_engine(db_path))
+    stats: dict[str, Any] = {
+        "races_checked": 0,
+        "races_updated": 0,
+        "errors": [],
+    }
+    try:
+        # Etsi uniikit race_idt joilla on vajaita runnereita
+        with Session_() as session:
+            from sqlalchemy import or_, text
+            rows = session.execute(text("""
+                SELECT DISTINCT ra.race_id
+                FROM races ra
+                JOIN runners r ON ra.race_id = r.race_id
+                WHERE ra.race_date >= :cutoff
+                  AND (r.finish_position IS NULL OR r.kilometer_time_seconds IS NULL)
+                ORDER BY ra.race_id
+            """), {"cutoff": cutoff}).fetchall()
+            race_ids = [row[0] for row in rows]
+
+        logger.info(
+            "retry_incomplete_results: %d races have NULL fields, retrying",
+            len(race_ids),
+        )
+
+        for rid in race_ids:
+            stats["races_checked"] += 1
+            try:
+                # fetch_results palauttaa stats jossa runners_updated > 0
+                # jos jokin oikeasti muuttui. Kutsumme sitä omalla atg-
+                # clientilla jaetun rate-limitin säilyttämiseksi.
+                fetch_results(rid, db_path=db_path, atg=client)
+                stats["races_updated"] += 1
+            except Exception as exc:  # noqa: BLE001
+                stats["errors"].append(f"race {rid}: {exc}")
+                logger.exception("retry_incomplete_results: race %s failed", rid)
+    finally:
+        if own_client:
+            client.close()
+
+    logger.info(
+        "retry_incomplete_results: %d races checked, %d updated, %d errors",
+        stats["races_checked"],
+        stats["races_updated"],
+        len(stats["errors"]),
+    )
+    return stats
+
+
 def _schedule_results_job(
     scheduler: BlockingScheduler,
     race_id: str,
@@ -954,6 +1042,18 @@ def run_forever(db_path: str = DB_PATH) -> None:
         misfire_grace_time=600,  # 10min - jos kone heräsi sleepistä
     )
 
+    # Päivittäinen retry vajaista tuloksista klo 04:30 Stockholm.
+    # Sijoitettu 04:00 cron-backupin JÄLKEEN jotta backup ehtii ottaa
+    # snapshotin ennen retryjä (diagnostiikkaystävällinen).
+    scheduler.add_job(
+        retry_incomplete_results,
+        trigger=CronTrigger(hour=4, minute=30, timezone=ATG_TZ),
+        args=[db_path],
+        id="retry_incomplete_results",
+        replace_existing=True,
+        misfire_grace_time=1800,  # 30min - tämä ei ole aikakriittinen
+    )
+
     logger.info("Scheduler started; blocking. Ctrl+C to stop.")
     try:
         scheduler.start()
@@ -999,6 +1099,17 @@ def _main() -> None:
         help="esim. T-15min | T-10min | T-5min | T-2min",
     )
 
+    p_retry = sub.add_parser(
+        "retry-incomplete",
+        help="Hae uudelleen tulokset raceille joilla on vajaita kenttiä "
+             "(NULL finish_position tai kilometer_time_seconds). Pyörii "
+             "automaattisesti klo 04:30 cron-jobissa run-forever-tilassa.",
+    )
+    p_retry.add_argument(
+        "--lookback", type=int, default=7,
+        help="Kuinka monta päivää taaksepäin etsitään vajaita raceja (oletus 7)",
+    )
+
     args = parser.parse_args()
     migrate(DB_PATH)  # varmista että uudet sarakkeet ovat olemassa
 
@@ -1011,6 +1122,8 @@ def _main() -> None:
         print(fetch_results(args.race_id))
     elif args.cmd == "capture-snapshot":
         print(capture_odds_snapshot(args.race_id, args.label))
+    elif args.cmd == "retry-incomplete":
+        print(retry_incomplete_results(lookback_days=args.lookback))
 
 
 if __name__ == "__main__":

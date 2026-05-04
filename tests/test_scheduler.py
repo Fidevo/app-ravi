@@ -16,6 +16,7 @@ from src.data.scheduler import (
     capture_odds_snapshot,
     fetch_daily_races,
     fetch_results,
+    retry_incomplete_results,
     schedule_odds_snapshots,
 )
 
@@ -793,3 +794,136 @@ def test_fetch_daily_races_survives_travsport_failure(tmp_path):
     with _session(db) as s:
         assert s.query(HorseStart).count() == 1
         assert s.query(HorseStart).one().horse_id == "100002"
+
+
+# ---------------------------------------------------------------------------
+# retry_incomplete_results
+# ---------------------------------------------------------------------------
+
+
+def _build_partial_results_race(race_id: str, n_runners: int, n_with_results: int) -> dict:
+    """Race jossa vain ensimmäiset n_with_results runneria saivat tuloksen.
+    Loput runners ovat result.place=0 (ei maaliin) ilman kmTime-objektia."""
+    starts = []
+    for i in range(n_runners):
+        s = {
+            "id": i + 1,
+            "number": i + 1,
+            "postPosition": i + 1,
+            "distance": 2140,
+            "horse": {
+                "id": 300000 + i,
+                "name": f"P{i + 1}",
+                "age": 5,
+                "sex": "gelding",
+                "trainer": {"firstName": "T", "lastName": str(i)},
+                "statistics": {"life": {"starts": 0, "placement": {}, "records": []}, "years": {}},
+            },
+            "driver": {"firstName": "D", "lastName": str(i), "statistics": {"years": {}}},
+        }
+        if i < n_with_results:
+            s["result"] = {
+                "place": i + 1,
+                "kmTime": {"minutes": 1, "seconds": 14, "tenths": 0},
+                "finalOdds": 5.0 + i,
+            }
+        starts.append(s)
+    return {
+        "id": race_id,
+        "date": "2026-04-27",
+        "number": 1,
+        "distance": 2140,
+        "startMethod": "auto",
+        "startTime": "2026-04-27T18:00:00",
+        "track": {"name": "Solvalla"},
+        "prize": 50000,
+        "starts": starts,
+    }
+
+
+def test_retry_incomplete_results_picks_up_null_finish_position(tmp_path):
+    """Race jossa alunperin vain top-3 sai tuloksen → retry hakee uudelleen
+    jolloin ATG palauttaa kaikki paikat. NULL-rivien pitäisi täyttyä."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    # Ekassa fetch_resultsissa vain top-3 raporttiin (simuloi T+30min ATG-tilaa)
+    partial = _build_partial_results_race(RACE_ID, n_runners=10, n_with_results=3)
+    fetch_daily_races(date(2026, 4, 27), db_path=db, atg=FakeATG(partial))
+    fetch_results(RACE_ID, db_path=db, atg=FakeATG(partial))
+
+    with _session(db) as s:
+        n_with_finish = s.query(Runner).filter(
+            Runner.race_id == RACE_ID, Runner.finish_position.isnot(None)
+        ).count()
+        assert n_with_finish == 3  # alkutila
+
+    # Retry: ATG palauttaa nyt kaikki 10 paikkaa (simuloi T+useita tunteja)
+    full = _build_partial_results_race(RACE_ID, n_runners=10, n_with_results=10)
+    stats = retry_incomplete_results(db_path=db, lookback_days=7, atg=FakeATG(full))
+
+    assert stats["races_checked"] == 1  # vain RACE_ID oli vajaa
+    assert stats["races_updated"] == 1
+    assert stats["errors"] == []
+
+    with _session(db) as s:
+        n_with_finish = s.query(Runner).filter(
+            Runner.race_id == RACE_ID, Runner.finish_position.isnot(None)
+        ).count()
+        assert n_with_finish == 10  # kaikki nyt täytetty
+
+
+def test_retry_incomplete_results_skips_complete_races(tmp_path):
+    """Race joka on jo täysin täytetty → ei nouse vajaiden listalle."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+    full = _build_partial_results_race(RACE_ID, n_runners=5, n_with_results=5)
+    fetch_daily_races(date(2026, 4, 27), db_path=db, atg=FakeATG(full))
+    fetch_results(RACE_ID, db_path=db, atg=FakeATG(full))
+
+    # Retry: ei pitäisi löytää mitään korjattavaa
+    stats = retry_incomplete_results(db_path=db, lookback_days=7, atg=FakeATG(full))
+    assert stats["races_checked"] == 0
+    assert stats["races_updated"] == 0
+
+
+def test_retry_incomplete_results_lookback_filter(tmp_path, monkeypatch):
+    """Race vanhempi kuin lookback_days → ei haeta uudelleen."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+    partial = _build_partial_results_race(RACE_ID, n_runners=5, n_with_results=2)
+    fetch_daily_races(date(2026, 4, 27), db_path=db, atg=FakeATG(partial))
+    fetch_results(RACE_ID, db_path=db, atg=FakeATG(partial))
+
+    # Lukitse "tämän päivän" date kauas tulevaisuuteen → race on >7pv vanha
+    fixed = datetime(2026, 5, 20, 4, 30, tzinfo=scheduler_mod.ATG_TZ)
+
+    class _DT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+
+    monkeypatch.setattr(scheduler_mod, "datetime", _DT)
+    stats = retry_incomplete_results(db_path=db, lookback_days=7, atg=FakeATG(partial))
+    assert stats["races_checked"] == 0  # filtteri sulki racen pois
+
+
+def test_retry_incomplete_results_idempotent(tmp_path):
+    """Toinen retry-ajo samalla täydellä datalla → ei rikkoonnu, ei
+    duplikaatteja result-snapshotteihin (UNIQUE-indeksi suojaa)."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+    partial = _build_partial_results_race(RACE_ID, n_runners=5, n_with_results=2)
+    fetch_daily_races(date(2026, 4, 27), db_path=db, atg=FakeATG(partial))
+    fetch_results(RACE_ID, db_path=db, atg=FakeATG(partial))
+
+    full = _build_partial_results_race(RACE_ID, n_runners=5, n_with_results=5)
+    retry_incomplete_results(db_path=db, lookback_days=7, atg=FakeATG(full))
+    stats2 = retry_incomplete_results(db_path=db, lookback_days=7, atg=FakeATG(full))
+
+    # Toinen ajo: vajaita ei enää jää (kaikki finish_pos asetettu)
+    assert stats2["races_checked"] == 0
+
+    with _session(db) as s:
+        # 5 runneria × 1 result-snapshot = 5 (ei duplikaatteja)
+        assert s.query(OddsSnapshot).filter_by(snapshot_label="result").count() == 5

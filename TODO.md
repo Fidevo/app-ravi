@@ -9,29 +9,6 @@ mutta jotka pitää muistaa. Järjestys = prioriteetti.
 
 ## Datan kattavuus
 
-### 1. Result-haku double-trigger ⚡ tärkeä
-**Ongelma:** `_schedule_results_job` ajaa `fetch_results`:in vain kerran
-`startTime + 30min`. ATG:n `/races/{id}` -vastaus täyttyy kuitenkin
-vaiheittain:
-- T+0…30min: vain `finalOdds` + top-3 sijoitukset, ei `kmTime`-objekteja
-- T+1…2h: kaikki sijoitukset 1-N
-- T+useita tunteja: kaikki `kmTime`-objektit täyttyvät
-
-**Vaikutus:** Pelkän +30min-triggerin tuloksena `kilometer_time_seconds`
-on NULL valtaosalla runnerista, ja `finish_position` puuttuu sijoituksilta
-4+. Empiirinen vahvistus 4/30:n datalle: ennen jälkikäteiskorjausta vain
-108/299 (36 %) runneria sai km-ajan, jälkikäteiskorjauksen jälkeen
-248/299 (83 %).
-
-**Korjaus:** Lisää `_schedule_results_job` ajastamaan KAKSI triggeriä
-per race:
-- T+30min (saa odds + top-3 mahdollisimman tuoreena)
-- T+3h tai T+6h (täydellinen data)
-
-Vaihtoehtoisesti **päivittäinen retry-jobi** joka klo esim. 04:30 käy
-läpi viim. 7 päivän racet joilla on NULL `kilometer_time_seconds`
-tai vajaita `finish_positions` ja yrittää hakea ATG:lta uudelleen.
-
 ### 2. Travsport shoes/sulky takautuva uudelleenajo
 Kun `shoes` ja `sulky`-piirteet lisätään `Runner`-tauluun (ATG:n
 `start.horse.shoes` ja `start.horse.sulky` -kentistä), tarvitaan
@@ -80,6 +57,32 @@ tiedostoon. Jos halutaan keskitetty loki: lisää nämä loggerit
 ---
 
 ## Tehty
+
+### ✅ #1. Result-haku double-trigger — TEHTY päivittäisellä retry-jobilla (4.5.2026)
+Ratkaisu: hybridi joka säilyttää nykyisen T+30min-triggerin (nopea
+ensimmäinen veto, saa odds + top-3 mahdollisimman tuoreena) ja lisää
+päivittäisen `retry_incomplete_results`-cron-jobin klo 04:30 Stockholm-
+aikaa. Cron etsii viim. 7 päivän racet joilla on NULL `finish_position`
+tai NULL `kilometer_time_seconds` ja kutsuu fetch_resultsin jokaiselle.
+
+**Empiirinen tulos** (4.5.2026 ekassa ajossa): 191 racea käytiin läpi
+193 sekunnissa, 1039 → 936 vajaata runneria (-103 parannettu, ~10 %).
+Loput aukot ovat lähinnä galoppi-radat (kmTime ei eksistoi ATG:ssa,
+ratkeaa TODO #3:lla) ja oikeasti maaliin tulematta jääneet runnerit
+(laukat, scratchit — normaalia ravidatan luonnetta).
+
+**Toteutus:**
+- `src/data/scheduler.py:retry_incomplete_results(db_path, lookback_days=7)`
+- Cron-ajastus run_forever:ssä `CronTrigger(hour=4, minute=30, timezone=ATG_TZ)`
+- CLI manuaalitestiin: `python -m src.data.scheduler retry-incomplete --lookback 7`
+- 4 uutta pytestiä (kaikki vihreänä, 37/37 läpi)
+
+**Vaihtoehto T+30min + T+6h hylättiin koska:**
+- 4/30-data: jopa 3 vrk:n päästä Åby L3/Boden L2 olivat 35 % NULL → kiinteä
+  T+6h ei riitä
+- N×race-jobit raskaampia kuin yksi cron-ajo
+- Cron-jobi tappaa myös harvinaiset "ATG täydentää useita päiviä myöhemmin"
+  -tapaukset
 
 ### ✅ #4. Auto-restart kaatumisen jälkeen — TEHTY systemd:llä Hetzner-deployssa (4.5.2026)
 Toteutettu `/etc/systemd/system/ravit-edge.service` -yksikössä:
