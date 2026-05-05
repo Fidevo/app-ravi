@@ -24,6 +24,7 @@ Käyttö:
   python -m src.data.scheduler run-forever
   python -m src.data.scheduler fetch-results --race-id RACE_ID
   python -m src.data.scheduler retry-incomplete [--lookback 7]
+  python -m src.data.scheduler refresh-day-runners [--date YYYY-MM-DD]
 
 Production-deployment:
   systemd: ks. README "Scheduler-deploy" -osio
@@ -486,9 +487,11 @@ def fetch_daily_races(
         "runners_inserted": 0,
         "runners_updated": 0,
         "errors": [],
+        "first_race_start_utc": None,  # päivän aikaisin SE-lähtö, refresh-jobin ankkuri
     }
     # Kerää uniikki horse_id:t Travsport-hakua varten
     horse_ids_seen: set[str] = set()
+    earliest_start_dt: datetime | None = None
     try:
         cal = client.get_calendar_day(target)
         with Session_() as session:
@@ -517,8 +520,17 @@ def fetch_daily_races(
                         # Snapshot-jobit ajastetaan vain jos scheduler
                         # annettu (run_forever-konteksti). run_once ei
                         # ajasta - sen scope päättyy funktion palatessa.
+                        # Seuraa aikaisinta SE-lähtöä — käytetään refresh-
+                        # jobin ankkurina (1. lähdön - 10min hetkellä shoes/
+                        # sulky/jne. on jo lukittu, fetch_daily_races
+                        # uudelleenajo täyttää lopulliset arvot).
+                        race_start_dt = _parse_atg_datetime(race.get("startTime"))
+                        if race_start_dt is not None:
+                            if earliest_start_dt is None or race_start_dt < earliest_start_dt:
+                                earliest_start_dt = race_start_dt
+
                         if scheduler is not None:
-                            start_dt = _parse_atg_datetime(race.get("startTime"))
+                            start_dt = race_start_dt
                             if start_dt is not None:
                                 try:
                                     n_snap = schedule_odds_snapshots(
@@ -580,6 +592,9 @@ def fetch_daily_races(
     finally:
         if own_client:
             client.close()
+
+    if earliest_start_dt is not None:
+        stats["first_race_start_utc"] = earliest_start_dt
 
     logger.info(
         "fetch_daily_races: %d races, +%d new, ~%d upd, %d errors",
@@ -885,6 +900,70 @@ def retry_incomplete_results(
     return stats
 
 
+def refresh_day_runners(
+    target_date: date | None = None,
+    db_path: str = DB_PATH,
+    atg: ATGClient | None = None,
+) -> dict:
+    """Hae päivän kalenteri uudelleen ja päivitä runner-tiedot lopulliseksi.
+
+    Tarkoitus: Ruotsin raviurheilussa kengitys- (barfota) ja kärry-
+    (sulky) tiedot lukitaan 15min ennen päivän 1. lähdön starttia
+    (Travsport / ATG -konventio). Sitä ennen valmentaja voi vaihtaa
+    varustetta vapaasti, ja klo 03:00 _daily_setup voi saada vajaan/
+    stale-version. Tämä jobi ajetaan dynaamisesti **päivän 1. lähdön
+    startTime - 10min** -hetkellä → 5min varmuusmarginaali lukitusrajaan.
+
+    Käytännössä: kutsuu `fetch_daily_races(target, scheduler=None,
+    travsport=None)` joka ajaa _upsert_runner kaikille starts:lle —
+    shoes/sulky/jne. päivittyy lopulliseen tilaansa. Snapshot- ja
+    result-jobit on jo ajastettu aamuyöllä, EI uudelleen-ajasteta.
+
+    Idempotentti: jos shoes/sulky olivat jo lopulliset 03:00-haussa,
+    refresh ei muuta mitään.
+    """
+    target = target_date or date.today()
+    logger.info("refresh_day_runners: target=%s", target.isoformat())
+    return fetch_daily_races(target, db_path=db_path, atg=atg, scheduler=None, travsport=None)
+
+
+def _schedule_first_race_refresh(
+    scheduler: BlockingScheduler,
+    target_date: date,
+    first_race_start_utc: datetime,
+    db_path: str = DB_PATH,
+) -> int:
+    """Ajasta refresh_day_runners päivän 1. lähdön - 10min hetkellä.
+
+    Returns: 1 jos ajastettiin, 0 jos jo mennyt (esim. iltapäivärestart).
+    """
+    refresh_at = first_race_start_utc - timedelta(minutes=10)
+    if refresh_at < datetime.now(timezone.utc):
+        logger.info(
+            "_schedule_first_race_refresh: target=%s, first race - 10min "
+            "(%s) is in the past, skipping",
+            target_date.isoformat(),
+            refresh_at.isoformat(timespec="minutes"),
+        )
+        return 0
+    scheduler.add_job(
+        refresh_day_runners,
+        trigger=DateTrigger(run_date=refresh_at),
+        args=[target_date, db_path],
+        id=f"refresh_runners_{target_date.isoformat()}",
+        replace_existing=True,
+        misfire_grace_time=300,  # 5min - jos hetken viive
+    )
+    logger.info(
+        "_schedule_first_race_refresh: target=%s, scheduled at %s "
+        "(first race %s - 10min)",
+        target_date.isoformat(),
+        refresh_at.isoformat(timespec="minutes"),
+        first_race_start_utc.isoformat(timespec="minutes"),
+    )
+    return 1
+
+
 def _schedule_results_job(
     scheduler: BlockingScheduler,
     race_id: str,
@@ -1004,17 +1083,24 @@ def _setup_for_date(
         stats = fetch_daily_races(
             target, db_path=db_path, scheduler=scheduler, travsport=travsport
         )
+        # Ajasta refresh-jobi 1. lähdön - 10min hetkellä jotta shoes/sulky
+        # ja muut runner-kentät päivittyvät lukitusrajan jälkeen lopulliseksi.
+        first = stats.get("first_race_start_utc")
+        if first is not None:
+            n_refresh = _schedule_first_race_refresh(scheduler, target, first, db_path)
+            stats["refresh_jobs"] = n_refresh
     except Exception as exc:  # noqa: BLE001
         logger.exception("%s: fetch_daily_races failed for %s", label, target)
         return {"error": str(exc), "target": target.isoformat()}
 
     logger.info(
-        "%s for %s: %d races, %d snapshot jobs, %d result jobs, %d errors",
+        "%s for %s: %d races, %d snapshot jobs, %d result jobs, %d refresh jobs, %d errors",
         label,
         target.isoformat(),
         stats.get("races_processed", 0),
         stats.get("snapshot_jobs", 0),
         stats.get("result_jobs", 0),
+        stats.get("refresh_jobs", 0),
         len(stats.get("errors", [])),
     )
     return stats
@@ -1160,6 +1246,16 @@ def _main() -> None:
         help="Kuinka monta päivää taaksepäin etsitään vajaita raceja (oletus 7)",
     )
 
+    p_refresh = sub.add_parser(
+        "refresh-day-runners",
+        help="Hae päivän kalenteri uudelleen ja päivitä runner-tiedot lopulliseksi "
+             "(shoes/sulky lukitaan 15min ennen päivän 1. lähtöä). "
+             "Pyörii automaattisesti dynaamisella DateTriggerillä.",
+    )
+    p_refresh.add_argument(
+        "--date", help="YYYY-MM-DD (oletus: tänään)",
+    )
+
     args = parser.parse_args()
     migrate(DB_PATH)  # varmista että uudet sarakkeet ovat olemassa
 
@@ -1174,6 +1270,9 @@ def _main() -> None:
         print(capture_odds_snapshot(args.race_id, args.label))
     elif args.cmd == "retry-incomplete":
         print(retry_incomplete_results(lookback_days=args.lookback))
+    elif args.cmd == "refresh-day-runners":
+        target = date.fromisoformat(args.date) if args.date else None
+        print(refresh_day_runners(target))
 
 
 if __name__ == "__main__":

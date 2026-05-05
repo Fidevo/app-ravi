@@ -1034,3 +1034,85 @@ def test_upsert_runner_writes_shoes_sulky(tmp_path):
         r2 = s.query(Runner).filter_by(start_number=2).one()
         assert r2.shoes_front is None
         assert r2.sulky_type is None
+
+
+# ---------------------------------------------------------------------------
+# Dynaaminen refresh-jobi (Ruotsin lukitusraja 15min ennen 1. lähtöä)
+# ---------------------------------------------------------------------------
+
+
+from src.data.scheduler import refresh_day_runners
+
+
+def test_fetch_daily_races_returns_first_race_start_utc(tmp_path):
+    """fetch_daily_races palauttaa stats['first_race_start_utc'] = aikaisin SE-lähtö."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+    stats = fetch_daily_races(date(2026, 4, 27), db_path=db, atg=FakeATG())
+    # SAMPLE_RACE startTime = 2026-04-27T18:00:00 (Stockholm) = 16:00 UTC (CEST)
+    assert stats["first_race_start_utc"] is not None
+    assert stats["first_race_start_utc"].tzinfo is timezone.utc
+    assert stats["first_race_start_utc"].hour == 16  # 18:00 CEST → 16:00 UTC
+
+
+def test_setup_for_date_schedules_refresh_job(monkeypatch):
+    """_setup_for_date kutsuu _schedule_first_race_refresh stats:n perusteella."""
+    sched = MagicMock()
+    captured: list = []
+
+    def fake_fetch_daily_races(target, db_path, scheduler, travsport):
+        # Palauta tunnettu first_race_start_utc tulevaisuuteen
+        future = datetime.now(timezone.utc) + timedelta(hours=4)
+        return {
+            "races_processed": 5,
+            "snapshot_jobs": 20,
+            "result_jobs": 5,
+            "errors": [],
+            "first_race_start_utc": future,
+        }
+
+    monkeypatch.setattr(scheduler_mod, "fetch_daily_races", fake_fetch_daily_races)
+    stats = scheduler_mod._setup_for_date(sched, date(2026, 4, 27), "x.db", "test")
+
+    assert stats.get("refresh_jobs") == 1
+    # Varmista että add_job kutsuttiin refresh_runners_-id:llä
+    job_ids = [c.kwargs["id"] for c in sched.add_job.call_args_list]
+    assert any("refresh_runners_" in jid for jid in job_ids)
+
+
+def test_setup_for_date_skips_refresh_when_first_race_in_past(monkeypatch):
+    """Jos 1. lähdön - 10min on jo mennyt (esim. iltapäivä-restartti), ei ajasteta."""
+    sched = MagicMock()
+
+    def fake_fetch_daily_races(target, db_path, scheduler, travsport):
+        past = datetime.now(timezone.utc) - timedelta(hours=2)
+        return {
+            "races_processed": 5, "snapshot_jobs": 0, "result_jobs": 0,
+            "errors": [], "first_race_start_utc": past,
+        }
+
+    monkeypatch.setattr(scheduler_mod, "fetch_daily_races", fake_fetch_daily_races)
+    stats = scheduler_mod._setup_for_date(sched, date(2026, 4, 27), "x.db", "test")
+
+    assert stats.get("refresh_jobs") == 0
+    # Yksi tarkistus: refresh_runners_ -jobia ei lisätty
+    job_ids = [c.kwargs.get("id", "") for c in sched.add_job.call_args_list]
+    assert not any("refresh_runners_" in jid for jid in job_ids)
+
+
+def test_refresh_day_runners_calls_fetch_daily_without_scheduling(monkeypatch):
+    """refresh_day_runners EI saa kutsua scheduleria/travsportia - vain runner-päivitys."""
+    captured = {}
+
+    def fake_fetch_daily_races(target, db_path, atg=None, scheduler=None, travsport=None):
+        captured["target"] = target
+        captured["scheduler"] = scheduler
+        captured["travsport"] = travsport
+        return {"races_processed": 5}
+
+    monkeypatch.setattr(scheduler_mod, "fetch_daily_races", fake_fetch_daily_races)
+    refresh_day_runners(date(2026, 4, 27), db_path="x.db")
+
+    assert captured["target"] == date(2026, 4, 27)
+    assert captured["scheduler"] is None  # EI uudelleen-ajasteta snapshotteja
+    assert captured["travsport"] is None  # EI uudelleen-haeta horse_starts

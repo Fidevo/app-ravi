@@ -50,6 +50,34 @@ tiedostoon. Jos halutaan keskitetty loki: lisää nämä loggerit
 
 ## Tehty
 
+### ✅ Lukitusraja-refresh-jobi — TEHTY dynaamisella DateTriggerillä (5.5.2026)
+**Konteksti:** Ruotsin raviurheilussa kengitys- (barfota) ja kärry- (sulky)
+tiedot lukitaan **15min ennen päivän 1. lähdön starttia**. Sitä ennen
+valmentaja voi muuttaa varustetta vapaasti. Schedulerin `_daily_setup`
+03:00 saattoi siis saada vajaita/stale shoes/sulky-tietoja koska
+valmentajat eivät vielä olleet päättäneet.
+
+**Toteutus:**
+- `fetch_daily_races` palauttaa nyt `stats["first_race_start_utc"]`
+- `_schedule_first_race_refresh()` ajastaa `refresh_day_runners` jobin
+  DateTriggeriin `first_race_start_utc - 10min` (= 5min varmuusmarginaali
+  lukitusrajaan)
+- `refresh_day_runners()` kutsuu `fetch_daily_races(scheduler=None,
+  travsport=None)` — pelkkä runner-päivitys, EI uudelleen-ajasta
+  snapshot/result-jobeja (jotka ovat jo aamuyöllä ajastettu)
+- `_setup_for_date` kutsuu refresh-ajastuksen automaattisesti
+- CLI manuaalitestiin: `python -m src.data.scheduler refresh-day-runners --date YYYY-MM-DD`
+
+**Huomioi myös:**
+- Talvikielto 1.12.-28.2.: ATG ei palauta barfota-tietoa → `_shoes_sulky_fields`
+  palauttaa kaikki Noneksi (jo nykytoiminta, ei muutosta tarvita)
+- 2-vuotiaat: kengät pakolliset ympäri vuoden — ATG raportoi `shoes=true`
+  molempiin (jo nykytoiminta)
+- Tulee mahdollisesti feature engineering -vaiheessa: `barfota_law_active`
+  (BOOL kun joulu-helmi) ja `horse_age` -piirteet
+
+**4 uutta pytestiä** (46/46 läpi).
+
 ### ✅ #2. Shoes/sulky -piirteet ATG:n start.horse-objektista — TEHTY (5.5.2026)
 Lisätty 6 uutta saraketta `runners`-tauluun:
 - `shoes_front`, `shoes_back` (BOOL): kenkiä etu/taka (`barfota`-taktiikka)
