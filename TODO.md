@@ -7,14 +7,6 @@
 Tunnetut, dokumentoidut tehtävät joita EI tehty Hetzner-MVP-deploymentissa
 mutta jotka pitää muistaa. Järjestys = prioriteetti.
 
-## Datan kattavuus
-
-### 2. Travsport shoes/sulky takautuva uudelleenajo
-Kun `shoes` ja `sulky`-piirteet lisätään `Runner`-tauluun (ATG:n
-`start.horse.shoes` ja `start.horse.sulky` -kentistä), tarvitaan
-kertaluonteinen takautuva uudelleenajo joka kerää nämä jo olemassa
-oleville runnereille (kaikki `runners` joilla `race_date` viim. 30pv).
-
 ## Datan suodatus
 
 ### 3. Galoppirata vs ravirata -erottelu
@@ -57,6 +49,31 @@ tiedostoon. Jos halutaan keskitetty loki: lisää nämä loggerit
 ---
 
 ## Tehty
+
+### ✅ #2. Shoes/sulky -piirteet ATG:n start.horse-objektista — TEHTY (5.5.2026)
+Lisätty 6 uutta saraketta `runners`-tauluun:
+- `shoes_front`, `shoes_back` (BOOL): kenkiä etu/taka (`barfota`-taktiikka)
+- `shoes_changed_front`, `shoes_changed_back` (BOOL): muutos vs edellinen startti
+- `sulky_type` (TEXT): `VA`=Vanlig (Standard), `AM`=Amerikansk
+- `sulky_changed` (BOOL): tyyppi tai väri muutettu
+
+**Toteutus:** `_shoes_sulky_fields(horse)`-helper `scheduler.py`:ssa,
+kutsuttu `_upsert_runner`:ssa. Käsittelee oikein puuttuvat `changed`-
+kentät (havaittu empiirisesti useissa hevosissa) ja `reported=false` -tilan.
+Parsiminen tapahtuu joka `_upsert_runner`-kutsussa → seuraava `_initial_setup`
+täyttää tämän päivän kentät automaattisesti.
+
+**Empiirinen tulos** (5.5.2026 ekassa ajossa, 379 runneria):
+- 100% katselmus: kaikki 379 runneria saivat shoes + sulky
+- 35% kengittä edestä, 36% kengittä takaa (yleinen barfota-taktiikka)
+- 22% vaihtoi kenkiä vs edellinen startti, 12% vaihtoi sulkya
+- Sulky-jakauma: VA 87%, AM 13%
+
+**Takautuva uudelleenajo:** vanhojen päivien (4/27 → 5/4) shoes/sulky
+populoitu ajamalla `run-once --date YYYY-MM-DD` kullekin päivälle erikseen.
+
+**5 uutta pytestiä** kattavat: täysi data, puuttuvat changed-kentät,
+reported=false, kokonaan puuttuvat shoes/sulky, end-to-end runner-upsert.
 
 ### ✅ #1. Result-haku double-trigger — TEHTY päivittäisellä retry-jobilla (4.5.2026)
 Ratkaisu: hybridi joka säilyttää nykyisen T+30min-triggerin (nopea

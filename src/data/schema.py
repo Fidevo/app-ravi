@@ -113,6 +113,17 @@ class Runner(Base):
     atg_trainer_win_pct = Column(Float)
     atg_trainer_earnings = Column(Integer)
 
+    # Kengät ja sulky (start.horse.shoes / start.horse.sulky).
+    # NULL kun ATG ei ole raportoinut (esim. ennen lähtökortin valmistumista).
+    # changed_*: tosi = vaihdettu vs hevosen edellinen startti (signaali
+    # valmentajan tarkoituksellisesta muutoksesta).
+    shoes_front = Column(Boolean)
+    shoes_back = Column(Boolean)
+    shoes_changed_front = Column(Boolean)
+    shoes_changed_back = Column(Boolean)
+    sulky_type = Column(String)        # esim "VA" (Vanlig), "AM" (Amerikansk)
+    sulky_changed = Column(Boolean)    # type tai colour muuttunut
+
     race = relationship("Race", back_populates="runners")
 
 
@@ -208,6 +219,13 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("atg_trainer_starts", "INTEGER"),
         ("atg_trainer_win_pct", "REAL"),
         ("atg_trainer_earnings", "INTEGER"),
+        # TODO #2: shoes/sulky (5.5.2026)
+        ("shoes_front", "BOOLEAN"),
+        ("shoes_back", "BOOLEAN"),
+        ("shoes_changed_front", "BOOLEAN"),
+        ("shoes_changed_back", "BOOLEAN"),
+        ("sulky_type", "TEXT"),
+        ("sulky_changed", "BOOLEAN"),
     ],
     "odds_snapshots": [
         ("raw_win_odds", "REAL"),

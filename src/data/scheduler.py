@@ -243,6 +243,54 @@ def _person_aggregates(person: dict | None, race: dict, prefix: str) -> dict:
     }
 
 
+def _shoes_sulky_fields(horse: dict) -> dict:
+    """Poimi kengät- ja sulky-tiedot ATG:n start.horse-objektista.
+
+    ATG-rakenne (havaittu 5.5.2026):
+        horse.shoes = {
+            "reported": bool,
+            "front": {"hasShoe": bool, "changed": bool},  # changed voi puuttua
+            "back":  {"hasShoe": bool, "changed": bool},  # sama
+        }
+        horse.sulky = {
+            "reported": bool,
+            "type":   {"code": "VA"|"AM"|..., "changed": bool},
+            "colour": {"code": "GU"|..., "changed": bool},
+        }
+
+    Jos `reported` on false (tai shoes/sulky kokonaan puuttuu), kaikki
+    palautetaan Noneksi - emme keksi arvoja kun ATG itse sanoo että
+    tieto ei ole vielä saatavilla. `changed`-kenttä voi myös puuttua
+    yksittäisistä starteista jolloin se on None vaikka shoes.reported
+    on true (näimme tämän empiirisesti useissa hevosissa).
+    """
+    shoes = horse.get("shoes") or {}
+    sulky = horse.get("sulky") or {}
+    shoes_reported = bool(shoes.get("reported"))
+    sulky_reported = bool(sulky.get("reported"))
+    front = shoes.get("front") or {}
+    back = shoes.get("back") or {}
+    sulky_type = sulky.get("type") or {}
+    sulky_colour = sulky.get("colour") or {}
+
+    # changed voi puuttua → vain True/False/None (ei kovakooda False)
+    type_changed = sulky_type.get("changed")
+    colour_changed = sulky_colour.get("changed")
+    if type_changed is None and colour_changed is None:
+        sulky_changed: bool | None = None
+    else:
+        sulky_changed = bool(type_changed) or bool(colour_changed)
+
+    return {
+        "shoes_front": front.get("hasShoe") if shoes_reported else None,
+        "shoes_back": back.get("hasShoe") if shoes_reported else None,
+        "shoes_changed_front": front.get("changed") if shoes_reported else None,
+        "shoes_changed_back": back.get("changed") if shoes_reported else None,
+        "sulky_type": sulky_type.get("code") if sulky_reported else None,
+        "sulky_changed": sulky_changed if sulky_reported else None,
+    }
+
+
 def _odds_to_decimal(raw: Any) -> float | None:
     """ATG-kerroin desimaalimuotoon.
 
@@ -342,6 +390,8 @@ def _upsert_runner(
     for k, v in _person_aggregates(start.get("driver"), race, "atg_driver").items():
         setattr(obj, k, v)
     for k, v in _person_aggregates(horse.get("trainer"), race, "atg_trainer").items():
+        setattr(obj, k, v)
+    for k, v in _shoes_sulky_fields(horse).items():
         setattr(obj, k, v)
     return (inserted, not inserted)
 

@@ -40,7 +40,6 @@ joka on minimi mielekkääseen ML-mallin treenaukseen.
 **Tehdään ensimmäisen 1-2 viikon aikana ([TODO.md](TODO.md) viittauksilla):**
 
 - TODO #3: Galoppirata-suodatus (Bro Park, Jägersro Galopp pois)
-- TODO #2: Shoes/sulky-piirteiden lisäys + takautuva Travsport-uudelleenajo
 
 **Tehdään loput viikot 2-5:**
 

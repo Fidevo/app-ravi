@@ -858,9 +858,11 @@ def test_retry_incomplete_results_picks_up_null_finish_position(tmp_path):
         ).count()
         assert n_with_finish == 3  # alkutila
 
-    # Retry: ATG palauttaa nyt kaikki 10 paikkaa (simuloi T+useita tunteja)
+    # Retry: ATG palauttaa nyt kaikki 10 paikkaa (simuloi T+useita tunteja).
+    # lookback iso jotta testifixture-päivä (2026-04-27) on aina ikkunassa
+    # vaikka kalenteriaika juoksee eteenpäin testin elinkaaren aikana.
     full = _build_partial_results_race(RACE_ID, n_runners=10, n_with_results=10)
-    stats = retry_incomplete_results(db_path=db, lookback_days=7, atg=FakeATG(full))
+    stats = retry_incomplete_results(db_path=db, lookback_days=3650, atg=FakeATG(full))
 
     assert stats["races_checked"] == 1  # vain RACE_ID oli vajaa
     assert stats["races_updated"] == 1
@@ -882,7 +884,7 @@ def test_retry_incomplete_results_skips_complete_races(tmp_path):
     fetch_results(RACE_ID, db_path=db, atg=FakeATG(full))
 
     # Retry: ei pitäisi löytää mitään korjattavaa
-    stats = retry_incomplete_results(db_path=db, lookback_days=7, atg=FakeATG(full))
+    stats = retry_incomplete_results(db_path=db, lookback_days=3650, atg=FakeATG(full))
     assert stats["races_checked"] == 0
     assert stats["races_updated"] == 0
 
@@ -918,8 +920,8 @@ def test_retry_incomplete_results_idempotent(tmp_path):
     fetch_results(RACE_ID, db_path=db, atg=FakeATG(partial))
 
     full = _build_partial_results_race(RACE_ID, n_runners=5, n_with_results=5)
-    retry_incomplete_results(db_path=db, lookback_days=7, atg=FakeATG(full))
-    stats2 = retry_incomplete_results(db_path=db, lookback_days=7, atg=FakeATG(full))
+    retry_incomplete_results(db_path=db, lookback_days=3650, atg=FakeATG(full))
+    stats2 = retry_incomplete_results(db_path=db, lookback_days=3650, atg=FakeATG(full))
 
     # Toinen ajo: vajaita ei enää jää (kaikki finish_pos asetettu)
     assert stats2["races_checked"] == 0
@@ -927,3 +929,108 @@ def test_retry_incomplete_results_idempotent(tmp_path):
     with _session(db) as s:
         # 5 runneria × 1 result-snapshot = 5 (ei duplikaatteja)
         assert s.query(OddsSnapshot).filter_by(snapshot_label="result").count() == 5
+
+
+# ---------------------------------------------------------------------------
+# TODO #2: shoes/sulky-piirteet
+# ---------------------------------------------------------------------------
+
+
+from src.data.scheduler import _shoes_sulky_fields
+
+
+def test_shoes_sulky_fields_full_data():
+    """Tyypillinen ATG-rakenne kaikilla kentillä (Yalla Yalla -tyylinen)."""
+    horse = {
+        "shoes": {
+            "reported": True,
+            "front": {"hasShoe": True, "changed": False},
+            "back": {"hasShoe": False, "changed": True},
+        },
+        "sulky": {
+            "reported": True,
+            "type": {"code": "AM", "changed": True},
+            "colour": {"code": "BL", "changed": False},
+        },
+    }
+    f = _shoes_sulky_fields(horse)
+    assert f["shoes_front"] is True
+    assert f["shoes_back"] is False
+    assert f["shoes_changed_front"] is False
+    assert f["shoes_changed_back"] is True
+    assert f["sulky_type"] == "AM"
+    assert f["sulky_changed"] is True  # type.changed=True
+
+
+def test_shoes_sulky_fields_missing_changed():
+    """Macabre/Lady Gaagaa -tyylinen: front.changed ja back.changed puuttuvat."""
+    horse = {
+        "shoes": {
+            "reported": True,
+            "front": {"hasShoe": True},
+            "back": {"hasShoe": True},
+        },
+        "sulky": {
+            "reported": True,
+            "type": {"code": "VA", "changed": False},
+            "colour": {"code": "GU", "changed": False},
+        },
+    }
+    f = _shoes_sulky_fields(horse)
+    assert f["shoes_front"] is True
+    assert f["shoes_back"] is True
+    assert f["shoes_changed_front"] is None  # ATG ei kerro
+    assert f["shoes_changed_back"] is None
+    assert f["sulky_type"] == "VA"
+    assert f["sulky_changed"] is False  # molemmat changed=False
+
+
+def test_shoes_sulky_fields_not_reported():
+    """reported=false → kaikki None (ei keksitä arvoja)."""
+    horse = {
+        "shoes": {"reported": False, "front": {"hasShoe": True}, "back": {"hasShoe": True}},
+        "sulky": {"reported": False, "type": {"code": "VA"}, "colour": {"code": "GU"}},
+    }
+    f = _shoes_sulky_fields(horse)
+    assert all(v is None for v in f.values())
+
+
+def test_shoes_sulky_fields_completely_missing():
+    """horse.shoes ja horse.sulky kokonaan puuttuvat → kaikki None."""
+    f = _shoes_sulky_fields({})
+    assert all(v is None for v in f.values())
+
+
+def test_upsert_runner_writes_shoes_sulky(tmp_path):
+    """End-to-end: fetch_daily_races kirjoittaa shoes/sulky-kentät DB:hen."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+    race = copy.deepcopy(SAMPLE_RACE)
+    # Lisää shoes/sulky #1 hevoselle (täysi data)
+    race["starts"][0]["horse"]["shoes"] = {
+        "reported": True,
+        "front": {"hasShoe": True, "changed": False},
+        "back": {"hasShoe": False, "changed": True},
+    }
+    race["starts"][0]["horse"]["sulky"] = {
+        "reported": True,
+        "type": {"code": "AM", "changed": True},
+        "colour": {"code": "GU", "changed": False},
+    }
+    # #2 hevonen: shoes ei raportoitu
+    race["starts"][1]["horse"]["shoes"] = {"reported": False}
+    # sulky kokonaan puuttuu
+
+    fetch_daily_races(date(2026, 4, 27), db_path=db, atg=FakeATG(race))
+
+    with _session(db) as s:
+        r1 = s.query(Runner).filter_by(start_number=1).one()
+        assert r1.shoes_front is True
+        assert r1.shoes_back is False
+        assert r1.shoes_changed_back is True
+        assert r1.sulky_type == "AM"
+        assert r1.sulky_changed is True
+
+        r2 = s.query(Runner).filter_by(start_number=2).one()
+        assert r2.shoes_front is None
+        assert r2.sulky_type is None
