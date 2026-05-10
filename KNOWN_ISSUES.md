@@ -78,6 +78,27 @@ Mahdollisesti tarkoituksellinen design — ei relevantti ennen V6.
 
 ---
 
+## Avoimet — K1-pollutoidut piirteet (aktivoidaan 2026-09)
+
+### #11 · K1-pollutoidut ATG-piirteet pois FEATURE_COLS:ista
+
+Seuraavat piirteet on väliaikaisesti kommentoitu pois `ranker.py`:n `FEATURE_COLS`:ista
+koska ATG päivitti ne post-race (K1-vuoto ennen 2026-05-10). Backfill korjasi
+vain lifetime-kentät — driver/trainer/current-year-kentät eivät ole korjattavissa
+koska pre-race-arvojen nimittäjää ei tunneta.
+
+Aktivoidaan takaisin kun >= 600 puhdasta lähtöä kerätty K1-korjauksen jälkeen
+(n. 2026-09-01):
+- `atg_current_year_win_rate`
+- `atg_driver_win_pct`
+- `atg_driver_starts`
+- `atg_trainer_win_pct`
+- `atg_trainer_starts`
+
+**TODO:** Kommentoi irti 2026-09-01 (tai kun DB:ssä on >= 600 lähtöä post-2026-05-10).
+
+---
+
 ## Korjattu
 
 | # | Kuvaus | Korjattu |
@@ -86,3 +107,7 @@ Mahdollisesti tarkoituksellinen design — ei relevantti ennen V6.
 | **#5** | `driver_trainer_features` MultiIndex-merge kaatui tai räjäytti rivimäärän | 10.5.2026 |
 | **#6** | `backtest.py` `if False` — kvartti-labeli ei koskaan toiminut | 10.5.2026 |
 | **#8** | `track_horse_wins_cum` globaali `shift(1)` — data leakage yli ryhmärajojen | 10.5.2026 |
+| **K1** | `fetch_results` kirjoitti post-race ATG-aggregaatit — backfill korjasi 3 589 runner-riviä | 10.5.2026 |
+| **M1** | `_upsert_race` + `_upsert_runner` ylikirjoittivat olemassa olevat arvot Nonella | 10.5.2026 |
+| **B1** | `race_setup_features`: Travsport-trackCodeit eivät matchanneet ATG-ratanimiä | 10.5.2026 |
+| **B2** | `form_features`: segmentoidut piirteet olivat 100 % NaN (start_method/distance puuttuivat runners:ista) | 10.5.2026 |
