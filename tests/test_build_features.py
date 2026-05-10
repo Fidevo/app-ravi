@@ -19,6 +19,7 @@ from src.features.build_features import (
     build_feature_matrix,
     derived_features,
     driver_trainer_features,
+    fill_finish_positions,
     form_features,
     race_setup_features,
 )
@@ -668,3 +669,148 @@ class TestFormFeaturesWithHorseStarts:
         assert not pd.isna(result_with.iloc[0]["form_avg_finish_5"])
         # (1+3+2)/3 = 2.0
         assert result_with.iloc[0]["form_avg_finish_5"] == pytest.approx(2.0)
+
+
+# ---------------------------------------------------------------------------
+# Testit fill_finish_positions() -funktiolle
+# ---------------------------------------------------------------------------
+
+def _race_df(*rows: dict) -> pd.DataFrame:
+    """Apufunktio: luo minimaalisen runners-DataFrame fill_finish_positions-testeille."""
+    defaults: dict = {
+        "race_id": "race_1",
+        "horse_id": 1,
+        "finish_position": None,
+        "kilometer_time_seconds": None,
+    }
+    return pd.DataFrame([{**defaults, **r} for r in rows])
+
+
+class TestFillFinishPositions:
+    """Testit fill_finish_positions()-funktiolle.
+
+    ATG raportoi sijoitukset vain top 6-8 hevoselle. Loput hevoset jotka
+    ajoivat (on km_aika) tai vetäytyivät (ei km_aikaa) saavat NULL:n.
+    Tämä funktio täyttää puuttuvat sijoitukset ennen LambdaRank-treenausta.
+    """
+
+    def test_official_positions_unchanged(self):
+        """Viralliset sijoitukset (1–N) eivät muutu."""
+        df = _race_df(
+            {"horse_id": 1, "finish_position": 1, "kilometer_time_seconds": 75.0},
+            {"horse_id": 2, "finish_position": 2, "kilometer_time_seconds": 76.0},
+            {"horse_id": 3, "finish_position": 3, "kilometer_time_seconds": 77.0},
+        )
+        result = fill_finish_positions(df)
+        assert list(result.sort_values("horse_id")["finish_position"]) == [1, 2, 3]
+
+    def test_unplaced_runners_get_positions_after_official(self):
+        """Hevoset joilla on km_aika mutta ei sijoitusta saavat sijoitukset
+        virallisen viimeisen sijoituksen jälkeen."""
+        df = _race_df(
+            {"horse_id": 1, "finish_position": 1, "kilometer_time_seconds": 75.0},
+            {"horse_id": 2, "finish_position": 2, "kilometer_time_seconds": 76.0},
+            {"horse_id": 3, "finish_position": None, "kilometer_time_seconds": 78.0},  # ajoi, ei sijaa
+            {"horse_id": 4, "finish_position": None, "kilometer_time_seconds": 80.0},  # ajoi, ei sijaa
+        )
+        result = fill_finish_positions(df)
+        positions = dict(zip(result["horse_id"], result["finish_position"]))
+        assert positions[1] == 1
+        assert positions[2] == 2
+        # Molemmat unplaced saavat sijoitukset 3 ja 4
+        assert positions[3] == 3   # nopeampi (78.0) saa paremman sijoituksen
+        assert positions[4] == 4   # hitaampi (80.0) saa huonomman
+
+    def test_unplaced_ordered_by_km_time_ascending(self):
+        """Unplaced-hevoset järjestetään km_ajan mukaan: nopein saa parhaan sijoituksen."""
+        df = _race_df(
+            {"horse_id": 1, "finish_position": 1, "kilometer_time_seconds": 75.0},
+            # Nämä kolme ajoivat eri nopeuksilla, hitain ensin datassa
+            {"horse_id": 4, "finish_position": None, "kilometer_time_seconds": 85.0},  # hitain
+            {"horse_id": 2, "finish_position": None, "kilometer_time_seconds": 77.0},  # nopein
+            {"horse_id": 3, "finish_position": None, "kilometer_time_seconds": 81.0},  # keski
+        )
+        result = fill_finish_positions(df)
+        positions = dict(zip(result["horse_id"], result["finish_position"]))
+        assert positions[2] == 2   # nopein (77.0) → 2. sija
+        assert positions[3] == 3   # keski (81.0) → 3. sija
+        assert positions[4] == 4   # hitain (85.0) → 4. sija
+
+    def test_withdrawn_get_last_positions(self):
+        """Vetäytyneet (ei km_aikaa eikä sijoitusta) saavat viimeiset sijoitukset."""
+        df = _race_df(
+            {"horse_id": 1, "finish_position": 1, "kilometer_time_seconds": 75.0},
+            {"horse_id": 2, "finish_position": None, "kilometer_time_seconds": 80.0},  # ajoi
+            {"horse_id": 3, "finish_position": None, "kilometer_time_seconds": None},  # vetäytyi
+            {"horse_id": 4, "finish_position": None, "kilometer_time_seconds": None},  # vetäytyi
+        )
+        result = fill_finish_positions(df)
+        positions = dict(zip(result["horse_id"], result["finish_position"]))
+        assert positions[1] == 1
+        assert positions[2] == 2   # ajoi → 2. sija
+        # Vetäytyneet saavat sijat 3 ja 4 (ei km_aikaa → viimeiset)
+        assert positions[3] in (3, 4)
+        assert positions[4] in (3, 4)
+        assert positions[3] != positions[4]   # eri sijoitukset
+
+    def test_future_race_all_null_unchanged(self):
+        """Lähdöt joissa KAIKKI sijoitukset ovat NULL (tulevat lähdöt)
+        jätetään koskemattomiksi — niitä ei ole ajettu."""
+        df = _race_df(
+            {"horse_id": 1, "finish_position": None, "kilometer_time_seconds": None},
+            {"horse_id": 2, "finish_position": None, "kilometer_time_seconds": None},
+            {"horse_id": 3, "finish_position": None, "kilometer_time_seconds": None},
+        )
+        result = fill_finish_positions(df)
+        assert result["finish_position"].isna().all()
+
+    def test_row_count_unchanged(self):
+        """fill_finish_positions() ei lisää eikä poista rivejä."""
+        df = _race_df(
+            {"horse_id": 1, "finish_position": 1, "kilometer_time_seconds": 75.0},
+            {"horse_id": 2, "finish_position": 2, "kilometer_time_seconds": 76.0},
+            {"horse_id": 3, "finish_position": None, "kilometer_time_seconds": 79.0},
+            {"horse_id": 4, "finish_position": None, "kilometer_time_seconds": None},
+        )
+        result = fill_finish_positions(df)
+        assert len(result) == len(df)
+
+    def test_no_null_finish_positions_remain_for_completed_race(self):
+        """Kun lähtö on ajettu (osa hevosista sai sijoituksen), kaikki
+        NULL-sijoitukset täytetään — ei yhtään NULL:ia jälkeen."""
+        df = _race_df(
+            {"horse_id": 1, "finish_position": 1, "kilometer_time_seconds": 75.0},
+            {"horse_id": 2, "finish_position": None, "kilometer_time_seconds": 80.0},
+            {"horse_id": 3, "finish_position": None, "kilometer_time_seconds": None},
+        )
+        result = fill_finish_positions(df)
+        assert result["finish_position"].notna().all()
+
+    def test_multiple_races_independent(self):
+        """Jokainen lähtö käsitellään itsenäisesti — sijoitukset alkavat 1:stä
+        per lähtö, eivät jatku edellisestä lähdöstä."""
+        df = pd.DataFrame([
+            {"race_id": "A", "horse_id": 1, "finish_position": 1,    "kilometer_time_seconds": 75.0},
+            {"race_id": "A", "horse_id": 2, "finish_position": None,  "kilometer_time_seconds": 80.0},
+            {"race_id": "B", "horse_id": 3, "finish_position": 1,    "kilometer_time_seconds": 76.0},
+            {"race_id": "B", "horse_id": 4, "finish_position": None,  "kilometer_time_seconds": 82.0},
+        ])
+        result = fill_finish_positions(df)
+        race_a = result[result["race_id"] == "A"].sort_values("horse_id")
+        race_b = result[result["race_id"] == "B"].sort_values("horse_id")
+        # Molemmissa lähdöissä: viralliset pysyvät, unplaced saa seuraavan
+        assert list(race_a["finish_position"]) == [1, 2]
+        assert list(race_b["finish_position"]) == [1, 2]
+
+    def test_all_positions_unique_within_race(self):
+        """Jokainen hevonen saa uniikin sijoituksen — ei kahta samaa sijaa."""
+        df = _race_df(
+            {"horse_id": 1, "finish_position": 1,   "kilometer_time_seconds": 75.0},
+            {"horse_id": 2, "finish_position": 2,   "kilometer_time_seconds": 76.0},
+            {"horse_id": 3, "finish_position": None, "kilometer_time_seconds": 78.0},
+            {"horse_id": 4, "finish_position": None, "kilometer_time_seconds": 82.0},
+            {"horse_id": 5, "finish_position": None, "kilometer_time_seconds": None},
+        )
+        result = fill_finish_positions(df)
+        positions = result["finish_position"].tolist()
+        assert len(positions) == len(set(positions))   # kaikki uniikkeja

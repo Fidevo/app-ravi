@@ -293,6 +293,73 @@ def derived_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------
+# 5. Treeniesiesimerkkien esikäsittely — puuttuvien sijoitusten täyttö
+# ----------------------------------------------------------------------
+
+def fill_finish_positions(runners: pd.DataFrame) -> pd.DataFrame:
+    """Täyttää puuttuvat finish_position-arvot ennen mallin treenausta.
+
+    ATG raportoi sijoitukset vain top 6–8 hevoselle per lähtö. Hevoset jotka
+    ajoivat mutta eivät sijoittuneet saavat NULL:n finish_position-sarakkeeseen
+    vaikka heillä on kilometer_time_seconds. Tämä tekee LambdaRank-treenauksesta
+    epäluotettavaa (vajaat järjestykset).
+
+    Täyttölogiikka per lähtö (race_id):
+      1. Viralliset sijoitukset (1–N) säilytetään muuttumattomina.
+      2. Hevoset jotka ajoivat (kilometer_time_seconds IS NOT NULL, finish=NULL):
+         järjestetään km-ajan mukaan nousevasti (nopein saa parhaan sijoituksen)
+         ja sijoitetaan heti virallisten jälkeen (N+1, N+2, ...).
+      3. Vetäytyneet/peruuntuneet (sekä finish että km_time NULL):
+         sijoitetaan viimeisiksi järjestyksessä (km_aika ei tiedossa).
+      4. Lähdöt joissa KAIKKI sijoitukset ovat NULL (tulevat lähdöt) jätetään
+         koskemattomiksi.
+
+    HUOM: Kutsu tätä vain koulutusaineistolla. Ennustamisessa (live-data)
+    finish_position ei ole koskaan tiedossa — siellä tätä ei tarvita.
+
+    Args:
+        runners: DataFrame jossa on sarakkeet race_id, finish_position,
+                 kilometer_time_seconds. Muut sarakkeet läpäistään sellaisinaan.
+
+    Returns:
+        Kopio DataFramesta jossa finish_position täytetty kaikille riveille
+        joissa lähtö on ajettu. Rivimäärä ei muutu.
+    """
+    # Kopio jota muokataan suoraan .loc:lla — vältetään groupby().apply()
+    # -sarakkeen katoamisongelma eri pandas-versioissa.
+    df = runners.copy()
+
+    for _race_id, group in df.groupby("race_id"):
+        # Jos kaikki NULL → lähtöä ei ole ajettu vielä, ei muutoksia
+        if group["finish_position"].isna().all():
+            continue
+
+        next_pos = int(group["finish_position"].max()) + 1
+
+        # Ajoi mutta ei sijoitusta: järjestä km_ajan mukaan (nopein ensin)
+        ran_mask = (
+            group["finish_position"].isna()
+            & group["kilometer_time_seconds"].notna()
+        )
+        if ran_mask.any():
+            for idx in group[ran_mask].sort_values("kilometer_time_seconds").index:
+                df.loc[idx, "finish_position"] = next_pos
+                next_pos += 1
+
+        # Vetäytyneet (ei km_aikaa eikä sijoitusta): viimeiset
+        withdrawn_mask = (
+            group["finish_position"].isna()
+            & group["kilometer_time_seconds"].isna()
+        )
+        if withdrawn_mask.any():
+            for idx in group[withdrawn_mask].index:
+                df.loc[idx, "finish_position"] = next_pos
+                next_pos += 1
+
+    return df
+
+
+# ----------------------------------------------------------------------
 # Yhdistäjä
 # ----------------------------------------------------------------------
 
