@@ -1,154 +1,169 @@
 # Ravit Edge — Roadmap
 
-## Missä olemme nyt (10.5.2026 — Vaihe 2, viikko 2)
+## Nykytila (10.5.2026 — Vaihe 2 valmis, Vaihe 3 voidaan aloittaa)
 
-Datankeräysjärjestelmä on pyörinyt tuotannossa 4.5.2026 alkaen.
+Datankeräys on pyörinyt tuotannossa 4.5.2026 alkaen. Feature engineering
+-pipeline on valmis ja validoitu oikealla datalla. Mallin treenaukselle ei
+ole teknisiä esteitä.
 
-**Datasetin tila (10.5.2026):**
-- Ravipäiviä kerätty: 14 vrk (27.4 → 10.5)
-- Trot-lähtöjä: **356** (galloppi suodatettu; race-luokka + ratakunto täytetty kaikille)
-- Trot-runnereita: **~3 600**
-- Hevoshistoriastartteja: **103 747** (Travsport)
-- Odds-snapshotteja: **14 758** (T-15min / T-10min / T-5min / T-2min / result)
-- Keräysvauhti: ~23 trot-lähtöä/vrk (isot lauantait ~35+)
+**Dataset (10.5.2026):**
 
-**Ennuste:** Nykyvauhdilla datasetissä on ~950–1000 trot-lähtöä 8.6.2026
-mennessä. Vaihe 3:n aloitus on mahdollinen myös hieman etuajassa jos data
-katsotaan riittäväksi laadultaan ennen 8.6.
+| Mittari | Arvo |
+|---|---|
+| Keräyspäiviä | 14 vrk (27.4 → 10.5.2026) |
+| Trot-lähtöjä | **356** (galloppi suodatettu) |
+| Trot-runnereita | **3 757** |
+| Koulutuskelpoiset rivit | **3 685** (fill_finish_positions jälkeen) |
+| Hevoshistoriastartteja | **103 747** (Travsport, 2014→) |
+| Odds-snapshotteja | **14 758** (T-15/10/5/2min + tulos) |
+| Testejä | **104** (kaikki vihreällä) |
+| Keräysvauhti | ~23 trot-lähtöä/vrk (lauantait ~35+) |
+
+**Piirteiden laatu (validoitu 10.5.2026):**
+
+| Piirre | NaN ilman horse_starts | NaN horse_starts kanssa |
+|---|---|---|
+| form_avg_finish_5 | 95 % | **11 %** |
+| form_win_rate_5 | 93 % | **11 %** |
+| atg_lifetime_win_rate | — | 4.5 % |
+| atg_driver_win_pct | — | 7.5 % |
 
 ---
 
 ## Vaihe 1: Infrastruktuuri ✅ VALMIS
 
-- ATG REST API client ja Travsport WebAPI client
+- ATG REST API -asiakas + Travsport WebAPI -asiakas
 - SQLite WAL-mode + skeemamigraatio
-- Scheduler 4-vaiheisilla snapshoteilla per lähtö
-- Result-haku +30min lähdön jälkeen + päivittäinen retry klo 04:30
+- Scheduler: 4-vaiheinen snapshot-ajo per lähtö
+- Result-haku T+30min + päivittäinen retry 04:30
 - CLV-tracker ja bankroll management
-- Hetzner CAX11 -palvelin Helsingissä + systemd auto-restart
-- Päivittäinen DB-backup klo 04:00, 14 vrk säilytys
-- UFW-palomuuri + fail2ban
+- Hetzner CAX11, Helsinki + päivittäinen DB-backup, UFW, fail2ban
 - GitHub-versionhallinta
 
 ---
 
-## Vaihe 2: Datankeräysjakso (27.4 – 8.6.2026, ~6 viikkoa)
+## Vaihe 2: Datankeräys + feature engineering ✅ VALMIS
 
-**Pääprioriteetti: anna schedulerin pyöriä häiriöttä.**
+### Datankeräysjakso (27.4 – 10.5.2026)
 
-### ✅ Viikko 1 (4.5–10.5): Datanlaadun varmistus
+- Shoes/sulky-piirteet (6 saraketta runners-tauluun)
+- Gallop-suodatus (Bro Park, Göteborg Galopp, Jägersro Galopp pois)
+- `retry_incomplete_results` cron 04:30 — km-ajat täydentyvät yön yli
+- Track condition Travsportista + race-luokka ATG:sta kaikille 356 lähdölle
+  (`race_min_earnings`, `race_max_earnings`, `race_age_group`, `track_condition`)
 
-- **#1** `retry_incomplete_results` cron klo 04:30 — km-ajat ja sijoitukset täydentyvät
-- **#2** Shoes/sulky-piirteet (6 saraketta) — kengät ja kärry per startti
-- **#3** Gallop-suodatus — Bro Park, Göteborg Galopp, Jägersro Galopp pois kalenterista
-- Lukitusraja-refresh — DateTrigger T-10min ennen 1. lähtöä, shoes/sulky lukitaan oikein
+### Feature engineering -pipeline (10.5.2026)
 
-### ✅ Viikko 2 (10.5): Piirrerikastus
+Kaikki tehtiin ennen Vaihetta 3, testit jokaiselle muutokselle:
 
-- **Track condition** — `horse_starts.track_condition` Travsportista (zero-API backfill)
-- **Race-luokka ATG:sta** — `race_terms`, `race_min_earnings`, `race_max_earnings`,
-  `race_age_group` ja `races.track_condition` kaikille 356 lähdölle
-- Bugit #1, #5, #6, #8 korjattu (ks. `bug_analysis.md`)
-
-### Viikot 3–6 (10.5–8.6): Minimaaliset muutokset
-
-- Lokin silmäily 1–2 kertaa viikossa anomalioiden varalta
-- Viikoittainen DB-varmuuskopiointi paikalliselle koneelle (manuaalinen)
-- **#7 (matala):** ATG-clientin lokit → `scheduler.log` — `atg_client.logger`
-  ja `travsport.logger` eivät tällä hetkellä kulje scheduler.log-tiedostoon,
-  vain stderriin/journalctl:iin. Korjaus: lisää loggerit `setup_logging()`:hin.
-- Mahdolliset pienet bugikorjaukset — ei uusia ominaisuuksia
+| Muutos | Tiedosto | Vaikutus |
+|---|---|---|
+| FEATURE_COLS-nimet korjattu (blokkeri) | `ranker.py` | Olisi kaatunut KeyError:iin |
+| ATG-aggregaatit FEATURE_COLS:iin (9 piirrettä) | `ranker.py` | Koko vuoden ohjastaja/hevostilastot |
+| Shoes/sulky FEATURE_COLS:iin | `ranker.py` | Varustemutossignaali |
+| Race-luokka `race_setup_features()`:iin | `build_features.py` | Lähdön tason konteksti |
+| `derived_features()`: horse_age + barfota_law | `build_features.py` | Talvikiellon erottelu |
+| `form_features()` käyttää horse_starts (103k) | `build_features.py` | NaN 95 % → 11 % |
+| `fill_finish_positions()` — treeniesimerkit | `build_features.py` | 2 332 → 3 685 koulutuskelp. riviä |
+| Bugit #1, #5, #6, #8 korjattu | scheduler + build_features | Ks. KNOWN_ISSUES.md |
 
 ---
 
-## Vaihe 3: Mallin treenaus (8.6 – 22.6.2026, 2 viikkoa)
+## Vaihe 3: Mallin prototyyppi 🟡 VOI ALOITTAA NYT
 
-Vasta kun datasetissä on 600+ trot-lähtöä:
+Ei odoteta kesäkuuhun — data riittää prototyyppiin jo nyt.
 
-- Feature engineering -pipeline
-  - Perussarakkeet: start_method, distance, handicap_meters, driver, trainer,
-    shoes/sulky, atg-aggregaatit, Travsport-historia
-  - Luokkapiirteet: race_min/max_earnings, race_age_group, track_condition
-  - Johdetut piirteet: `barfota_law_active`, `horse_age`,
-    race_number-normalisointi
-- Walk-forward train/test split (ei random → ei data leakage)
-- LightGBM lambdarank -mallin treenaus
-- Softmax-kalibrointi voittotodennäköisyyksiksi
-- Kalibrointitaulu ja Brier score -arviointi
+**Workflow:**
+
+```python
+# 1. Lataa data
+runners  = pd.read_sql("SELECT r.*, ra.race_date FROM runners r JOIN races ra ...", con)
+races    = pd.read_sql("SELECT * FROM races", con)
+horse_starts = pd.read_sql(
+    "SELECT * FROM horse_starts WHERE withdrawn != 1 AND finish_position != 99 ...", con
+)
+
+# 2. Esikäsittely
+runners_filled = fill_finish_positions(runners)
+features = build_feature_matrix(runners_filled, races, horse_starts=horse_starts)
+
+# 3. Walk-forward split (ei random — data leakage)
+train = features[features["race_date"] < "2026-05-05"]
+test  = features[features["race_date"] >= "2026-05-05"]
+
+# 4. Treenaa
+model = train_ranker(train)
+
+# 5. Arvioi
+predictions = predict_win_probabilities(model, test)
+# → calibration table, NDCG@1, NDCG@3
+```
+
+**Tavoitteet vaiheessa 3:**
+
+- [ ] Walk-forward treenaus + evaluointi (NDCG, kalibrointitaulu)
+- [ ] Piirteiden tärkeysjärjestys (LightGBM feature importance)
+- [ ] `horse_age` — lisää birth_year JOIN runners-dataan (horses-taulu)
+- [ ] Mallin tallennus ja lataus (`save_model` / `load_model`)
+- [ ] Ennuste tuleville lähdöille + value-bet-detektio
+
+**Tunnetut rajoitukset nyt:**
+
+- 356 lähtöä on vähän — prototyyppi, ei tuotantomalli
+- `track_horse_win_rate` on 97.5 % NaN (vain 14 pv dataa samalta radalta)
+- `driver_win_rate_365d` on 35 % NaN (ATG:n valmis aggregaatti on parempi tässä vaiheessa)
+- Malli paranee automaattisesti kun keräys jatkuu
 
 ---
 
-## Vaihe 4: Backtest + paperitestaus (22.6 – 22.7.2026, 4 viikkoa)
+## Vaihe 4: Backtest + paperitestaus (2–4 viikkoa V3:n jälkeen)
 
 - Walk-forward backtest viimeisten viikkojen datalla
-- Paperitestauksen aloitus elävillä lähdöillä
-  - Kirjaa value-pelit, älä pelaa rahalla
-  - Tallenna T-2min kerroin pelihetkenä, vertaa final closing odds:iin
-- CLV-mittaus käyttäen ATG-baselinea + devig-laskentaa
+- Paperitestauksen aloitus elävillä lähdöillä (ei rahaa)
+  - Kirjaa value-pelit, älä pelaa
+  - Tallenna T-2min kerroin pelihetkenä, vertaa closing odds:iin
+- CLV-mittaus ATG-devig-laskennalla
 - Tavoite: vähintään 100 paperipeliä ennen päätöstä
 
 ---
 
-## Vaihe 5: Päätöspiste (~22.7.2026)
+## Vaihe 5: Päätöspiste (~8 viikkoa V3:n käynnistymisestä)
 
-Realistinen arvio kolmesta mahdollisesta lopputuloksesta:
-
-**A: Edge todistettu (CLV +3% tai enemmän, n>100)**
-→ Siirry vaiheeseen 6 pienillä rahoilla
-
-**B: Edge epäselvä (CLV -2% to +3%, kohinaa)**
-→ Kerää 4 viikkoa lisää dataa, treenaa malli uudelleen
-→ Mahdollisesti lisää piirteitä (sharp-markkinat, pace-data)
-
-**C: Ei edgea (CLV alle -2%)**
-→ Pysähdy ja tutki bugit
-→ Älä pelaa oikealla rahalla missään tapauksessa
+| Lopputulos | CLV | Toimenpide |
+|---|---|---|
+| **A: Edge todistettu** | +3 % tai enemmän, n>100 | Siirry V6 pienillä rahoilla |
+| **B: Edge epäselvä** | -2 % – +3 %, kohinaa | Lisää 4 vk dataa, treenaa uudelleen |
+| **C: Ei edgea** | alle -2 % | Pysähdy, tutki bugit, älä pelaa |
 
 Useimmat ML-vedonlyöntiprojektit eivät pääse tähän vaiheeseen
-positiivisella lopputuloksella. Tämä on rehellinen näkymä, ei pessimismiä.
+positiivisella lopputuloksella — rehellinen näkymä, ei pessimismiä.
 
 ---
 
 ## Vaihe 6 (vain jos edge todistettu): Pelaaminen pienillä rahoilla
 
 - Streamlit-dashboard päivän lähdöistä
-- Manuaalinen pelaaminen 1–5€ panoksiin
+- Manuaalinen pelaaminen 1–5 € panoksiin
 - 4–8 viikkoa CLV-seurantaa oikealla rahalla
-- Tilastollisesti merkittävä lopputulos vaatii 200–300+ peliä
-- Bookkerivertailu (Unibet, Betsson, Veikkaus)
-- Korjattava ennen V6: `correlated_kelly_adjust` (ks. `bug_analysis.md` #7)
+- 200–300+ peliä tilastollisesti merkittävään lopputulokseen
+- Korjattava ennen V6: `correlated_kelly_adjust` (ks. KNOWN_ISSUES.md #7)
 
 ---
 
 ## Vaihe 7 (vain jos pelaaminen tuottavaa): Skaalaus
 
-- Mahdollinen Betfair Exchange -integraatio (tutki ensin Ruotsin
-  ravien likviditeetti — voi olla riittämätön)
-- Persistentit job-storet: vaihda `SQLAlchemyJobStore` jotta schedulerin
-  restart-tilanteet eivät menetä snapshot-ikkunoita
+- Betfair Exchange -integraatio (tutki likviditeetti ensin)
+- Persistentit job-storet (`SQLAlchemyJobStore`) scheduler-restartteja varten
 - Sharp-markkinakertoimet (Pinnacle/Betfair) CLV-vertailuun — skeema valmis
-- Telegram-/email-alerts kun value-peli löytyy
+- Telegram/email-alert kun value-peli löytyy
 
 ---
 
-## Pitkän tähtäimen visio (3–12 kk)
+## Pitkän tähtäimen visio
 
-- **Pace-piirteet** (position_at_800m, juoksuvire): ATG:n `/races/{id}` ei
-  sisällä tätä. Travsport `/results`-endpointista ei myöskään saada. Vaatii
-  joko per-race-endpointin selvitystä tai web-scrapingia — erillinen tutkimustehtävä.
-- Sää-API-integraatio (Open-Meteo) — rata × sade × hevosen historia
-- Conditional logit / Plackett-Luce trifecta-todennäköisyyksille
-- Postgres jos datakanta kasvaa yli 500 MB
-- Sukutaulupiirteet (isä/emänisä-tilastot)
-
----
-
-## Tietoisesti pois jätetty
-
-- **Pinnacle/Betfair sharp-kertoimet nyt:** Ruotsin ravien likviditeetti
-  Betfairissa on todennäköisesti liian ohut CLV-pohjaksi. ATG-devig riittää
-  MVP:lle. Lykätty vaiheeseen 7.
-- **Toisen lajin lisääminen:** Jokainen laji vaatii oman lajituntemuksen
-  kuukausia. Lykätty kunnes raviedge on todistettu.
-- **Kaupallinen tuotteistaminen:** Ei mietitä ennen kuin malli tuottaa
-  todistettua edgea oikealla rahalla useamman kuukauden ajan.
+- **Pace-piirteet:** position_at_800m ei saada ATG:n eikä Travsportin API:sta
+  nykymuodossaan. Vaatii erillisen tutkimuksen tai web-scrapingin.
+- **Sää-integraatio:** Open-Meteo — rata × sade × hevosen rata-kokemus
+- **Conditional logit / Plackett-Luce** trifecta-todennäköisyyksille
+- **Postgres** jos DB kasvaa yli 500 MB
+- **Sukutaulupiirteet** (isä/emänisä-tilastot Travsportista)
