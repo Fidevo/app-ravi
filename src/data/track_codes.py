@@ -63,6 +63,16 @@ TRACKCODE_TO_NAME: dict[str, str] = {
 # Sisällytetty tähän dokumentointia varten.
 GALLOP_TRACK_CODES: frozenset[str] = frozenset({"Br", "GG", "JG"})
 
+# Travsportin starttimuoto-koodit → ATG:n starttimuotonimet.
+# Travsport käyttää lyhenteitä ("A", "V") kun ATG käyttää pitkiä nimiä ("auto", "volte").
+# Käytetään form_features():ssa jotta B2-segmentointi (same_method) toimii.
+# Lähde: Travsportin scraper-dokumentaatio + DB-vahvistus 2026-05-10.
+START_METHOD_TO_ATG: dict[str, str] = {
+    "A": "auto",      # autostart (aikastartti)
+    "V": "volte",     # voltstart (seisova lähtö)
+    "L": "auto",      # linjestart — harvinainen, käytännössä sama kuin auto
+}
+
 
 def normalize_track(code: str | None) -> str | None:
     """Muunna Travsport-koodi ATG:n rataniksi.

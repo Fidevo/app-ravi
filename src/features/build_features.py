@@ -502,6 +502,19 @@ def build_feature_matrix(
     else:
         runners_with_meta = runners
 
+    # A1b-korjaus: normalisoi horse_starts.start_method Travsport-koodeista
+    # ATG-nimiksi ENNEN form_features()-kutsua.
+    # Travsport: "A"=auto, "V"=volte, "L"=auto (harvinainen)
+    # ATG/races: "auto", "volte"
+    # Ilman normalisointia groupby(["horse_id","start_method"]) ei matchaa:
+    # "auto" ≠ "A" → B2 same_method pysyy 4 % vaikka start_method-sarake löytyisi.
+    if horse_starts is not None and "start_method" in (horse_starts.columns if horse_starts is not None else []):
+        from src.data.track_codes import START_METHOD_TO_ATG
+        horse_starts = horse_starts.copy()
+        horse_starts["start_method"] = horse_starts["start_method"].map(
+            lambda m: START_METHOD_TO_ATG.get(m, m) if m is not None else None
+        )
+
     df = form_features(runners_with_meta, horse_starts=horse_starts)
     df = driver_trainer_features(df)
     df = race_setup_features(df, races, horse_starts=horse_starts)  # B1: track-historia
