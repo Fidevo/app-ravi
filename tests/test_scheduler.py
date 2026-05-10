@@ -1100,6 +1100,81 @@ def test_setup_for_date_skips_refresh_when_first_race_in_past(monkeypatch):
     assert not any("refresh_runners_" in jid for jid in job_ids)
 
 
+# ---------------------------------------------------------------------------
+# TODO #3: Gallop-suodatus
+# ---------------------------------------------------------------------------
+
+
+def test_get_calendar_day_filters_gallop_tracks():
+    """ATGClient.get_calendar_day suodattaa gallop-radat (sport != 'trot') pois.
+
+    Käytetään monkeypatchia _get-metodiin jotta HTTP-pyyntöä ei tehdä.
+    SE-radat joiden sport != 'trot' (Bro Park, Jägersro Galopp) eivät
+    päädy paluuarvon 'tracks'-listaan.
+    """
+    from src.data.atg_client import ATGClient
+
+    raw_calendar = {
+        "tracks": [
+            {"name": "Solvalla", "countryCode": "SE", "sport": "trot", "races": []},
+            {"name": "Bro Park", "countryCode": "SE", "sport": "gallop", "races": []},
+            {"name": "Jägersro Galopp", "countryCode": "SE", "sport": "gallop", "races": []},
+            {"name": "Vincennes", "countryCode": "FR", "sport": "trot", "races": []},
+        ]
+    }
+    client = ATGClient()
+    client._get = lambda path: raw_calendar  # type: ignore[method-assign]
+
+    result = client.get_calendar_day("2026-05-10", swedish_only=True)
+    client.close()
+
+    track_names = [t["name"] for t in result["tracks"]]
+    assert track_names == ["Solvalla"]
+    assert "Bro Park" not in track_names
+    assert "Jägersro Galopp" not in track_names
+    assert "Vincennes" not in track_names
+
+
+def test_retry_incomplete_results_skips_gallop_tracks(tmp_path):
+    """retry_incomplete_results ei yritä hakea gallop-ratojen tuloksia.
+
+    Bro Park ja Jägersro Galopp eivät koskaan saa kmTime-objekteja ATG:sta
+    → ne olisivat aina vajaita → turhia API-kutsuja joka päivä.
+    GALLOP_TRACKS NOT IN -filtteri poistaa ne kyselystä.
+    """
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    # Rakenna gallop-race jossa kaikki runnerit ovat vajaita (0 tulosta)
+    gallop_race = _build_partial_results_race(
+        "2026-04-27_gallop_1", n_runners=5, n_with_results=0
+    )
+    gallop_race["track"] = {"name": "Bro Park"}  # gallop-rata
+
+    # Tallenna race DB:hen suoraan fetch_results:llä (calendar-filtteri
+    # ei ole käytössä tässä kutsussa - simuloi jo olemassa olevaa dataa)
+    fetch_results("2026-04-27_gallop_1", db_path=db, atg=FakeATG(gallop_race))
+
+    # Varmista että race on DB:ssä vajaana
+    with _session(db) as s:
+        n_null = (
+            s.query(Runner)
+            .filter(Runner.race_id == "2026-04-27_gallop_1")
+            .filter(Runner.kilometer_time_seconds.is_(None))
+            .count()
+        )
+        assert n_null == 5  # kaikki runnerit vajaita - alkutila oikein
+
+    # retry_incomplete_results ei saa hakea gallop-rataa uudelleen
+    retry_atg = FakeATG(gallop_race)
+    stats = retry_incomplete_results(
+        db_path=db, lookback_days=3650, atg=retry_atg
+    )
+
+    assert stats["races_checked"] == 0   # Bro Park ohitettu GALLOP_TRACKS-filtterillä
+    assert retry_atg.calls["race"] == 0  # ATG-kutsuja ei tehty
+
+
 def test_refresh_day_runners_calls_fetch_daily_without_scheduling(monkeypatch):
     """refresh_day_runners EI saa kutsua scheduleria/travsportia - vain runner-päivitys."""
     captured = {}

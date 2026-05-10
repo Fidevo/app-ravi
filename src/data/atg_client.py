@@ -36,6 +36,13 @@ DEFAULT_TIMEOUT = 15.0
 # naan, joten ulkomaiset radat ovat kohinaa nykyversiossa.
 SWEDISH_COUNTRY_CODE = "SE"
 
+# TODO #3: Gallop-suodatus. ATG palauttaa SE-kalenteri sisältää myös
+# galloppia (Bro Park, Jägersro Galopp). Galopin lähdöissä ei ole
+# kmTime-objekteja → kaikki gallop-runnerit näyttäisivät NULL km-ajalla
+# ja retry_incomplete_results yrittäisi hakea niitä joka päivä turhaan.
+# Suodatetaan pois jo calendar-tasolla sport-kentän perusteella.
+TROT_SPORT = "trot"
+
 
 class ATGClient:
     """Synchronous client for ATG's public racing info API."""
@@ -97,15 +104,20 @@ class ATGClient:
         kept: list[dict[str, Any]] = []
         skipped: list[str] = []
         for t in all_tracks:
-            if t.get("countryCode") == SWEDISH_COUNTRY_CODE:
+            country_ok = t.get("countryCode") == SWEDISH_COUNTRY_CODE
+            sport_ok = t.get("sport") == TROT_SPORT
+            if country_ok and sport_ok:
                 kept.append(t)
             else:
-                skipped.append(
-                    f"{t.get('name')} ({t.get('countryCode')})"
+                reason = (
+                    f"sport={t.get('sport')}"
+                    if country_ok
+                    else f"countryCode={t.get('countryCode')}"
                 )
+                skipped.append(f"{t.get('name')} ({reason})")
         if skipped:
             logger.info(
-                "Skipped %d non-Swedish tracks: %s",
+                "Skipped %d non-trot/non-SE tracks: %s",
                 len(skipped),
                 ", ".join(skipped),
             )

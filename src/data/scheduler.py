@@ -73,6 +73,13 @@ LOG_DIR = _LOG_DIR_ABS
 LOG_FILE = LOG_DIR / "scheduler.log"
 DB_PATH = str(_DB_PATH_ABS)
 
+# TODO #3: Tunnetut gallop-radat ATG:n SE-kalenterissa. Näiden lähdöillä
+# ei ole kmTime-objekteja, joten retry_incomplete_results ohittaa ne
+# eikä tee turhia API-kutsuja. atg_client.get_calendar_day suodattaa
+# nämä pois jo calendar-tasolla (sport != "trot"), joten uusia gallop-
+# lähtöjä ei tule DB:hen - tämä lista suojaa jo olemassa olevia rivejä.
+GALLOP_TRACKS: frozenset[str] = frozenset({"Bro Park", "Jägersro Galopp"})
+
 logger = logging.getLogger("ravit_edge.scheduler")
 
 
@@ -829,10 +836,9 @@ def retry_incomplete_results(
     uudelleen jokaiselle racelle joka on edelleen vajaa.
 
     "Vajaa" = on ainakin yksi runner jolla finish_position IS NULL TAI
-    kilometer_time_seconds IS NULL. (Galopin osalta kmTime puuttuu aina —
-    TODO #3 erottelee disipliinit, ja sen jälkeen tämä kysely voi rajata
-    vain trottiraceihin. Nykyisellään kmTime-NULL aiheuttaa galopin
-    re-fetchin joka päivä, mutta on idempotentti eikä aiheuta haittaa.)
+    kilometer_time_seconds IS NULL. Gallop-radat (GALLOP_TRACKS) jätetään
+    pois kyselystä: niillä ei ole kmTime-objekteja ATG:ssa, joten ne
+    olisivat aina vajaita ja aiheuttaisivat turhia API-kutsuja päivittäin.
 
     Idempotentti: fetch_results upsertit eivät duplikoi mitään.
 
@@ -858,17 +864,26 @@ def retry_incomplete_results(
         "errors": [],
     }
     try:
-        # Etsi uniikit race_idt joilla on vajaita runnereita
+        # Etsi uniikit race_idt joilla on vajaita runnereita.
+        # Gallop-radat (GALLOP_TRACKS) jätetään pois: niillä ei ole
+        # kmTime-objekteja ATG:ssa, joten ne olisivat aina vajaita.
         with Session_() as session:
-            from sqlalchemy import or_, text
-            rows = session.execute(text("""
+            from sqlalchemy import text
+            gallop_sorted = sorted(GALLOP_TRACKS)
+            not_in_clause = ", ".join(f":gt{i}" for i in range(len(gallop_sorted)))
+            params: dict = {
+                "cutoff": cutoff,
+                **{f"gt{i}": t for i, t in enumerate(gallop_sorted)},
+            }
+            rows = session.execute(text(f"""
                 SELECT DISTINCT ra.race_id
                 FROM races ra
                 JOIN runners r ON ra.race_id = r.race_id
                 WHERE ra.race_date >= :cutoff
+                  AND ra.track NOT IN ({not_in_clause})
                   AND (r.finish_position IS NULL OR r.kilometer_time_seconds IS NULL)
                 ORDER BY ra.race_id
-            """), {"cutoff": cutoff}).fetchall()
+            """), params).fetchall()
             race_ids = [row[0] for row in rows]
 
         logger.info(
