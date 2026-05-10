@@ -470,7 +470,7 @@ def _upsert_horse(session: Session, horse: dict) -> None:
     pedigree = horse.get("pedigree") or {}
     obj.sire = (pedigree.get("father") or {}).get("name")
     obj.dam = (pedigree.get("mother") or {}).get("name")
-    obj.dam_sire = (pedigree.get("mothersFather") or {}).get("name")
+    obj.dam_sire = (pedigree.get("grandfather") or {}).get("name")  # ATG-avain on "grandfather"
 
 
 def _upsert_runner(
@@ -762,6 +762,117 @@ def backfill_race_class(
         updated, skipped, errors, total,
     )
     return {"updated": updated, "skipped": skipped, "errors": errors, "total_races": total}
+
+
+def backfill_dam_sire(
+    db_path: str = DB_PATH,
+    atg: ATGClient | None = None,
+) -> dict:
+    """Täytä horses.dam_sire kaikille hevosille joilla se puuttuu.
+
+    Juurisyy: _upsert_horse() luki aiemmin pedigree.get("mothersFather")
+    joka ei ole ATG:n käyttämä avain. Oikea avain on "grandfather".
+    Tämä backfill korjaa kaikki olemassa olevat rivit.
+
+    Strategia: hae kunkin horse_id:n yksi race_id runners-taulusta,
+    sitten /races/{race_id} → etsi horse.pedigree.grandfather.name.
+    Hyödynnetään sitä että yksi race-haku kattaa usein 8–12 hevosta
+    vähentäen API-kutsuja merkittävästi.
+
+    Idempotentti: voidaan ajaa uudelleen (päivittää vain NULL-rivit).
+    Rate limit: 1 req/sek (ATGClient huolehtii).
+    Noin 2 500 hevosta / ~300 lähdön kautta ≈ 5–6 min.
+
+    Returns:
+        dict: {updated, skipped, errors, total_horses}
+    """
+    engine = create_engine(f"sqlite:///{db_path}")
+    Session_ = sessionmaker(bind=engine)
+
+    # Hae horse_id:t joilta dam_sire puuttuu + yksi race_id per hevonen
+    with Session_() as session:
+        rows = session.execute(text("""
+            SELECT h.horse_id, MIN(r.race_id) as race_id
+            FROM horses h
+            JOIN runners r ON r.horse_id = h.horse_id
+            WHERE h.dam_sire IS NULL AND h.sire IS NOT NULL
+            GROUP BY h.horse_id
+            ORDER BY h.horse_id
+        """)).fetchall()
+
+    total = len(rows)
+    logger.info("backfill_dam_sire: %d hevosta ilman dam_sire:ä", total)
+
+    own_atg = atg is None
+    if own_atg:
+        atg = ATGClient()
+
+    updated = 0
+    skipped = 0
+    errors = 0
+    BATCH = 50
+
+    # Ryhmittele race_id:n mukaan — yksi API-kutsu kattaa monta hevosta
+    from collections import defaultdict
+    race_to_horses: dict[str, list[str]] = defaultdict(list)
+    for horse_id, race_id in rows:
+        race_to_horses[race_id].append(str(horse_id))
+
+    horse_to_dam_sire: dict[str, str] = {}
+
+    try:
+        for i, (race_id, horse_ids) in enumerate(race_to_horses.items(), 1):
+            try:
+                race = atg.get_race(race_id)
+                for start in race.get("starts", []):
+                    h = start.get("horse") or {}
+                    hid = str(h.get("id", ""))
+                    if hid in horse_ids:
+                        ped = h.get("pedigree") or {}
+                        grandfather = (ped.get("grandfather") or {}).get("name")
+                        if grandfather:
+                            horse_to_dam_sire[hid] = grandfather
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("backfill_dam_sire: virhe race %s: %s", race_id, exc)
+                errors += 1
+
+            if i % 25 == 0:
+                logger.info(
+                    "backfill_dam_sire: %d/%d lähtöä käsitelty, löydetty %d",
+                    i, len(race_to_horses), len(horse_to_dam_sire),
+                )
+
+        # Tallenna DB:hen
+        with Session_() as session:
+            for j, (hid, dam_sire) in enumerate(horse_to_dam_sire.items(), 1):
+                horse = session.get(Horse, hid)
+                if horse is not None:
+                    horse.dam_sire = dam_sire
+                    updated += 1
+                else:
+                    skipped += 1
+
+                if j % BATCH == 0:
+                    session.commit()
+
+            session.commit()
+
+    finally:
+        if own_atg:
+            atg.close()
+
+    logger.info(
+        "backfill_dam_sire valmis: päivitetty=%d, ohitettu=%d, virheitä=%d, "
+        "yhteensä=%d hevosta, %d lähtöä haettu",
+        updated, skipped, errors, total, len(race_to_horses),
+    )
+    return {
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "total_horses": total,
+        "races_fetched": len(race_to_horses),
+    }
 
 
 def fetch_daily_races(
@@ -1683,6 +1794,13 @@ def _main() -> None:
     )
 
     sub.add_parser(
+        "backfill-dam-sire",
+        help="Täytä horses.dam_sire kaikille hevosille joilta se puuttuu. "
+             "Korjaa aiemman 'mothersFather'-virheavaimen → 'grandfather'. "
+             "Noin 2 500 hevosta / ~300 lähdön kautta ≈ 5–6 min. Idempotentti.",
+    )
+
+    sub.add_parser(
         "backfill-atg-aggregates",
         help="Korjaa K1-vuodosta johtuvat virheelliset atg_lifetime_starts/-win_rate/"
              "-top3_rate -arvot kaikille runners-riveille. "
@@ -1710,6 +1828,8 @@ def _main() -> None:
         print(backfill_track_condition())
     elif args.cmd == "backfill-race-class":
         print(backfill_race_class())
+    elif args.cmd == "backfill-dam-sire":
+        print(backfill_dam_sire())
     elif args.cmd == "backfill-atg-aggregates":
         print(backfill_correct_atg_aggregates())
 

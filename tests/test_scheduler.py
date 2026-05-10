@@ -53,6 +53,11 @@ SAMPLE_RACE = {
                 "age": 5,
                 "sex": "gelding",
                 "trainer": {"firstName": "First", "lastName": "Trainer"},
+                "pedigree": {
+                    "father": {"id": 1001, "name": "Famous Sire"},
+                    "mother": {"id": 1002, "name": "Famous Dam"},
+                    "grandfather": {"id": 1003, "name": "Famous Grandsire"},
+                },
                 "statistics": {
                     "life": {
                         "starts": 50,
@@ -2010,3 +2015,73 @@ def test_upsert_runner_writes_new_values_when_field_was_none(tmp_path):
             f"atg_lifetime_starts = {runner.atg_lifetime_starts!r}, odotettiin 50. "
             "_set_if_not_none estää None→arvo-päivityksen (väärä toiminta)."
         )
+
+
+# B2-jälkityö — dam_sire grandfather-avainkorjaus
+
+from src.data.scheduler import _upsert_horse
+
+
+def test_upsert_horse_reads_dam_sire_from_grandfather(tmp_path):
+    """_upsert_horse lukee dam_sire pedigree.grandfather.name:sta (ei mothersFather).
+
+    ATG API käyttää avainta 'grandfather' emänisälle — tämä on oikea avain.
+    """
+    db = str(tmp_path / "test.db")
+    migrate(db)
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+
+    horse_dict = {
+        "id": 999001,
+        "name": "Test Horse",
+        "age": 5,
+        "sex": "gelding",
+        "pedigree": {
+            "father": {"id": 111, "name": "Great Sire"},
+            "mother": {"id": 222, "name": "Great Dam"},
+            "grandfather": {"id": 333, "name": "Grandfather Sire"},
+        },
+    }
+
+    with Session_() as s:
+        _upsert_horse(s, horse_dict)
+        s.commit()
+
+    with Session_() as s:
+        horse = s.get(Horse, "999001")
+        assert horse is not None
+        assert horse.sire == "Great Sire"
+        assert horse.dam == "Great Dam"
+        assert horse.dam_sire == "Grandfather Sire", (
+            f"dam_sire = {horse.dam_sire!r}, odotettiin 'Grandfather Sire'. "
+            "_upsert_horse lukee väärää ATG-kenttää."
+        )
+
+
+def test_upsert_horse_dam_sire_none_when_no_grandfather(tmp_path):
+    """_upsert_horse asettaa dam_sire = None kun grandfather puuttuu pedigreestä."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+
+    horse_dict = {
+        "id": 999002,
+        "name": "No Grandfather Horse",
+        "age": 4,
+        "sex": "mare",
+        "pedigree": {
+            "father": {"id": 111, "name": "Some Sire"},
+            "mother": {"id": 222, "name": "Some Dam"},
+            # grandfather puuttuu — dam_sire pitää olla None
+        },
+    }
+
+    with Session_() as s:
+        _upsert_horse(s, horse_dict)
+        s.commit()
+
+    with Session_() as s:
+        horse = s.get(Horse, "999002")
+        assert horse.dam_sire is None
