@@ -633,7 +633,7 @@ def fetch_results(
     }
     try:
         race = client.get_race(race_id)
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         with Session_() as session:
             # Varmista että race + runners ovat olemassa (kylmäkäynnistys-suoja)
             _upsert_race(session, race)

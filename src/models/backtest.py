@@ -124,7 +124,7 @@ def quarterly_walk_forward(
 
         results.append(
             BacktestResult(
-                period=f"{q_start.strftime('%Y-Q%q' if False else '%Y-%m')}",
+                period=f"{q_start.year}-Q{(q_start.month - 1) // 3 + 1}",
                 n_races=test_df["race_id"].nunique(),
                 n_value_bets=len(bets),
                 total_staked=total_staked,
