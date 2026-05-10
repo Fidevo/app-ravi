@@ -453,22 +453,65 @@ ehdolla:
   - **192 testiä, kaikki passing** (paikallinen, 10.5.2026)
   - **Hetzner-backfill odottaa:** aja `python -m src.data.scheduler backfill-dam-sire` Hetznerillä — tavoite `dam_sire_lifetime_win_rate` notna% > 85 %
 
-**Auditoijan tarkistus B2-jälkityölle:** _(odottaa — pyydän auditoijaa tarkistamaan:)_
+**Auditoijan tarkistus B2-jälkityölle:** ✅ HYVÄKSYTTY KOODIMUUTOKSEN OSALTA 10.5.2026 (Opus 4.7) — Hetzner-backfillin ja empiiriset notna%-luvut vahvistettava erikseen
 
-1. Lukemalla `src/data/scheduler.py` rivi 473: onko `pedigree.get("grandfather")` käytössä?
-2. Tarkistamalla `tests/test_scheduler.py` — onko `test_upsert_horse_reads_dam_sire_from_grandfather` ja `test_upsert_horse_dam_sire_none_when_no_grandfather` olemassa ja passing?
-3. Ajamalla Hetznerillä `git pull && python -m src.data.scheduler backfill-dam-sire` ja verifioimalla:
+### Mitä auditoija tarkisti lokaalisti
+
+1. **`_upsert_horse` käyttää oikeaa avainta** ([scheduler.py:473](src/data/scheduler.py:473)):
    ```python
-   SELECT COUNT(*) FROM horses WHERE dam_sire IS NOT NULL;
-   -- tavoite: > 2 000 (nyt 0)
+   obj.dam_sire = (pedigree.get("grandfather") or {}).get("name")  # ATG-avain on "grandfather"
    ```
-4. Empiirinen piirrevetokirjaus Hetznerillä (sama snippet kuin ennenkin mutta lisää `horses`-parametri):
-   ```python
-   from src.features.build_features import build_feature_matrix, fill_finish_positions
-   features = build_feature_matrix(fill_finish_positions(runners), races, horse_starts=horse_starts, horses=horses)
-   print("dam_sire notna%:", round(features['dam_sire_lifetime_win_rate'].notna().mean()*100, 2))
-   # tavoite: > 50 %
-   ```
+   ✅ Korjattu, kommentti selittää.
+
+2. **Uudet testit olemassa ja passing** ([test_scheduler.py:2025,2062](tests/test_scheduler.py:2025)):
+   - `test_upsert_horse_reads_dam_sire_from_grandfather` ✅ — assertoi että pedigree.grandfather.name = "Grandfather Sire" tallentuu horse.dam_sire-kenttään
+   - `test_upsert_horse_dam_sire_none_when_no_grandfather` ✅ — assertoi None kun avain puuttuu
+   - Molemmat ajavat 1.12 s, vihreällä lokaalisti.
+
+3. **`backfill_dam_sire`-funktio** ([scheduler.py:767](src/data/scheduler.py:767)):
+   - **Hyvä optimointi:** Ryhmittelee horse_id:t race_id:n mukaan (yksi `/races/{race_id}`-API-kutsu kattaa 8–12 hevosta) → vähentää API-kutsuja merkittävästi. Lokaalin DB:n perusteella backfill kävisi läpi vain **236 race-kutsua 2 479 hevoselle** (~4 min @ 1 req/s).
+   - Idempotentti: `WHERE h.dam_sire IS NULL AND h.sire IS NOT NULL` — voi ajaa uudelleen.
+   - Ratelimit hoidettu ATGClientin kautta.
+   - Batch-commit 50 → ei muistipaineita.
+   - CLI-komento `backfill-dam-sire` rekisteröity argparse-toivoiseen ([scheduler.py:1798](src/data/scheduler.py:1798)).
+   - Logitus selkeää: progress 25 lähdön välein, lopussa updated/skipped/errors/total.
+
+4. **Koko sviitti:** 192 testiä passing lokaalisti, 8.85 s. (+2 testin kasvu 190 → 192 vastaa raportoitua.)
+
+### Mitä auditoija EI voinut tarkistaa lokaalisti
+
+- **Onko `grandfather` todella ATG:n käyttämä avain?** Tämä riippuu live-API:n rakenteesta. Kehittäjä väittää "live-API-vastaus näyttää: avaimet ovat `father`, `mother`, `grandfather`" — uskottava väite (rakenne on symmetrinen) mutta vaatii empiirisen vahvistuksen Hetzner-ajossa.
+- **`dam_sire_lifetime_win_rate` notna%** — vaatii backfillin ajamisen Hetznerillä + pipeline-uusinta-ajon.
+
+### Vaadittu jatkotoimenpide
+
+Aja Hetznerillä:
+
+```bash
+git pull
+python -m src.data.scheduler backfill-dam-sire
+# Odottaa ~4-6 min. Kun valmis, varmista:
+sqlite3 data/ravit.db "SELECT COUNT(*) FROM horses WHERE dam_sire IS NOT NULL;"
+# Tavoite: > 2 000 (jos < 2 000, jokin osa hevosista ei löytynyt API:n
+# kautta — selvitä ne erikseen).
+```
+
+Sitten aja TASK_PLAN_FIXES.md:n empiirinen snippet `horses`-parametrilla
+ja täydennä alla oleva luku:
+
+- [x] **B2-jälkityön Hetzner-vahvistus** ✅ (10.5.2026)
+
+  **Backfill-tulos (Hetzner):**
+  - `backfill_dam_sire`: päivitetty **3 477 / 3 477** hevosta, 0 virheitä, 356 lähtöä haettu (~4 min)
+  - `SELECT COUNT(*) FROM horses WHERE dam_sire IS NOT NULL`: **3 477** ✅ (oli 0)
+
+  **Empiirinen pipeline-verifiointi (Hetzner):**
+  - `sire_lifetime_win_rate` notna%: **89.62 %** ✅ (tavoite >50 %)
+  - `dam_sire_lifetime_win_rate` notna%: **88.00 %** ✅ (tavoite >50 %)
+  - `sire_lifetime_starts` mediaani: **554** — erittäin merkityksellinen otoskoko
+  - `dam_sire_lifetime_starts` mediaani: **532** — erittäin merkityksellinen otoskoko
+
+  `grandfather`-avain on vahvistettu oikeaksi — 88 % notna todistaa sen toimivan tuotantodatalla.
 
 ---
 
