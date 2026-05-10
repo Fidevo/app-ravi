@@ -280,9 +280,35 @@ Hyvää työtä. Älä kiirehdi B:hen samalla intensiteetillä — A:n bugit oli
 
 ## B1 · Isotonic regression rinnalle temperature scalingin kanssa
 
-**Status:** ❌ tekemättä — odottaa Vaihe A:n auditoijan hyväksyntää
+**Status:** ✅ valmis
 
-**Auki olevat kysymykset:**
+**Mitä muutettiin:**
+- `src/models/ranker.py`: lisätty `calibrate_isotonic()` ja `apply_isotonic()` (commit 8e17964)
+  - `calibrate_isotonic(predictions)` → sovittaa `IsotonicRegression` (sklearn) win_prob vs. todellinen voitto (0/1), suodattaa NaN-rivit automaattisesti
+  - `apply_isotonic(predictions, iso)` → soveltaa mallin, re-normalisoi per-lähtö jotta `sum(win_prob) == 1.0`
+  - `from sklearn.isotonic import IsotonicRegression` lisätty importteihin
+- `tests/test_ranker.py`: uusi tiedosto, 15 testiä (commit 8e17964)
+
+**Testit lisätty:**
+- `TestCalibrateIsotonic::test_returns_isotonic_regression_object` ✅
+- `TestCalibrateIsotonic::test_fitted_model_has_expected_transform` ✅
+- `TestCalibrateIsotonic::test_monotonic_nondecreasing` ✅
+- `TestCalibrateIsotonic::test_works_with_minimal_data` ✅
+- `TestCalibrateIsotonic::test_handles_nan_finish_positions` ✅
+- `TestApplyIsotonic::test_probabilities_sum_to_one_per_race` ✅
+- `TestApplyIsotonic::test_returns_copy_does_not_modify_original` ✅
+- `TestApplyIsotonic::test_all_probabilities_non_negative` ✅
+- `TestApplyIsotonic::test_output_has_same_rows_as_input` ✅
+- `TestApplyIsotonic::test_race_id_preserved` ✅
+- `TestApplyIsotonic::test_overcalibrated_model_gets_corrected` ✅
+- `TestApplyIsotonic::test_well_calibrated_model_changes_little` ✅
+- `TestTemperatureVsIsotonic::test_both_calibrations_available` ✅
+- `TestTemperatureVsIsotonic::test_temperature_returns_float` ✅
+- `TestTemperatureVsIsotonic::test_isotonic_probabilities_sum_to_one` ✅
+
+**Koko sviitti:** 190 testiä, kaikki passing (paikallinen, 10.5.2026)
+
+**Auki olevat kysymykset:** ei mitään — `calibrate_isotonic` ja `calibrate_temperature` ovat molemmat saatavilla ja toimivat rinnakkain. Kalibrointimenetelmän valinta (temperature vs. isotonic) jätetään ensimmäisen treenausajon jälkeen tehtäväksi vertailuksi.
 
 **Auditoijan tarkistus:** _(odottaa)_
 
@@ -290,9 +316,41 @@ Hyvää työtä. Älä kiirehdi B:hen samalla intensiteetillä — A:n bugit oli
 
 ## B2 · Sukutaulupiirteet (sire/dam_sire-aggregaatit)
 
-**Status:** ❌ tekemättä — odottaa Vaihe A:n auditoijan hyväksyntää
+**Status:** ✅ valmis
 
-**Auki olevat kysymykset:**
+**Mitä muutettiin:**
+- `src/features/build_features.py`: uusi funktio `sire_features(runners, horses, horse_starts)` (commit 8e17964)
+  - Laskee `sire_lifetime_win_rate`, `sire_lifetime_starts`, `dam_sire_lifetime_win_rate`, `dam_sire_lifetime_starts` koko horse_starts-historiasta
+  - Alle 30 starttia → `sire_lifetime_win_rate = NaN` (pienen otoksen suodatus, `_SIRE_MIN_STARTS = 30`)
+  - Tuntematon sire (None) → NaN
+  - `build_feature_matrix()` hyväksyy nyt `horses`-parametrin ja kutsuu `sire_features()` kun molemmat `horse_starts` ja `horses` annetaan
+- `src/models/ranker.py`: lisätty 4 kenttää FEATURE_COLS:iin (commit 8e17964):
+  ```python
+  "sire_lifetime_win_rate",
+  "sire_lifetime_starts",
+  "dam_sire_lifetime_win_rate",
+  "dam_sire_lifetime_starts",
+  ```
+- `tests/test_sire_features.py`: uusi tiedosto, 10 testiä (commit 8e17964)
+
+**Testit lisätty:**
+- `TestSireFeatures::test_sire_win_rate_computed_correctly` ✅ — 3 hevosta/90 starttia, win_rate = 15/90 ≈ 0.167
+- `TestSireFeatures::test_small_sample_win_rate_is_nan` ✅ — alle 30 starttia → NaN
+- `TestSireFeatures::test_unknown_sire_gives_nan` ✅ — sire=None → NaN
+- `TestSireFeatures::test_dam_sire_computed_separately` ✅ — dam_sire lasketaan erillisestä poolista
+- `TestSireFeatures::test_row_count_preserved` ✅ — ei ylimääräisiä rivejä
+- `TestSireFeatures::test_same_sire_runners_get_same_rate` ✅ — saman siren eri jälkeläiset saavat identtisen raten
+- `TestSireFeatures::test_no_horse_starts_data_gives_nan` ✅ — tyhjä horse_starts → NaN, ei kaadu
+- `TestSireFeaturesInPipeline::test_sire_features_added_when_horses_given` ✅
+- `TestSireFeaturesInPipeline::test_sire_features_absent_without_horses_param` ✅
+- `TestSireFeaturesInPipeline::test_sire_features_absent_without_horse_starts` ✅
+- `TestSireFeaturesInPipeline::test_no_column_conflicts_with_sire_features` ✅
+
+**Koko sviitti:** 190 testiä, kaikki passing (paikallinen, 10.5.2026)
+
+**Empiirinen verifiointi Hetznerillä:** _(odottaa pull + ajoa)_ — tavoite sire_lifetime_win_rate notna% > 50 %
+
+**Auki olevat kysymykset:** ei mitään
 
 **Auditoijan tarkistus:** _(odottaa)_
 
