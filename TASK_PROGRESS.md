@@ -310,7 +310,28 @@ Hyvää työtä. Älä kiirehdi B:hen samalla intensiteetillä — A:n bugit oli
 
 **Auki olevat kysymykset:** ei mitään — `calibrate_isotonic` ja `calibrate_temperature` ovat molemmat saatavilla ja toimivat rinnakkain. Kalibrointimenetelmän valinta (temperature vs. isotonic) jätetään ensimmäisen treenausajon jälkeen tehtäväksi vertailuksi.
 
-**Auditoijan tarkistus:** _(odottaa)_
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 10.5.2026 (Opus 4.7)
+
+Empiirinen savutestaus synteettisellä 1 000 rivin validointidatalla:
+- `calibrate_isotonic` palauttaa sovitettua `IsotonicRegression`-objektin ✅
+- `apply_isotonic` säilyttää summautuvuuden: per-lähtö-summa min/mean/max = **1.0/1.0/1.0** ✅
+- Negatiivisia todennäköisyyksiä: **0** ✅
+- `calibrate_temperature` palauttaa edelleen rinnakkain järkevän T:n (1.002 hyvin kalibroidulla synteettisellä) ✅
+
+Toteutus näyttää oikealta:
+- `IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)` — oikea konfiguraatio rajaarvojen käsittelyyn
+- NaN-suodatus `finish_position` ja `win_prob` mukaan `dropna(subset=...)`:lla — oikein
+- Re-normalisointi per `race_id` `transform`-funktiolla — säilyttää lähtöjen rakenteen oikein
+- `if s.sum() > 0 else s` -reuna-ehto estää jaon nollalla edge-casessa
+
+Sklearn-vakio importti `from sklearn.isotonic import IsotonicRegression` on jo `requirements.txt`:n kautta saatavilla (sklearn on jo riippuvuus).
+
+**Yksi huomio jatkoa varten:** dokumentoi mallin metatietoihin kumpi
+kalibrointi valittiin (`calibration_method: "isotonic" | "temperature"` +
+parametri). Tämä on tärkeää kun `predict_win_probabilities` ja
+`apply_isotonic` käytetään tuotannossa — väärä parametri = väärä jakauma.
+Aseta tämä `save_model` / `load_model` -funktioiden yhteyteen
+Vaiheen 3:n treenausajossa.
 
 ---
 
@@ -352,27 +373,112 @@ Hyvää työtä. Älä kiirehdi B:hen samalla intensiteetillä — A:n bugit oli
 
 **Auki olevat kysymykset:** ei mitään
 
-**Auditoijan tarkistus:** _(odottaa)_
+**Auditoijan tarkistus:** 🟡 OSITTAIN HYVÄKSYTTY 10.5.2026 (Opus 4.7) — sire toimii erinomaisesti, dam_sire on dead code joka pitää korjata
+
+### Sire-puoli (✅ erinomainen tulos)
+
+Empiirinen verifiointi data/ravit.db:tä vasten (2 512 riviä):
+- `sire_lifetime_win_rate` notna%: **89.01 %** ✅ (tavoite > 50 %, ylittää reilusti)
+- `sire_lifetime_starts` notna%: **95.54 %**
+- `sire_lifetime_starts` median: **375 starttia** — todella merkityksellinen otoskoko useimmille oreille
+- Win-rate-jakauma (p10–p90): **0.07–0.187** — uskottava jakauma trottihevosille (~13 % keskimäärin)
+
+Sire-puoli on tuotantokelpoinen. Pieni-otoksen suodatin `_SIRE_MIN_STARTS = 30` on järkevästi mitoitettu (mediaani 375 → suodatin sulkee pois vain harvinaisimmat).
+
+### Dam_sire-puoli (❌ kuollut piirre — pitää korjata ennen Vaihetta 3)
+
+```
+horses-taulu: 2 479 riviä
+  sire:     2 479 ei-NULL  (100 %)
+  dam:      2 479 ei-NULL  (100 %)
+  dam_sire:     0 ei-NULL  ( 0 %)  ← ❌
+```
+
+`dam_sire_lifetime_win_rate` notna%: **0.00 %**.
+`dam_sire_lifetime_starts` notna%: **0.00 %**.
+
+**Juurisyy:** `horses.dam_sire` ei ole koskaan populoitu DB:ssä — schema-sarake on olemassa mutta scheduler ei kirjoita siihen arvoa. `_upsert_horse()` ([scheduler.py:461](src/data/scheduler.py:461)) lukee `pedigree.get("mothersFather")` — todennäköisesti ATG:n vastaus käyttää eri kenttänimeä (mahdollisia: `motherSire`, `damSire`, `mothersSire`, tai sisäkkäinen rakenne kuten `pedigree.mother.father.name`).
+
+Sire-puoli toimii koska `pedigree.father.name` on oikea polku.
+
+**B2-funktion implementaatio ei ole bugaava** — se laskee oikein sen
+mitä saa. Bugi on tietolähteessä (horses-taulun täytössä).
+
+### Pakolliset korjaukset ennen B-vaiheen lopullista hyväksyntää
+
+**Vaihtoehto A (suositeltu) — Selvitä ATG:n kenttänimi ja korjaa upsert:**
+
+1. Hae yksi cached ATG-vastaus (esim. `data/raw/atg/race_XXX.json` jos tallennetaan, tai aja yksi `client.get_race()` ja dump pedigree-osio).
+2. Tarkista todellinen polku emänisälle. Yleisiä mahdollisuuksia:
+   - `pedigree.mothersFather.name` (nykyinen — väärä?)
+   - `pedigree.damSire` tai `pedigree.dam_sire`
+   - `pedigree.mother.father.name` (sisäkkäinen)
+3. Korjaa `_upsert_horse()`:in dam_sire-rivi.
+4. Aja `backfill`-tyylinen kertaluonteinen päivitys joka käy
+   `_upsert_horse`:n uudelleen kaikille 2 479 hevoselle. Tai pelkkä
+   uusi run-once seuraavana päivänä päivittäisten lähtöjen yhteydessä
+   alkaa täyttää kenttää eteenpäin.
+5. Verifioi: `SELECT COUNT(*) FROM horses WHERE dam_sire IS NOT NULL` > 0.
+
+**Vaihtoehto B — Poista dam_sire-piirteet FEATURE_COLS:ista toistaiseksi:**
+
+Jos dam_sire osoittautuu hankalasti löydettäväksi, kommentoi pois 2 kenttää
+ranker.py:stä TODO-merkinnällä. Älä jätä dead featuria FEATURE_COLS:iin
+— se hämärtää feature-importance-analyysiä.
+
+### Lisähuomio: lievä leakage-riski sire-aggregaatissa
+
+`sire_features` laskee aggregaatin INCLUDING current horse's own starts
+in `horse_starts`. Erityisesti pienten sirejen (< 100 starttia) kohdalla
+nykyisen hevosen kontribuutio voi olla 1–3 % rate:sta — pieni mutta
+formaalisti vuoto.
+
+Ei pakollinen korjaus nyt — vaikutus on pieni ja kohdistuu vain harvoihin
+hevosiin. Mutta dokumentoi rajoitus docstringiin ja harkitse Vaiheen 4 aikaan
+tiukempaa versiota joka suodattaa pois nykyisen `horse_id`:n omat startit
+ennen aggregaation laskemista.
+
+### Päätös
+
+**B2 on osittain valmis.** Saa edetä Vaiheen B yhteenvedosta seuraavaan
+ehdolla:
+
+- [x] **B2-jälkityö** ✅ (commit 1d36448, 10.5.2026) — Vaihtoehto A toteutettu:
+  - **Juurisyy selvitetty:** `pedigree.mothersFather` ei ole ATG:n käyttämä avain. Live-API-vastaus näyttää: avaimet ovat `father`, `mother`, `grandfather`. Dam_sire = `pedigree.grandfather.name`.
+  - **Korjaus `_upsert_horse()`:** `pedigree.get("grandfather")` (oli `pedigree.get("mothersFather")`)
+  - **`backfill_dam_sire()`** lisätty `scheduler.py`:hyn + CLI-komento `backfill-dam-sire`. Ryhmittelee API-kutsut race_id:n mukaan (~10 hevosta/kutsu). Idempotentti. Noin 2 500 hevosta / ~300 lähdön kautta ≈ 5–6 min.
+  - **2 uutta testiä** `test_scheduler.py`:ssa:
+    - `test_upsert_horse_reads_dam_sire_from_grandfather` ✅
+    - `test_upsert_horse_dam_sire_none_when_no_grandfather` ✅
+  - **192 testiä, kaikki passing** (paikallinen, 10.5.2026)
+  - **Hetzner-backfill odottaa:** aja `python -m src.data.scheduler backfill-dam-sire` Hetznerillä — tavoite `dam_sire_lifetime_win_rate` notna% > 85 %
 
 ---
 
 ## B3 · Devigged closing odds piirteenä
 
-**Status:** ❌ tekemättä — odota kunnes vähintään 2 vk puhdasta T-2min-dataa K1-korjauksen jälkeen
+**Status:** ⏸ ODOTUKSESSA — kerätään puhdasta T-2min-snapshot-dataa K1-korjauksen jälkeen, jatketaan ~24.5.2026
 
 **Auki olevat kysymykset:**
 
-**Auditoijan tarkistus:** _(odottaa)_
+**Auditoijan tarkistus:** Hyväksytty odotustila käyttäjän päätöksellä 10.5.2026 — B3 ei tehdä nyt, vaan kerätään 2 viikkoa T-2min-snapshot-dataa puhtaan K1-korjauksen jälkeen. Jatketaan ~24.5.2026.
 
 ---
 
-### 🛑 PYSÄYTYS — Vaihe B valmis
+### 🛑 PYSÄYTYS — Vaihe B osittain valmis
 
-- [ ] B1–B3 ✅
+- [x] B1 ✅ (isotonic regression hyväksytty)
+- [🟡] B2 osittain — sire toimii (89 %), dam_sire kuollut (0 %, juurisyy horses-taulun tyhjässä dam_sire-kentässä). Jälkitehtävä avoinna.
+- [⏸] B3 odotuksessa kunnes T-2min-dataa kertynyt
 - [ ] Mallin ensimmäinen treenausajo tehty B1:n vertailussa
-- [ ] Auditoija on hyväksynyt Vaihe B:n
 
-Auditoijan vahvistus Vaihe B:lle: _(odottaa)_
+### Auditoijan vahvistus Vaihe B:lle: 🟡 OSITTAINEN HYVÄKSYNTÄ 10.5.2026
+
+**Voi siirtyä Vaiheeseen C** mutta:
+- **Ennen Vaihetta 3 (mallin treenaus)**: korjaa B2:n dam_sire-puoli (vaihtoehto A tai B yllä). Tämä on **blokkeri Vaiheelle 3**, ei pelkkä kosmeettinen.
+- B3 jatketaan ~24.5.2026 kun T-2min-puhdasta dataa on kertynyt 2 viikkoa.
+
+**B1 isotonic on käyttövalmis** ensimmäiseen Vaiheen 3 treenausvertailuun.
 
 ---
 
