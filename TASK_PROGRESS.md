@@ -453,6 +453,23 @@ ehdolla:
   - **192 testiä, kaikki passing** (paikallinen, 10.5.2026)
   - **Hetzner-backfill odottaa:** aja `python -m src.data.scheduler backfill-dam-sire` Hetznerillä — tavoite `dam_sire_lifetime_win_rate` notna% > 85 %
 
+**Auditoijan tarkistus B2-jälkityölle:** _(odottaa — pyydän auditoijaa tarkistamaan:)_
+
+1. Lukemalla `src/data/scheduler.py` rivi 473: onko `pedigree.get("grandfather")` käytössä?
+2. Tarkistamalla `tests/test_scheduler.py` — onko `test_upsert_horse_reads_dam_sire_from_grandfather` ja `test_upsert_horse_dam_sire_none_when_no_grandfather` olemassa ja passing?
+3. Ajamalla Hetznerillä `git pull && python -m src.data.scheduler backfill-dam-sire` ja verifioimalla:
+   ```python
+   SELECT COUNT(*) FROM horses WHERE dam_sire IS NOT NULL;
+   -- tavoite: > 2 000 (nyt 0)
+   ```
+4. Empiirinen piirrevetokirjaus Hetznerillä (sama snippet kuin ennenkin mutta lisää `horses`-parametri):
+   ```python
+   from src.features.build_features import build_feature_matrix, fill_finish_positions
+   features = build_feature_matrix(fill_finish_positions(runners), races, horse_starts=horse_starts, horses=horses)
+   print("dam_sire notna%:", round(features['dam_sire_lifetime_win_rate'].notna().mean()*100, 2))
+   # tavoite: > 50 %
+   ```
+
 ---
 
 ## B3 · Devigged closing odds piirteenä
@@ -465,12 +482,12 @@ ehdolla:
 
 ---
 
-### 🛑 PYSÄYTYS — Vaihe B osittain valmis
+### 🛑 PYSÄYTYS — Vaihe B: jälkityö tehty, odottaa auditoijan lopullista vahvistusta
 
-- [x] B1 ✅ (isotonic regression hyväksytty)
-- [🟡] B2 osittain — sire toimii (89 %), dam_sire kuollut (0 %, juurisyy horses-taulun tyhjässä dam_sire-kentässä). Jälkitehtävä avoinna.
-- [⏸] B3 odotuksessa kunnes T-2min-dataa kertynyt
-- [ ] Mallin ensimmäinen treenausajo tehty B1:n vertailussa
+- [x] B1 ✅ (isotonic regression hyväksytty 10.5.2026)
+- [x] B2 jälkityö tehty ✅ (commit 1d36448) — `grandfather`-avainkorjaus + `backfill_dam_sire()` + 2 uutta testiä. Hetzner-backfill + empiirinen verifiointi odottaa auditoijan tarkistusta.
+- [⏸] B3 odotuksessa kunnes T-2min-dataa kertynyt (~24.5.2026)
+- [ ] Mallin ensimmäinen treenausajo tehty B1:n vertailussa (Vaihe 3)
 
 ### Auditoijan vahvistus Vaihe B:lle: 🟡 OSITTAINEN HYVÄKSYNTÄ 10.5.2026
 
