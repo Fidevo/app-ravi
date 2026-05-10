@@ -491,17 +491,23 @@ def _upsert_runner(
     obj.horse_id = str(horse["id"])
     obj.start_number = start.get("number")
     handicap = (start.get("distance") or 0) - (race.get("distance") or 0)
-    obj.handicap_meters = handicap if handicap > 0 else None
-    obj.driver = _person_name(start.get("driver"))
-    obj.trainer = _person_name(horse.get("trainer"))
+    # A4-korjaus (M1-symmetria): käytä _set_if_not_none ATG-aggregaateille,
+    # ohjastaja/valmentaja-aggregaateille ja kenkä/sulky-kentille.
+    # Näin refresh_day_runners (T-10min) ei ylikirjoita aiemmin haettuja
+    # hyviä arvoja jos ATG:n vastaus on tilapäisesti vajaa.
+    # Ydinkenttiä (race_id, horse_id, start_number) ei suojata — ne ovat
+    # kiinteitä koko rivin elinkaaren ajan.
+    _set_if_not_none(obj, "handicap_meters", handicap if handicap > 0 else None)
+    _set_if_not_none(obj, "driver", _person_name(start.get("driver")))
+    _set_if_not_none(obj, "trainer", _person_name(horse.get("trainer")))
     for k, v in _atg_aggregates(horse, race).items():
-        setattr(obj, k, v)
+        _set_if_not_none(obj, k, v)
     for k, v in _person_aggregates(start.get("driver"), race, "atg_driver").items():
-        setattr(obj, k, v)
+        _set_if_not_none(obj, k, v)
     for k, v in _person_aggregates(horse.get("trainer"), race, "atg_trainer").items():
-        setattr(obj, k, v)
+        _set_if_not_none(obj, k, v)
     for k, v in _shoes_sulky_fields(horse).items():
-        setattr(obj, k, v)
+        _set_if_not_none(obj, k, v)
     return (inserted, not inserted)
 
 

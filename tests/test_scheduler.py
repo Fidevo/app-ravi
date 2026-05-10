@@ -16,6 +16,7 @@ from src.data.scheduler import (
     _parse_terms,
     _person_aggregates,
     _set_if_not_none,
+    _upsert_runner,
     backfill_correct_atg_aggregates,
     backfill_race_class,
     capture_odds_snapshot,
@@ -1834,3 +1835,178 @@ def test_backfill_correct_atg_aggregates_skips_null_starts(tmp_path):
     assert result["updated"] == 0
     assert result["skipped_zero_starts"] == 0
     assert result["errors"] == 0
+
+
+# ---------------------------------------------------------------------------
+# A4 — _upsert_runner M1-symmetria: _set_if_not_none
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_runner_does_not_overwrite_existing_fields_with_none(tmp_path):
+    """A4-M1-symmetria: _upsert_runner ei ylikirjoita olemassa olevia ATG-arvoja
+    Nonella kun ATG:n vastaus on tilapäisesti vajaa.
+
+    Skenaario: refresh_day_runners kutsuu _upsert_runner kahdesti.
+    1. kutsu: täysi ATG-data → arvot tallennetaan.
+    2. kutsu: ATG:n vastaus puuttuu statistics → None-arvot.
+    Odotus: alkuperäiset arvot säilyvät (ei ylikirjoitusta).
+    """
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+
+    # Minimalinen race-dict jota _upsert_runner vaatii
+    race_dict = {
+        "id": RACE_ID,
+        "date": "2026-04-27",
+        "distance": 2140,
+        "startMethod": "auto",
+    }
+
+    # Start-dict 1. kutsulla: täysi data
+    start_full = {
+        "number": 77,
+        "distance": 2140,
+        "horse": {
+            "id": 200001,
+            "name": "M1 Test Horse",
+            "trainer": {"firstName": "Test", "lastName": "Trainer"},
+            "statistics": {
+                "life": {
+                    "starts": 42,
+                    "earnings": 500000,
+                    "placement": {"1": 8, "2": 12, "3": 6},
+                    "records": [],
+                },
+                "years": {"2026": {"starts": 6, "placement": {"1": 2}}},
+            },
+            "shoes": {
+                "reported": True,
+                "front": {"hasShoe": True, "changed": False},
+                "back": {"hasShoe": False, "changed": True},
+            },
+            "sulky": {
+                "reported": True,
+                "type": {"code": "AM", "changed": False},
+                "colour": {"code": "BL", "changed": False},
+            },
+        },
+        "driver": {
+            "id": 999001,
+            "firstName": "Test",
+            "lastName": "Driver",
+            "statistics": {
+                "years": {
+                    "2026": {
+                        "starts": 88,
+                        "placement": {"1": 15},
+                        "winPercentage": 1705,
+                        "earnings": 1200000,
+                    }
+                }
+            },
+        },
+    }
+
+    # Start-dict 2. kutsulla: statistics puuttuu (ATG vajaa vastaus)
+    start_no_stats = copy.deepcopy(start_full)
+    start_no_stats["horse"]["statistics"] = None
+    start_no_stats["driver"]["statistics"] = {"years": {}}
+
+    with Session_() as s:
+        s.add(Horse(horse_id="200001", name="M1 Test Horse"))
+        s.commit()
+
+    # 1. kutsu: luo runner täydellä datalla
+    with Session_() as s:
+        _upsert_runner(s, race_dict, start_full)
+        s.commit()
+
+    # Tarkista alkuperäiset arvot
+    with Session_() as s:
+        runner = s.get(Runner, f"{RACE_ID}_77")
+        assert runner is not None
+        original_starts = runner.atg_lifetime_starts
+        assert original_starts == 42, f"Alkuperäinen starts = {original_starts}, odotettiin 42"
+
+    # 2. kutsu: päivitä ilman statistiikkaa (vajaa ATG-vastaus)
+    with Session_() as s:
+        _upsert_runner(s, race_dict, start_no_stats)
+        s.commit()
+
+    # Arvot pitää säilyä — ei ylikirjoitusta Nonella
+    with Session_() as s:
+        runner = s.get(Runner, f"{RACE_ID}_77")
+        assert runner.atg_lifetime_starts == 42, (
+            f"A4-M1-vuoto: atg_lifetime_starts ylikirjoitettiin Nonella "
+            f"(sai {runner.atg_lifetime_starts!r}). "
+            "_upsert_runner pitää käyttää _set_if_not_none()."
+        )
+        # Kengät: alkuperäiset arvot säilyvät
+        assert runner.shoes_front is True, (
+            f"shoes_front ylikirjoitettiin: {runner.shoes_front!r}"
+        )
+
+
+def test_upsert_runner_writes_new_values_when_field_was_none(tmp_path):
+    """_upsert_runner kirjoittaa uuden arvon kun kenttä oli aiemmin None.
+
+    Varmistaa että _set_if_not_none ei estä ENSIMMÄISTÄ kirjoitusta
+    (None → arvo on sallittu, vain arvo → None ei ole).
+    """
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+
+    race_dict = {
+        "id": RACE_ID,
+        "date": "2026-04-27",
+        "distance": 2140,
+        "startMethod": "auto",
+    }
+
+    # 1. kutsu: vajaa data — statistics puuttuu
+    start_empty = {
+        "number": 78,
+        "distance": 2140,
+        "horse": {
+            "id": 200002,
+            "name": "Empty Horse",
+            "trainer": None,
+            "statistics": None,
+        },
+        "driver": None,
+    }
+
+    # 2. kutsu: täysi data
+    start_full = copy.deepcopy(SAMPLE_RACE["starts"][0])
+    start_full["number"] = 78
+    start_full["horse"]["id"] = 200002
+
+    with Session_() as s:
+        s.add(Horse(horse_id="200002", name="Empty Horse"))
+        s.commit()
+
+    with Session_() as s:
+        _upsert_runner(s, race_dict, start_empty)
+        s.commit()
+
+    with Session_() as s:
+        runner = s.get(Runner, f"{RACE_ID}_78")
+        assert runner.atg_lifetime_starts is None  # oli None
+
+    with Session_() as s:
+        _upsert_runner(s, race_dict, start_full)
+        s.commit()
+
+    with Session_() as s:
+        runner = s.get(Runner, f"{RACE_ID}_78")
+        # None → arvo: pitää päivittyä
+        assert runner.atg_lifetime_starts == 50, (
+            f"atg_lifetime_starts = {runner.atg_lifetime_starts!r}, odotettiin 50. "
+            "_set_if_not_none estää None→arvo-päivityksen (väärä toiminta)."
+        )

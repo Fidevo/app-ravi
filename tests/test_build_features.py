@@ -814,3 +814,225 @@ class TestFillFinishPositions:
         result = fill_finish_positions(df)
         positions = result["finish_position"].tolist()
         assert len(positions) == len(set(positions))   # kaikki uniikkeja
+
+
+# ---------------------------------------------------------------------------
+# A1 — B2 segmentoidut piirteet: regressiotestit
+# ---------------------------------------------------------------------------
+
+class TestSegmentedFormFeatures:
+    """Regressiotestit A1-korjaukselle: B2-segmentoidut muotopiirteet.
+
+    Ennen A1:tä: form_avg_finish_5_same_method ja form_avg_finish_5_same_dist
+    olivat 100 % NaN koska runners-DataFramessa ei ollut start_method/distance-
+    sarakkeita (ne ovat races-taulussa).
+
+    A1-korjaus: build_feature_matrix() pre-mergaa start_method ja distance
+    races-taulusta runners:iin ennen form_features()-kutsua.
+    """
+
+    def test_segmented_form_features_have_values_with_horse_starts(self):
+        """A1-regressio: form_avg_finish_5_same_method pitää tuottaa arvoja
+        kun horse_starts sisältää start_method-sarakkeen ja races-taulussa on se."""
+        # 5 historistarttia hevoselle 42 — kaikki autostartteja
+        hs = pd.DataFrame([
+            {"horse_id": 42, "race_date": f"2023-0{m}-01",
+             "finish_position": 2, "kilometer_time_seconds": 90.0,
+             "win_odds_final": 5.0, "start_method": "auto", "distance": 2140}
+            for m in range(1, 6)
+        ])
+        # Yksi runners-rivi — ilman start_method (kuten DB:stä haettuna)
+        runners = _runners(
+            {"horse_id": 42, "race_id": 1, "race_date": "2024-01-01",
+             "finish_position": 1, "kilometer_time_seconds": 88.0,
+             "win_odds_final": 3.0, "driver": "Arto", "trainer": "Matti",
+             "start_number": 2, "handicap_meters": 0},
+        )
+        races = _races({"race_id": 1, "track": "Solvalla", "distance": 2140,
+                        "start_method": "auto"})
+
+        result = build_feature_matrix(runners, races, horse_starts=hs)
+
+        # A1-korjaus: pitää tuottaa arvoja, ei 100 % NaN
+        notna_pct = result["form_avg_finish_5_same_method"].notna().mean()
+        assert notna_pct > 0.5, (
+            f"form_avg_finish_5_same_method notna% = {notna_pct:.1%}, odotettiin > 50 %. "
+            "A1-korjaus (pre-merge start_method races-taulusta) ei toimi."
+        )
+
+    def test_segmented_dist_features_have_values(self):
+        """A1-regressio: form_avg_finish_5_same_dist pitää tuottaa arvoja."""
+        hs = pd.DataFrame([
+            {"horse_id": 7, "race_date": f"2023-0{m}-01",
+             "finish_position": 3, "kilometer_time_seconds": 91.0,
+             "win_odds_final": 6.0, "start_method": "auto", "distance": 2140}
+            for m in range(1, 6)
+        ])
+        runners = _runners(
+            {"horse_id": 7, "race_id": 1, "race_date": "2024-01-01",
+             "finish_position": 2, "kilometer_time_seconds": 90.0,
+             "win_odds_final": 4.0, "driver": "B", "trainer": "C",
+             "start_number": 1, "handicap_meters": 0},
+        )
+        races = _races({"race_id": 1, "track": "Solvalla",
+                        "distance": 2140, "start_method": "auto"})
+
+        result = build_feature_matrix(runners, races, horse_starts=hs)
+
+        notna_pct = result["form_avg_finish_5_same_dist"].notna().mean()
+        assert notna_pct > 0.5, (
+            f"form_avg_finish_5_same_dist notna% = {notna_pct:.1%}, odotettiin > 50 %."
+        )
+
+    def test_segmented_cols_in_build_feature_matrix_output(self):
+        """build_feature_matrix() tuottaa molemmat segmentoidut sarakkeet."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 1, "race_date": "2024-01-01",
+             "finish_position": 1, "driver": "A", "trainer": "B",
+             "start_number": 1, "handicap_meters": 0},
+        )
+        races = _races({"race_id": 1, "track": "Solvalla",
+                        "distance": 2140, "start_method": "auto"})
+
+        result = build_feature_matrix(runners, races)
+
+        assert "form_avg_finish_5_same_method" in result.columns, \
+            "form_avg_finish_5_same_method puuttuu tuloksesta"
+        assert "form_avg_finish_5_same_dist" in result.columns, \
+            "form_avg_finish_5_same_dist puuttuu tuloksesta"
+
+    def test_no_column_conflicts_from_pre_merge(self):
+        """A1-pre-merge + race_setup_features ei saa tuottaa _x/_y-sarakkeiden nimiä."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 1, "race_date": "2024-01-01",
+             "finish_position": 2, "driver": "A", "trainer": "B",
+             "start_number": 2, "handicap_meters": 0},
+        )
+        races = _races({"race_id": 1, "track": "Solvalla",
+                        "distance": 2140, "start_method": "auto"})
+
+        result = build_feature_matrix(runners, races)
+
+        conflict_cols = [c for c in result.columns if c.endswith("_x") or c.endswith("_y")]
+        assert not conflict_cols, (
+            f"Merge-konflikti: tuloksessa on _x/_y-sarakkeita: {conflict_cols}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A2 — B1 track code -normalisointi: regressiotestit
+# ---------------------------------------------------------------------------
+
+class TestTrackCodeNormalization:
+    """Regressiotestit A2-korjaukselle: Travsport trackCode → ATG ratanimi.
+
+    Ennen A2:ta: horse_starts.track oli lyhennekoodeja ("S", "Ax") mutta
+    races.track on ATG-nimiä ("Solvalla", "Axevalla"). drop_duplicates ja
+    groupby eivät tunnistaneet samaa rataa → track_horse_starts = 0 aina.
+
+    A2-korjaus: race_setup_features() normalisoi horse_starts.track TRACKCODE_TO_NAME:llä.
+    """
+
+    def test_track_code_s_matches_solvalla(self):
+        """A2-regressio: horse_starts-rivi trackCode='S' matchaa runners-rivin
+        track='Solvalla' ja kasvattaa track_horse_starts >= 1."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 1, "race_date": "2024-05-01",
+             "finish_position": 2, "start_number": 3, "handicap_meters": 0},
+        )
+        races = _races({"race_id": 1, "track": "Solvalla",
+                        "distance": 2140, "start_method": "auto"})
+        # horse_starts käyttää Travsport-koodia "S" = Solvalla
+        hs = pd.DataFrame([
+            {"horse_id": 1, "race_date": "2024-01-01", "track": "S",
+             "finish_position": 1, "kilometer_time_seconds": 87.0,
+             "win_odds_final": 3.0, "start_method": "auto", "distance": 2140},
+            {"horse_id": 1, "race_date": "2024-02-15", "track": "S",
+             "finish_position": 2, "kilometer_time_seconds": 89.0,
+             "win_odds_final": 5.0, "start_method": "auto", "distance": 2140},
+            {"horse_id": 1, "race_date": "2024-03-20", "track": "S",
+             "finish_position": 1, "kilometer_time_seconds": 88.0,
+             "win_odds_final": 4.0, "start_method": "auto", "distance": 2140},
+        ])
+        result = race_setup_features(runners, races, horse_starts=hs)
+
+        track_starts = result.iloc[0]["track_horse_starts"]
+        assert track_starts >= 1, (
+            f"track_horse_starts = {track_starts}, odotettiin >= 1. "
+            "A2-trackCode-normalisointi ei toimi: 'S' ei mapannut 'Solvalla':ksi."
+        )
+
+    def test_multiple_track_codes_normalize_correctly(self):
+        """Eri ratakoodit normalisoituvat oikeiksi ATG-nimiksi."""
+        from src.data.track_codes import TRACKCODE_TO_NAME, normalize_track
+        for code, atg_name in [("S", "Solvalla"), ("Ax", "Axevalla"),
+                                ("Bo", "Boden"), ("Bs", "Bollnäs"),
+                                ("B", "Bergsåker"), ("Mp", "Mantorp"),
+                                ("Å", "Åby")]:
+            result = normalize_track(code)
+            assert result == atg_name, (
+                f"normalize_track({code!r}) = {result!r}, odotettiin {atg_name!r}"
+            )
+
+    def test_unknown_code_returned_as_is(self):
+        """Tuntematon koodi palautetaan sellaisenaan (ei kaadu)."""
+        from src.data.track_codes import normalize_track
+        result = normalize_track("XYZ")
+        assert result == "XYZ"
+
+    def test_none_returns_none(self):
+        """normalize_track(None) palauttaa None."""
+        from src.data.track_codes import normalize_track
+        assert normalize_track(None) is None
+
+
+# ---------------------------------------------------------------------------
+# A4b — B1/B2 realistinen pipeline-testi
+# ---------------------------------------------------------------------------
+
+class TestB1B2RealisticPipeline:
+    """A4b: B1 ja B2 tuottavat arvoja realistisessa pipelinessa.
+
+    Emuloi tuotantorakennetta: runners tulee SQL:stä ilman start_method/distance,
+    horse_starts tulee Travsportista trackCodella. Varmistaa että A1+A2-korjaukset
+    yhdessä tuottavat arvoja.
+    """
+
+    def test_b1_b2_produce_values_in_realistic_pipeline(self):
+        """Regressio: B1 (track_horse_win_rate) ja B2 (segmentoidut piirteet)
+        tuottavat non-NaN-arvoja kun runners on ilman start_method/distance
+        ja horse_starts käyttää Travsport trackCodeja."""
+        # horse_starts: 5 starttia Solvallassa, Travsport-koodilla "S"
+        hs = pd.DataFrame([
+            {"horse_id": 99, "race_date": f"2023-0{m}-01", "track": "S",
+             "finish_position": 2, "kilometer_time_seconds": 89.0,
+             "win_odds_final": 4.0, "start_method": "auto", "distance": 2140}
+            for m in range(1, 6)
+        ])
+        # runners: tullut DB:stä — EI start_method eikä distance -saraketta
+        runners = pd.DataFrame([{
+            "horse_id": 99, "race_id": 1, "race_date": "2024-01-15",
+            "finish_position": 1, "kilometer_time_seconds": 88.0,
+            "win_odds_final": 3.0, "driver": "Arto", "trainer": "Matti",
+            "start_number": 2, "handicap_meters": 0,
+        }])
+        # races: ATG-nimet
+        races = _races({"race_id": 1, "track": "Solvalla",
+                        "distance": 2140, "start_method": "auto"})
+
+        result = build_feature_matrix(runners, races, horse_starts=hs)
+
+        # B1: track_horse_starts pitää olla >= 5 (5 historistarttia Solvallassa)
+        track_starts = result.iloc[0]["track_horse_starts"]
+        assert track_starts >= 5, (
+            f"track_horse_starts = {track_starts}, odotettiin >= 5. "
+            "B1-track-normalisointi ei toimi."
+        )
+
+        # B1: track_horse_win_rate ei saa olla NaN (on >= 1 startti)
+        assert not pd.isna(result.iloc[0]["track_horse_win_rate"]), \
+            "track_horse_win_rate on NaN vaikka track_horse_starts >= 5"
+
+        # B2: form_avg_finish_5_same_method ei saa olla NaN
+        assert not pd.isna(result.iloc[0]["form_avg_finish_5_same_method"]), \
+            "form_avg_finish_5_same_method on NaN — A1-pre-merge ei toimi"

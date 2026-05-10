@@ -278,7 +278,13 @@ def race_setup_features(
         riviin. .transform() pitää laskun ryhmän sisällä.
     """
     race_cols = _RACE_COLS_BASE + [c for c in _RACE_COLS_EXTRA if c in races.columns]
-    df = runners.merge(races[race_cols], on="race_id", how="left")
+    # A1-korjaus: build_feature_matrix() saattaa olla jo pre-mergannut start_method
+    # ja distance runnersiin (jotta form_features() saa ne B2-laskentaan). Suodata
+    # ne pois race_cols:ista jotta merge ei tee _x/_y-suffix-konfliktia.
+    cols_not_in_runners = [
+        c for c in race_cols if c == "race_id" or c not in runners.columns
+    ]
+    df = runners.merge(races[cols_not_in_runners], on="race_id", how="left")
 
     df["inside_post"] = (df["start_number"] <= 3).astype(int)
     df["back_row"] = (df["handicap_meters"].fillna(0) > 0).astype(int)
@@ -297,9 +303,18 @@ def race_setup_features(
     pool_current["_is_runner"] = True
 
     if horse_starts is not None and len(horse_starts) > 0 and "track" in horse_starts.columns:
+        from src.data.track_codes import TRACKCODE_TO_NAME
         pool_hist = horse_starts[["horse_id", "race_date", "track", "finish_position"]].copy()
         pool_hist["horse_id"] = pool_hist["horse_id"].astype(str)
         pool_hist["race_date"] = pd.to_datetime(pool_hist["race_date"])
+        # A2-korjaus: normalisoi Travsport-koodit ATG:n rataniksi.
+        # horse_starts.track on lyhennekoodeja ("S", "Ax" jne.) mutta
+        # races.track (= pool_current.track) on ATG-nimiä ("Solvalla" jne.).
+        # Ilman normalisointia drop_duplicates ja groupby eivät tunnista
+        # samaa rataa — track_horse_starts ja track_horse_win_rate pysyvät 0.4 %.
+        pool_hist["track"] = pool_hist["track"].map(
+            lambda t: TRACKCODE_TO_NAME.get(t, t) if t is not None else None
+        )
         pool_hist["_is_runner"] = False
         # hist ensin, current viimeisenä → drop_duplicates(keep="last") säilyttää runners-arvon
         pool = pd.concat([pool_hist, pool_current], ignore_index=True)
@@ -470,7 +485,24 @@ def build_feature_matrix(
     Valinnainen horse_age-piirre: lisää birth_year runners-DataFrameen
     JOIN:lla horses-tauluun ennen tätä kutsua.
     """
-    df = form_features(runners, horse_starts=horse_starts)
+    # A1-korjaus: pre-merge start_method ja distance races-taulusta runners:iin
+    # ENNEN form_features()-kutsua. Ilman tätä seg_cols_avail=[] aina koska
+    # runners-taulussa ei ole näitä sarakkeita — ne ovat races-taulussa.
+    # Tämä mahdollistaa B2-segmentoidut piirteet (form_avg_finish_5_same_method,
+    # form_avg_finish_5_same_dist) jotka olivat 100 % NaN tuotannossa.
+    # horse_starts:ssa nämä sarakkeet ovat jo natiivisti (Travsport tallentaa ne).
+    race_meta_cols = ["race_id"]
+    for c in ("start_method", "distance"):
+        if c in races.columns and c not in runners.columns:
+            race_meta_cols.append(c)
+    if len(race_meta_cols) > 1:
+        runners_with_meta = runners.merge(
+            races[race_meta_cols], on="race_id", how="left"
+        )
+    else:
+        runners_with_meta = runners
+
+    df = form_features(runners_with_meta, horse_starts=horse_starts)
     df = driver_trainer_features(df)
     df = race_setup_features(df, races, horse_starts=horse_starts)  # B1: track-historia
     df = derived_features(df)

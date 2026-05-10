@@ -48,13 +48,17 @@ FEATURE_COLS: list[str] = [
     "atg_lifetime_win_rate",
     "atg_lifetime_top3_rate",
     "atg_lifetime_starts",
-    "atg_current_year_win_rate",
+    # A3: K1-vuoto-pollutoidut kentät — kommentoitu pois 2026-05-10.
+    # ATG päivittää nämä post-race → arvot olivat n+1-race-tilassa eikä pre-race.
+    # backfill_correct_atg_aggregates() korjasi lifetime-kentät mutta ei näitä
+    # (nimittäjä ei tiedossa). Aktivoi takaisin kun >= 600 puhdasta lähtöä
+    # on kerätty K1-korjauksen (2026-05-10) jälkeen — eli n. 2026-09.
+    # "atg_current_year_win_rate",  # K1-pollutoitu
+    # "atg_driver_win_pct",         # K1-pollutoitu
+    # "atg_driver_starts",          # K1-pollutoitu
+    # "atg_trainer_win_pct",        # K1-pollutoitu
+    # "atg_trainer_starts",         # K1-pollutoitu
     "atg_best_km_for_this_setup",   # paras km tämä matka+starttimuoto
-    # --- ATG-aggregaatit ohjastajasta ja valmentajasta (kuluva vuosi) ---
-    "atg_driver_win_pct",
-    "atg_driver_starts",
-    "atg_trainer_win_pct",
-    "atg_trainer_starts",
     # --- Meistä lasketut rolling-tilastot (kasvavat ajan myötä, parempia V4+) ---
     "driver_win_rate_365d",
     "driver_starts_365d",
