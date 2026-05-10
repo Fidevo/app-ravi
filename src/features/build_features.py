@@ -83,8 +83,16 @@ def driver_trainer_features(
 ) -> pd.DataFrame:
     """Rolling-tilastot ohjastajalle ja valmentajalle ennen kutakin lähtöä.
 
-    Käyttää 365 vuorokauden takaista ikkunaa (rolling), ei koko historiaa,
-    jotta piirre heijastaa nykyistä iskussa olevaa muotoa.
+    Käyttää lookback_days vuorokauden takaista ikkunaa (rolling), ei koko
+    historiaa, jotta piirre heijastaa nykyistä iskussa olevaa muotoa.
+
+    Korjattu (bugit #5a ja #5b):
+      - Ei käytetä .reset_index().to_flat_index() -kombinaatiota, joka
+        kaatui IndexErroriin kun ensimmäinen kolumni (rooli) oli merkkijono
+        eikä tuple.
+      - drop_duplicates ennen mergeä estää M:N-riviräjähdyksen kun sama
+        ohjastaja ajaa useita lähtöjä samana päivänä (closed="left" antaa
+        saman rolling-tuloksen kaikille saman päivän lähdöille).
     """
     df = runners.sort_values("race_date").copy()
     df["race_date"] = pd.to_datetime(df["race_date"])
@@ -92,25 +100,32 @@ def driver_trainer_features(
     df["is_top3"] = (df["finish_position"] <= 3).astype(int)
 
     for role in ("driver", "trainer"):
-        # rolling per role
-        rolled = (
+        # Rolling-aggregaatti per rooli aikaindeksillä, closed="left" = ei leakagea
+        agg = (
             df.set_index("race_date")
             .groupby(role)[["is_win", "is_top3"]]
             .rolling(f"{lookback_days}D", closed="left")
             .agg(["mean", "count"])
-            .reset_index()
         )
-        rolled.columns = [
-            "race_date" if c[0] == "race_date" else f"{role}_{c[0]}_{c[1]}"
-            for c in rolled.columns.to_flat_index()
+        # Indeksi on MultiIndex (role_value, race_date) — nimetään eksplisiittisesti
+        # ilman to_flat_index()-ongelmia. Sarakkeiden järjestys: agg() palauttaa
+        # (is_win, mean), (is_win, count), (is_top3, mean), (is_top3, count).
+        agg.index.names = [role, "race_date"]
+        agg.columns = [
+            f"{role}_win_rate_{lookback_days}d",   # is_win mean
+            f"{role}_starts_{lookback_days}d",      # is_win count (= nähdyt starttimäärät ikkunassa)
+            f"{role}_top3_rate_{lookback_days}d",  # is_top3 mean
+            f"{role}_top3_count_{lookback_days}d", # is_top3 count
         ]
-        # Liitä takaisin runners-tasolle
-        # (yksinkertaistettu - tuotannossa kannattaa indeksoida tarkemmin)
-        df = df.merge(
-            rolled.rename(columns={role: role}),
-            on=["race_date", role],
-            how="left",
-        )
+        agg = agg.reset_index()
+
+        # Poistetaan duplikaatit ennen mergeä:
+        # jos ohjastaja ajaa N lähtöä samana päivänä, closed="left" antaa saman
+        # rolling-tuloksen kaikille → tarvitaan vain yksi rivi per (role, päivä).
+        # Ilman tätä merge tekee N×N-ristitulon → rivimäärä räjähtää.
+        agg = agg.drop_duplicates(subset=[role, "race_date"])
+
+        df = df.merge(agg, on=["race_date", role], how="left")
 
     return df.drop(columns=["is_win", "is_top3"])
 
@@ -129,6 +144,15 @@ def race_setup_features(runners: pd.DataFrame, races: pd.DataFrame) -> pd.DataFr
       - track_horse_starts    : kuinka monta kertaa hevonen on aiemmin
                                 ajanut tällä radalla (kokemus)
       - track_horse_win_rate  : voitto-% kyseisellä radalla
+
+    Korjattu (bugi #8):
+      - track_horse_wins_cum käyttää nyt .transform(lambda s: s.cumsum().shift(1))
+        eikä .cumsum().shift(1). groupby().cumsum() palauttaa tavallisen Seriesin,
+        joten perässä tuleva .shift(1) oli globaali — edellisen (horse_id, track)
+        -ryhmän viimeinen kumulatiivinen summa vuoti seuraavan ryhmän ensimmäiseen
+        riviin. Tämä näkyy virheellisenä win_ratena kun hevonen vuorottelee ratojen
+        välillä (esim. Solvalla-Bergsåker-Solvalla → 2. Solvalla-startti sai väärän
+        wins_cum-arvon). .transform() pitää laskun ryhmän sisällä.
     """
     df = runners.merge(
         races[["race_id", "track", "distance", "start_method"]],
@@ -151,10 +175,11 @@ def race_setup_features(runners: pd.DataFrame, races: pd.DataFrame) -> pd.DataFr
     df["track_horse_starts"] = (
         df.groupby(["horse_id", "track"]).cumcount()
     )
+    # Korjattu: transform() pitää cumsum+shift ryhmän sisällä eikä vuoda
+    # edellisen (horse_id, track) -ryhmän arvoja seuraavan alkuun.
     df["track_horse_wins_cum"] = (
         df.groupby(["horse_id", "track"])["is_win"]
-        .cumsum()
-        .shift(1)
+        .transform(lambda s: s.cumsum().shift(1))
         .fillna(0)
     )
     df["track_horse_win_rate"] = np.where(
