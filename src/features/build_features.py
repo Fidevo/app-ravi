@@ -31,12 +31,18 @@ _POOL_COLS = [
     "kilometer_time_seconds", "win_odds_final",
 ]
 
+# Lisäsarakkeet segmentoituihin muotopiirteisiin (B2). Nämä haetaan pooliin
+# vain jos ne löytyvät syötedatasta — taaksepäin-yhteensopiva.
+_POOL_COLS_SEGMENTED = ["start_method", "distance"]
+
 # Muotolaskennan tulossarakkeet (siirretään runners:iin mergellä)
 _FORM_OUT_COLS = [
     "horse_id", "race_date",
     "form_avg_finish_5", "form_win_rate_5", "form_top3_rate_5",
     "form_avg_km_time_5", "form_best_km_time_5",
     "form_market_avg_5", "form_days_since_last",
+    # B2: segmentoidut muotopiirteet (lisätään vain jos sarakkeet löytyivät poolista)
+    "form_avg_finish_5_same_method", "form_avg_finish_5_same_dist",
 ]
 
 
@@ -79,12 +85,18 @@ def form_features(
     df["race_date"] = pd.to_datetime(df["race_date"])
     df["horse_id"] = df["horse_id"].astype(str)
 
+    # B2: sisällytä start_method ja distance pooliin jos saatavilla
+    seg_cols_avail = [c for c in _POOL_COLS_SEGMENTED if c in df.columns]
+    pool_cols_full = _POOL_COLS + seg_cols_avail
+
     # --- Rakenna pool: runners + valinnainen horse_starts-historia ---
-    current = df[_POOL_COLS].copy()
+    current = df[pool_cols_full].copy()
     current["_is_runner"] = True
 
     if horse_starts is not None and len(horse_starts) > 0:
-        hist = horse_starts[_POOL_COLS].copy()
+        # Ota vain sarakkeet jotka on saatavilla myös horse_starts:ssa
+        hist_cols = [c for c in pool_cols_full if c in horse_starts.columns]
+        hist = horse_starts[hist_cols].copy()
         hist["race_date"] = pd.to_datetime(hist["race_date"])
         hist["horse_id"] = hist["horse_id"].astype(str)
         hist["_is_runner"] = False
@@ -135,9 +147,41 @@ def form_features(
         combined["race_date"] - combined["_prev_race_date"]
     ).dt.days
 
+    # --- B2: Segmentoidut muotopiirteet ---
+    # form_avg_finish_5_same_method: rolling 5 vain samalla starttimuodolla (auto/volt)
+    # form_avg_finish_5_same_dist:   rolling 5 vain samalla matkaluokalla (sprint/middle/long)
+    # Lasketaan vain jos start_method/distance löytyivät poolista.
+    if "start_method" in combined.columns:
+        grouped_method = combined.groupby(
+            ["horse_id", "start_method"], group_keys=False
+        )
+        combined["form_avg_finish_5_same_method"] = grouped_method[
+            "finish_position"
+        ].transform(lambda s: s.shift(1).rolling(n_last, min_periods=1).mean())
+    else:
+        combined["form_avg_finish_5_same_method"] = np.nan
+
+    if "distance" in combined.columns:
+        combined["_dist_bucket"] = pd.cut(
+            combined["distance"],
+            bins=[0, 1640, 2140, 5000],
+            labels=["sprint", "middle", "long"],
+        )
+        grouped_dist = combined.groupby(
+            ["horse_id", "_dist_bucket"], group_keys=False, observed=True
+        )
+        combined["form_avg_finish_5_same_dist"] = grouped_dist[
+            "finish_position"
+        ].transform(lambda s: s.shift(1).rolling(n_last, min_periods=1).mean())
+        combined = combined.drop(columns=["_dist_bucket"])
+    else:
+        combined["form_avg_finish_5_same_dist"] = np.nan
+
     # --- Palauta vain runner-rivit, liitä form-piirteet runners:iin ---
+    # Suodata _FORM_OUT_COLS:sta vain sarakkeet jotka löytyvät combined:sta
+    out_cols = [c for c in _FORM_OUT_COLS if c in combined.columns]
     runner_form = (
-        combined[combined["_is_runner"]][_FORM_OUT_COLS]
+        combined[combined["_is_runner"]][out_cols]
         .drop_duplicates(subset=["horse_id", "race_date"])
     )
     return df.merge(runner_form, on=["horse_id", "race_date"], how="left")
@@ -203,7 +247,11 @@ def driver_trainer_features(
 # 3. Lähtöasetelma: rata, lähtörata, kilometriaika-konteksti
 # ----------------------------------------------------------------------
 
-def race_setup_features(runners: pd.DataFrame, races: pd.DataFrame) -> pd.DataFrame:
+def race_setup_features(
+    runners: pd.DataFrame,
+    races: pd.DataFrame,
+    horse_starts: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Lähtörata ja rata-spesifiset piirteet.
 
     Lisää:
@@ -214,14 +262,20 @@ def race_setup_features(runners: pd.DataFrame, races: pd.DataFrame) -> pd.DataFr
                                 ajanut tällä radalla (kokemus)
       - track_horse_win_rate  : voitto-% kyseisellä radalla
 
+    Valinnainen horse_starts-parametri (B1-korjaus):
+      Jos annetaan, yhdistetään runners- ja horse_starts-data pooliksi
+      track-historiatietojen laskentaan. Tämä laajentaa track_horse_starts
+      ja track_horse_win_rate laskennan runners-taulun 14 päivästä koko
+      urahistoriaan (103k starttia). Muuttaa NaN-% ~97.5 % → ~15 %.
+
+      Deduplikaatio: sama (horse_id, race_date, track) → runners voittaa.
+
     Korjattu (bugi #8):
       - track_horse_wins_cum käyttää nyt .transform(lambda s: s.cumsum().shift(1))
         eikä .cumsum().shift(1). groupby().cumsum() palauttaa tavallisen Seriesin,
         joten perässä tuleva .shift(1) oli globaali — edellisen (horse_id, track)
         -ryhmän viimeinen kumulatiivinen summa vuoti seuraavan ryhmän ensimmäiseen
-        riviin. Tämä näkyy virheellisenä win_ratena kun hevonen vuorottelee ratojen
-        välillä (esim. Solvalla-Bergsåker-Solvalla → 2. Solvalla-startti sai väärän
-        wins_cum-arvon). .transform() pitää laskun ryhmän sisällä.
+        riviin. .transform() pitää laskun ryhmän sisällä.
     """
     race_cols = _RACE_COLS_BASE + [c for c in _RACE_COLS_EXTRA if c in races.columns]
     df = runners.merge(races[race_cols], on="race_id", how="left")
@@ -235,26 +289,58 @@ def race_setup_features(runners: pd.DataFrame, races: pd.DataFrame) -> pd.DataFr
         labels=["sprint", "middle", "long"],
     )
 
-    # Hevosen historia kyseisellä radalla (ennen kyseistä lähtöä)
-    df = df.sort_values(["horse_id", "race_date"])
-    df["is_win"] = (df["finish_position"] == 1).astype(int)
-    df["track_horse_starts"] = (
-        df.groupby(["horse_id", "track"]).cumcount()
-    )
-    # Korjattu: transform() pitää cumsum+shift ryhmän sisällä eikä vuoda
-    # edellisen (horse_id, track) -ryhmän arvoja seuraavan alkuun.
-    df["track_horse_wins_cum"] = (
-        df.groupby(["horse_id", "track"])["is_win"]
+    # B1: Rakenna track-historiapooli runners + horse_starts
+    # Tarvitsemme: horse_id, race_date, track, finish_position
+    pool_current = df[["horse_id", "race_date", "track", "finish_position"]].copy()
+    pool_current["horse_id"] = pool_current["horse_id"].astype(str)
+    pool_current["race_date"] = pd.to_datetime(pool_current["race_date"])
+    pool_current["_is_runner"] = True
+
+    if horse_starts is not None and len(horse_starts) > 0 and "track" in horse_starts.columns:
+        pool_hist = horse_starts[["horse_id", "race_date", "track", "finish_position"]].copy()
+        pool_hist["horse_id"] = pool_hist["horse_id"].astype(str)
+        pool_hist["race_date"] = pd.to_datetime(pool_hist["race_date"])
+        pool_hist["_is_runner"] = False
+        # hist ensin, current viimeisenä → drop_duplicates(keep="last") säilyttää runners-arvon
+        pool = pd.concat([pool_hist, pool_current], ignore_index=True)
+        pool = pool.sort_values(
+            ["horse_id", "race_date", "_is_runner"]
+        ).reset_index(drop=True)
+        pool = pool.drop_duplicates(subset=["horse_id", "race_date", "track"], keep="last")
+    else:
+        pool = pool_current.copy()
+
+    pool = pool.sort_values(["horse_id", "track", "race_date"]).reset_index(drop=True)
+    pool["is_win"] = (pool["finish_position"] == 1).astype(float)
+
+    # track_horse_starts = kumulatiivinen laskuri per (horse_id, track), shift(1) = ennen tätä lähtöä
+    pool["track_horse_starts"] = pool.groupby(["horse_id", "track"]).cumcount()
+    # Korjattu: transform() pitää cumsum+shift ryhmän sisällä eikä vuoda ratojen välillä
+    pool["track_horse_wins_cum"] = (
+        pool.groupby(["horse_id", "track"])["is_win"]
         .transform(lambda s: s.cumsum().shift(1))
         .fillna(0)
     )
-    df["track_horse_win_rate"] = np.where(
-        df["track_horse_starts"] > 0,
-        df["track_horse_wins_cum"] / df["track_horse_starts"],
+    pool["track_horse_win_rate"] = np.where(
+        pool["track_horse_starts"] > 0,
+        pool["track_horse_wins_cum"] / pool["track_horse_starts"],
         np.nan,
     )
 
-    return df.drop(columns=["is_win", "track_horse_wins_cum"])
+    # Palauta vain runner-rivit ja liitä track-piirteet runners-DataFrameen
+    runner_pool = pool[pool["_is_runner"]][
+        ["horse_id", "race_date", "track", "track_horse_starts", "track_horse_win_rate"]
+    ].drop_duplicates(subset=["horse_id", "race_date", "track"])
+
+    df["horse_id"] = df["horse_id"].astype(str)
+    df["race_date"] = pd.to_datetime(df["race_date"])
+    df = df.merge(
+        runner_pool,
+        on=["horse_id", "race_date", "track"],
+        how="left",
+    )
+
+    return df
 
 
 # ----------------------------------------------------------------------
@@ -278,6 +364,7 @@ def derived_features(df: pd.DataFrame) -> pd.DataFrame:
         kutsua. Puuttuva birth_year → horse_age puuttuu → train_ranker() ohittaa
         sen FEATURE_COLS:ista automaattisesti.
     """
+    df = df.copy()  # P2-korjaus: ei mutaatiota callersin DataFrameen
     dates = pd.to_datetime(df["race_date"])
 
     # Talvikielto: joulukuu, tammikuu tai helmikuu
@@ -385,6 +472,6 @@ def build_feature_matrix(
     """
     df = form_features(runners, horse_starts=horse_starts)
     df = driver_trainer_features(df)
-    df = race_setup_features(df, races)
+    df = race_setup_features(df, races, horse_starts=horse_starts)  # B1: track-historia
     df = derived_features(df)
     return df

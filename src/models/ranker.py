@@ -41,6 +41,9 @@ FEATURE_COLS: list[str] = [
     "form_best_km_time_5",
     "form_market_avg_5",
     "form_days_since_last",
+    # B2: segmentoidut muotopiirteet — vain sama starttimuoto / matkaluokka
+    "form_avg_finish_5_same_method",
+    "form_avg_finish_5_same_dist",
     # --- ATG-aggregaatit hevosesta: koko ura (runners-taulusta suoraan) ---
     "atg_lifetime_win_rate",
     "atg_lifetime_top3_rate",
@@ -89,18 +92,25 @@ def _resolve_cols(
     df: pd.DataFrame,
     feature_cols: Sequence[str],
     categorical_cols: Sequence[str],
+    log_missing: bool = True,
 ) -> tuple[list[str], list[str]]:
     """Suodata piirrelistat df:ssä olemassa oleviin sarakkeisiin.
 
-    Ohitetaan puuttuvat sarakkeet ja kirjataan varoitus. Tämä mahdollistaa
-    valinnaisten piirteiden (esim. horse_age) lisäämisen FEATURE_COLS:iin
-    ilman että kaikki ympäristöt vaativat kyseistä saraketta.
+    Ohitetaan puuttuvat sarakkeet. Tämä mahdollistaa valinnaisten piirteiden
+    (esim. horse_age) lisäämisen FEATURE_COLS:iin ilman että kaikki ympäristöt
+    vaativat kyseistä saraketta.
+
+    Args:
+        log_missing: Kirjaako WARNING puuttuvista sarakkeista (P3-korjaus).
+            True treeniajossa (train_ranker), False ennustamisessa (predict_win_probabilities).
+            Näin log ei täyty toistuvista identtisistä varoituksista joka lähdön
+            ennusteessa, mutta koulutusajon puutteet näkyvät selvästi.
     """
     avail_feat = [c for c in feature_cols if c in df.columns]
     avail_cat = [c for c in categorical_cols if c in df.columns]
     missing_feat = set(feature_cols) - set(avail_feat)
     missing_cat = set(categorical_cols) - set(avail_cat)
-    if missing_feat or missing_cat:
+    if log_missing and (missing_feat or missing_cat):
         logger.warning(
             "Puuttuvat piirteet ohitetaan — lisää birth_year JOIN:lla tai "
             "tarkista data: numeeriset=%s, kategoriset=%s",
@@ -164,18 +174,72 @@ def train_ranker(
     return lgb.train(params, train_set, num_boost_round=num_boost_round)
 
 
+def calibrate_temperature(
+    predictions: pd.DataFrame,
+) -> float:
+    """Opi optimaalinen temperature-kerroin T softmax-kalibroinnille (B3).
+
+    LambdaRankin raw-pisteiden skaala on mielivaltainen — softmax voi
+    ali- tai ylikalibroida systemaattisesti. Temperature scaling oppii yhden
+    parametrin T validointidatalta minimoimalla NLL (negatiivinen log-likelihood).
+
+    Matemaattisesti: P_i = exp(score_i / T) / sum(exp(score_j / T)) per lähtö.
+      T < 1 → terävöittää jakaumaa (yksi vahva suosikki)
+      T > 1 → tasoittaa jakaumaa (tasaisempi kilpailu)
+
+    Tarvittavat sarakkeet predictions-DataFramessa:
+      race_id, score, finish_position
+
+    Returns:
+        float: optimaalinen T (tyypillisesti välillä 0.5–3.0)
+    """
+    from scipy.optimize import minimize_scalar
+
+    df = predictions.dropna(subset=["finish_position", "score"]).copy()
+    actual_win = (df["finish_position"] == 1).astype(float).values
+    scores = df["score"].values
+    race_ids = df["race_id"].values
+
+    def neg_log_likelihood(T: float) -> float:
+        scaled_scores = scores / T
+        # Numeerisesti vakaa softmax per lähtö
+        probs = np.empty_like(scaled_scores)
+        for rid in np.unique(race_ids):
+            mask = race_ids == rid
+            s = scaled_scores[mask]
+            s_stable = s - s.max()
+            probs[mask] = np.exp(s_stable) / np.exp(s_stable).sum()
+        # NLL: vain voittaneiden hevosten todennäköisyydet
+        return -np.sum(actual_win * np.log(probs.clip(1e-9)))
+
+    result = minimize_scalar(neg_log_likelihood, bounds=(0.1, 10.0), method="bounded")
+    T_opt: float = float(result.x)
+    logger.info("calibrate_temperature: T=%.4f (NLL=%.4f)", T_opt, result.fun)
+    return T_opt
+
+
 def predict_win_probabilities(
     model: lgb.Booster,
     race_df: pd.DataFrame,
     feature_cols: Sequence[str] = FEATURE_COLS,
     categorical_cols: Sequence[str] = CATEGORICAL_COLS,
+    temperature: float = 1.0,
 ) -> pd.DataFrame:
     """Ennusta voittotodennäköisyydet kullekin hevoselle lähdössä.
 
-    Muunto pisteistä todennäköisyyksiksi: softmax per lähtö.
+    Muunto pisteistä todennäköisyyksiksi: temperature-scaled softmax per lähtö.
     Tämä takaa että todennäköisyydet summautuvat 1.0:aan per lähtö.
+
+    Args:
+        temperature: Softmax-lämpötilakerroin (B3). Oletusarvo 1.0 = ei skaalausta.
+            Hae optimaalinen T calibrate_temperature()-funktiolla validointidatasta
+            ja tallenna mallin metatietoihin. T < 1 terävöittää, T > 1 tasoittaa.
     """
-    avail_feat, avail_cat = _resolve_cols(race_df, feature_cols, categorical_cols)
+    # P3-korjaus: ei logita puuttuvia sarakkeita ennustamisessa —
+    # samat varoitukset toistuisivat joka lähdön kohdalla.
+    avail_feat, avail_cat = _resolve_cols(
+        race_df, feature_cols, categorical_cols, log_missing=False
+    )
     X = race_df[avail_feat + avail_cat].copy()
     for col in avail_cat:
         X[col] = X[col].astype("category")
@@ -183,9 +247,9 @@ def predict_win_probabilities(
     raw_scores = model.predict(X)
 
     out = race_df[["race_id", "horse_id", "start_number"]].copy()
-    out["score"] = raw_scores
+    out["score"] = raw_scores / temperature  # B3: temperature scaling
 
-    # Softmax per lähtö
+    # Numeerisesti vakaa softmax per lähtö (max-normalization)
     out["win_prob"] = (
         out.groupby("race_id")["score"]
         .transform(lambda s: np.exp(s - s.max()) / np.exp(s - s.max()).sum())
