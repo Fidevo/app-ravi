@@ -4,26 +4,29 @@
 > Tämä tiedosto sisältää konkreettiset tekniset tehtävät
 > yksityiskohtineen ja perusteluineen.
 
-Tunnetut, dokumentoidut tehtävät joita EI tehty Hetzner-MVP-deploymentissa
-mutta jotka pitää muistaa. Järjestys = prioriteetti.
+Elämme nyt **Vaihetta 2, viikkoa 2** (10.5.2026). Viikko 1 käytettiin
+datanlaadun varmistukseen — kaikki kriittiset tehtävät tehty. Järjestys
+= prioriteetti jäljellä olevissa tehtävissä.
 
-## Datan suodatus
+---
 
-### ✅ #3. Galoppirata vs ravirata -erottelu — TEHTY (10.5.2026)
-ATG palautti SE-radoilla myös galoppia (Bro Park, Jägersro Galopp).
-Galopin lähdöillä ei ole `kmTime`-objekteja → runnerit olisivat aina
-NULL km-ajalla → `retry_incomplete_results` hakisi niitä turhaan joka
-päivä (~50+ turhaa API-kutsua/vrk).
+## Avoinna — Vaihe 2 (viikot 2–6, 10.5–8.6.2026)
 
-**Toteutus:**
-- `atg_client.py`: `get_calendar_day` suodattaa nyt `sport == "trot"`
-  -ehdolla. Gallop-radat eivät enää päädy DB:hen.
-- `scheduler.py`: `GALLOP_TRACKS` frozenset (`{"Bro Park", "Jägersro
-  Galopp"}`). `retry_incomplete_results`-kysely lisää `NOT IN`
-  -filterin jotta jo olemassa olevia gallop-rivejä ei haeta uudelleen.
-- **2 uutta pytestiä** (48/48 läpi).
+### 7. ATG-clientin lokit eivät kulje scheduler.log-tiedostoon
+`src.data.atg_client.logger` ja `src.data.scrapers.travsport.logger`
+ovat moduulin nimisiä loggereita, eivät `ravit_edge.scheduler`:n
+alapuussa. Stderriin tulostuvat, mutta eivät päädy `data/logs/scheduler.log`-
+tiedostoon.
 
-## Schedulerin robusttius
+**Korjaus:** lisää nämä loggerit `setup_logging()`:hin propagaation kautta
+tai konfiguroi ne eksplisiittisesti.
+
+**Prioriteetti:** matala — scheduler.log on luettava, journalctl näyttää
+kaiken. Tehdään kun sopii, ei blokoi datankeräystä.
+
+---
+
+## Avoinna — Vaihe 7 (vain jos pelaaminen tuottavaa)
 
 ### 5. Persistentit job-storet
 Nykyinen `BlockingScheduler` käyttää `MemoryJobStore`-oletusta —
@@ -35,109 +38,105 @@ osittain käynnistyksessä, mutta jos restart osuu juuri snapshot-ikkunaan
 HUOM: vaatii että `args` on serialisoitavissa (pickle) — esim.
 TravsportAPIClient-instanssi pitää välittää muulla tavalla.
 
-## DB / havainnointi
+**Prioriteetti:** matala nyt — MemoryJobStore riittää datankeräys- ja
+paperitestausvaiheessa. Kriittiseksi vasta Vaiheessa 7 kun pelataan
+oikealla rahalla eikä yhtäkään snapshotia voi menettää.
 
 ### 6. Pre-race snapshotin lähde-monipuolisuus
 MVP käyttää vain `atg_pari_mutuel`-pool-kerrointa (vinnare-game).
-Step 4 tuo Pinnacle / Betfair Exchange / Unibet -kertoimet sharp-
+Vaihe 7 tuo Pinnacle / Betfair Exchange / Unibet -kertoimet sharp-
 markkinoiden CLV-vertailuun. Skeema on jo valmis (`source`-kenttä).
 
-### 7. ATG-clientin lokit eivät kulje scheduler.log-tiedostoon
-`src.data.atg_client.logger` ja `src.data.scrapers.travsport.logger`
-ovat moduulin nimisiä loggereita, eivät `ravit_edge.scheduler`:n
-alapuussa. Stderriin tulostuvat, mutta eivät päädy `data/logs/scheduler.log`-
-tiedostoon. Jos halutaan keskitetty loki: lisää nämä loggerit
-`setup_logging()`:hin.
+**Prioriteetti:** ei nyt — ATG-devig riittää kalibrointiin Vaiheissa 3-5.
 
 ---
 
-## Tehty
+## Tehty — Vaihe 2, viikko 1 (4.5–10.5.2026)
+
+### ✅ #3. Galoppirata vs ravirata -erottelu — TEHTY (10.5.2026)
+ATG palautti SE-kalenterissa myös gallop-ratoja (Bro Park, Göteborg
+Galopp, Jägersro Galopp). Galopin lähdöillä ei ole `kmTime`-objekteja
+→ runnerit olisivat aina NULL km-ajalla → `retry_incomplete_results`
+hakisi niitä turhaan joka päivä (~50–70+ turhaa API-kutsua/vrk).
+
+**Toteutus:**
+- `atg_client.py`: `get_calendar_day` suodattaa nyt `sport == "trot"`
+  -ehdolla. Gallop-radat eivät enää päädy DB:hen.
+- `scheduler.py`: `GALLOP_TRACKS` frozenset (`{"Bro Park",
+  "Göteborg Galopp", "Jägersro Galopp"}`). `retry_incomplete_results`
+  lisää `NOT IN` -filterin jo olemassa oleville gallop-riveille.
+- **2 uutta pytestiä** (48/48 läpi).
+
+**Huomio:** Alkuperäinen lista sisälsi vain Bro Park + Jägersro Galopp.
+Tuotantodatan auditoinnissa (10.5.2026) havaittiin kolmas gallop-rata,
+Göteborg Galopp (72 runneria DB:ssä). Lisätty samana päivänä.
+
+### ✅ Shoes/sulky-auditointi tuotantodatasta — TEHTY (10.5.2026)
+Tarkistettiin että #2-implementaatio toimii oikein tuotannossa.
+
+**Löydökset (3 537 trot-runneria, 27.4–10.5.2026):**
+- shoes_front/back: 90 % täynnä (371 NULL = shoes.reported=False, odotettua)
+- shoes_changed: 83 % täynnä (248 lisää NULL = ATG:n tunnettu käytös,
+  jossa changed-kenttä puuttuu vaikka reported=True — koodissa oikein None)
+- sulky_type + sulky_changed: aina yhdenmukaisesti täynnä tai NULL (✅)
+- Ei "mahdottomia" tapauksia (shoes NULL mutta changed täynnä: 0 kpl ✅)
+- Sulky-jakauma: VA 88 %, AM 12 % (pysyvä)
+
+**Ainoa löydetty ongelma:** Göteborg Galopp puuttui `GALLOP_TRACKS`-
+listasta (ks. #3 yllä). Korjattu.
 
 ### ✅ Lukitusraja-refresh-jobi — TEHTY dynaamisella DateTriggerillä (5.5.2026)
 **Konteksti:** Ruotsin raviurheilussa kengitys- (barfota) ja kärry- (sulky)
 tiedot lukitaan **15min ennen päivän 1. lähdön starttia**. Sitä ennen
 valmentaja voi muuttaa varustetta vapaasti. Schedulerin `_daily_setup`
-03:00 saattoi siis saada vajaita/stale shoes/sulky-tietoja koska
-valmentajat eivät vielä olleet päättäneet.
+03:00 saattoi siis saada vajaita/stale shoes/sulky-tietoja.
 
 **Toteutus:**
 - `fetch_daily_races` palauttaa nyt `stats["first_race_start_utc"]`
 - `_schedule_first_race_refresh()` ajastaa `refresh_day_runners` jobin
-  DateTriggeriin `first_race_start_utc - 10min` (= 5min varmuusmarginaali
-  lukitusrajaan)
+  DateTriggeriin `first_race_start_utc - 10min`
 - `refresh_day_runners()` kutsuu `fetch_daily_races(scheduler=None,
   travsport=None)` — pelkkä runner-päivitys, EI uudelleen-ajasta
-  snapshot/result-jobeja (jotka ovat jo aamuyöllä ajastettu)
-- `_setup_for_date` kutsuu refresh-ajastuksen automaattisesti
-- CLI manuaalitestiin: `python -m src.data.scheduler refresh-day-runners --date YYYY-MM-DD`
+  snapshot/result-jobeja
+- CLI: `python -m src.data.scheduler refresh-day-runners --date YYYY-MM-DD`
 
 **Huomioi myös:**
-- Talvikielto 1.12.-28.2.: ATG ei palauta barfota-tietoa → `_shoes_sulky_fields`
-  palauttaa kaikki Noneksi (jo nykytoiminta, ei muutosta tarvita)
-- 2-vuotiaat: kengät pakolliset ympäri vuoden — ATG raportoi `shoes=true`
-  molempiin (jo nykytoiminta)
-- Tulee mahdollisesti feature engineering -vaiheessa: `barfota_law_active`
-  (BOOL kun joulu-helmi) ja `horse_age` -piirteet
+- Talvikielto 1.12.–28.2.: ATG ei palauta barfota-tietoa → kaikki None
+- 2-vuotiaat: kengät aina pakollisia, ATG raportoi shoes=true molemmissa
+- Feature engineering -vaiheessa: `barfota_law_active`, `horse_age`
 
 **4 uutta pytestiä** (46/46 läpi).
 
 ### ✅ #2. Shoes/sulky -piirteet ATG:n start.horse-objektista — TEHTY (5.5.2026)
 Lisätty 6 uutta saraketta `runners`-tauluun:
-- `shoes_front`, `shoes_back` (BOOL): kenkiä etu/taka (`barfota`-taktiikka)
+- `shoes_front`, `shoes_back` (BOOL): kenkiä etu/taka
 - `shoes_changed_front`, `shoes_changed_back` (BOOL): muutos vs edellinen startti
 - `sulky_type` (TEXT): `VA`=Vanlig (Standard), `AM`=Amerikansk
 - `sulky_changed` (BOOL): tyyppi tai väri muutettu
 
-**Toteutus:** `_shoes_sulky_fields(horse)`-helper `scheduler.py`:ssa,
-kutsuttu `_upsert_runner`:ssa. Käsittelee oikein puuttuvat `changed`-
-kentät (havaittu empiirisesti useissa hevosissa) ja `reported=false` -tilan.
-Parsiminen tapahtuu joka `_upsert_runner`-kutsussa → seuraava `_initial_setup`
-täyttää tämän päivän kentät automaattisesti.
+**Toteutus:** `_shoes_sulky_fields(horse)`-helper `scheduler.py`:ssa.
+Käsittelee puuttuvat `changed`-kentät (None, ei False) ja
+`reported=false`-tilan oikein.
 
-**Empiirinen tulos** (5.5.2026 ekassa ajossa, 379 runneria):
-- 100% katselmus: kaikki 379 runneria saivat shoes + sulky
-- 35% kengittä edestä, 36% kengittä takaa (yleinen barfota-taktiikka)
-- 22% vaihtoi kenkiä vs edellinen startti, 12% vaihtoi sulkya
-- Sulky-jakauma: VA 87%, AM 13%
+**Takautuva uudelleenajo:** 27.4–4.5 shoes/sulky populoitu manuaalisesti.
 
-**Takautuva uudelleenajo:** vanhojen päivien (4/27 → 5/4) shoes/sulky
-populoitu ajamalla `run-once --date YYYY-MM-DD` kullekin päivälle erikseen.
-
-**5 uutta pytestiä** kattavat: täysi data, puuttuvat changed-kentät,
-reported=false, kokonaan puuttuvat shoes/sulky, end-to-end runner-upsert.
+**5 uutta pytestiä.**
 
 ### ✅ #1. Result-haku double-trigger — TEHTY päivittäisellä retry-jobilla (4.5.2026)
-Ratkaisu: hybridi joka säilyttää nykyisen T+30min-triggerin (nopea
-ensimmäinen veto, saa odds + top-3 mahdollisimman tuoreena) ja lisää
-päivittäisen `retry_incomplete_results`-cron-jobin klo 04:30 Stockholm-
-aikaa. Cron etsii viim. 7 päivän racet joilla on NULL `finish_position`
-tai NULL `kilometer_time_seconds` ja kutsuu fetch_resultsin jokaiselle.
+Hybridi: T+30min-trigger (nopea veto) + päivittäinen `retry_incomplete_results`
+cron klo 04:30 Stockholm-aikaa. Cron etsii viim. 7 päivän racet joilla
+on NULL `finish_position` tai NULL `kilometer_time_seconds`.
 
-**Empiirinen tulos** (4.5.2026 ekassa ajossa): 191 racea käytiin läpi
-193 sekunnissa, 1039 → 936 vajaata runneria (-103 parannettu, ~10 %).
-Loput aukot ovat lähinnä galoppi-radat (kmTime ei eksistoi ATG:ssa,
-ratkeaa TODO #3:lla) ja oikeasti maaliin tulematta jääneet runnerit
-(laukat, scratchit — normaalia ravidatan luonnetta).
+**Empiirinen tulos (4.5.2026):** 191 racea / 193 sek, -103 vajaan
+runnerin aukkoa (~10 %). Loput aukot: galloppi (korjattu #3:lla) ja
+oikeasti maaliin tulematta jääneet (laukat, scratchit — normaalia).
 
-**Toteutus:**
-- `src/data/scheduler.py:retry_incomplete_results(db_path, lookback_days=7)`
-- Cron-ajastus run_forever:ssä `CronTrigger(hour=4, minute=30, timezone=ATG_TZ)`
-- CLI manuaalitestiin: `python -m src.data.scheduler retry-incomplete --lookback 7`
-- 4 uutta pytestiä (kaikki vihreänä, 37/37 läpi)
+**4 uutta pytestiä** (37/37 läpi).
 
-**Vaihtoehto T+30min + T+6h hylättiin koska:**
-- 4/30-data: jopa 3 vrk:n päästä Åby L3/Boden L2 olivat 35 % NULL → kiinteä
-  T+6h ei riitä
-- N×race-jobit raskaampia kuin yksi cron-ajo
-- Cron-jobi tappaa myös harvinaiset "ATG täydentää useita päiviä myöhemmin"
-  -tapaukset
-
-### ✅ #4. Auto-restart kaatumisen jälkeen — TEHTY systemd:llä Hetzner-deployssa (4.5.2026)
-Toteutettu `/etc/systemd/system/ravit-edge.service` -yksikössä:
-- `Restart=on-failure`
-- `RestartSec=10s`
-- `TimeoutStopSec=30s`
+### ✅ #4. Auto-restart kaatumisen jälkeen — TEHTY systemd:llä (4.5.2026)
+`/etc/systemd/system/ravit-edge.service`:
+- `Restart=on-failure`, `RestartSec=10s`, `TimeoutStopSec=30s`
 - `journalctl -u ravit-edge` -lokit
 
-Lisäksi cron-pohjainen päivittäinen DB-backup klo 04:00 Stockholm-aikaa,
-14 vrk säilytys, `/home/ravi/backups/`-hakemistossa.
+Lisäksi cron-pohjainen päivittäinen DB-backup klo 04:00 Stockholm-
+aikaa, 14 vrk säilytys, `/home/ravi/backups/`.
