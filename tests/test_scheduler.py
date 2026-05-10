@@ -662,6 +662,7 @@ TRAVSPORT_STARTS = {
             "finish_position": 2,
             "kilometer_time_seconds": 73.8,
             "position_at_800m": None,
+            "track_condition": "LE",
             "driver": "Driver One",
             "trainer": "First Trainer",
             "prize_won": 25000,
@@ -679,6 +680,7 @@ TRAVSPORT_STARTS = {
             "finish_position": 1,
             "kilometer_time_seconds": 78.2,
             "position_at_800m": None,
+            "track_condition": "ME",
             "driver": "Driver One",
             "trainer": "First Trainer",
             "prize_won": 50000,
@@ -698,6 +700,7 @@ TRAVSPORT_STARTS = {
             "finish_position": None,
             "kilometer_time_seconds": None,
             "position_at_800m": None,
+            "track_condition": None,    # puuttuu — normaalia
             "driver": "Driver Two",
             "trainer": "Second Trainer",
             "prize_won": 0,
@@ -734,12 +737,15 @@ def test_fetch_daily_races_collects_horse_starts(tmp_path):
         assert h1_starts[0].track == "AX"
         assert h1_starts[0].finish_position == 1
         assert h1_starts[0].kilometer_time_seconds == 78.2
+        assert h1_starts[0].track_condition == "ME"
         assert h1_starts[1].track == "SO"
         assert h1_starts[1].finish_position == 2
+        assert h1_starts[1].track_condition == "LE"
 
         withdrawn = s.query(HorseStart).filter_by(horse_id="100002").one()
         assert withdrawn.withdrawn is True
         assert withdrawn.finish_position is None
+        assert withdrawn.track_condition is None  # puuttui mock-datasta → NULL
 
 
 def test_fetch_daily_races_horse_starts_idempotent(tmp_path):
@@ -794,6 +800,168 @@ def test_fetch_daily_races_survives_travsport_failure(tmp_path):
     with _session(db) as s:
         assert s.query(HorseStart).count() == 1
         assert s.query(HorseStart).one().horse_id == "100002"
+
+
+# ---------------------------------------------------------------------------
+# backfill_track_condition
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_track_condition_updates_null_rows(tmp_path):
+    """backfill_track_condition lukee välimuistitiedostoja ja päivittää
+    horse_starts.track_condition = NULL -rivit. Ei API-kutsuja."""
+    import json
+    from src.data.scheduler import backfill_track_condition
+
+    # Rakenna DB ja lisää horse_starts ilman track_condition
+    db = str(tmp_path / "test.db")
+    migrate(db)
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+    with Session_() as session:
+        session.add(Horse(horse_id="9001", name="TestHorse"))
+        session.add(HorseStart(
+            horse_id="9001",
+            race_date="2026-01-15",
+            track="SO",
+            travsport_race_id=55001,
+            track_condition=None,    # NULL — backfillin kohde
+        ))
+        session.commit()
+
+    # Luo välimuistitiedosto jossa on trackCondition
+    cache_dir = tmp_path / "travsport"
+    cache_dir.mkdir()
+    raw_start = {
+        "raceInformation": {
+            "date": "2026-01-15",
+            "raceId": 55001,
+            "raceNumber": 3,
+        },
+        "trackCode": "SO",
+        "trackCondition": "LE",
+        "distance": {"sortValue": 2140},
+        "startMethod": "A",
+        "startPosition": {"sortValue": 4},
+        "placement": {"sortValue": 2},
+        "kilometerTime": {"sortValue": 1193},
+        "driver": {"name": "Arto Keski-Rautio"},
+        "trainer": {"name": "Matti Ojala"},
+        "prizeMoney": {"sortValue": 25000},
+        "odds": {"sortValue": 45},
+        "withdrawn": False,
+    }
+    (cache_dir / "9001_results.json").write_text(
+        json.dumps([raw_start]), encoding="utf-8"
+    )
+
+    result = backfill_track_condition(db_path=db, cache_dir=cache_dir)
+
+    assert result["updated"] == 1
+    assert result["errors"] == 0
+
+    with Session_() as session:
+        hs = session.query(HorseStart).filter_by(horse_id="9001").one()
+        assert hs.track_condition == "LE", (
+            f"track_condition pitäisi olla 'LE', sai: {hs.track_condition!r}"
+        )
+
+
+def test_backfill_track_condition_skips_already_filled(tmp_path):
+    """Rivi jolla on jo track_condition ei ylikirjoitu."""
+    import json
+    from src.data.scheduler import backfill_track_condition
+
+    db = str(tmp_path / "test.db")
+    migrate(db)
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+    with Session_() as session:
+        session.add(Horse(horse_id="9002", name="AlreadyFilled"))
+        session.add(HorseStart(
+            horse_id="9002",
+            race_date="2026-01-15",
+            track="SO",
+            travsport_race_id=55002,
+            track_condition="TU",    # jo täynnä — ei saa ylikirjoittaa
+        ))
+        session.commit()
+
+    cache_dir = tmp_path / "travsport"
+    cache_dir.mkdir()
+    raw_start = {
+        "raceInformation": {"date": "2026-01-15", "raceId": 55002, "raceNumber": 1},
+        "trackCode": "SO",
+        "trackCondition": "LE",   # eri arvo kuin DB:ssä
+        "distance": {"sortValue": 2140},
+        "startMethod": "A",
+        "startPosition": {"sortValue": 1},
+        "placement": {"sortValue": 1},
+        "kilometerTime": {"sortValue": 1180},
+        "driver": {"name": "Driver"},
+        "trainer": {"name": "Trainer"},
+        "prizeMoney": {"sortValue": 0},
+        "odds": {"sortValue": 30},
+        "withdrawn": False,
+    }
+    (cache_dir / "9002_results.json").write_text(
+        json.dumps([raw_start]), encoding="utf-8"
+    )
+
+    result = backfill_track_condition(db_path=db, cache_dir=cache_dir)
+
+    assert result["updated"] == 0
+    with Session_() as session:
+        hs = session.query(HorseStart).filter_by(horse_id="9002").one()
+        assert hs.track_condition == "TU"   # ei muuttunut
+
+
+def test_backfill_track_condition_is_idempotent(tmp_path):
+    """Kaksi peräkkäistä ajoa → sama tulos, ei duplikaatteja."""
+    import json
+    from src.data.scheduler import backfill_track_condition
+
+    db = str(tmp_path / "test.db")
+    migrate(db)
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+    with Session_() as session:
+        session.add(Horse(horse_id="9003", name="IdempotentHorse"))
+        session.add(HorseStart(
+            horse_id="9003",
+            race_date="2026-02-01",
+            track="AX",
+            travsport_race_id=55003,
+            track_condition=None,
+        ))
+        session.commit()
+
+    cache_dir = tmp_path / "travsport"
+    cache_dir.mkdir()
+    raw_start = {
+        "raceInformation": {"date": "2026-02-01", "raceId": 55003, "raceNumber": 5},
+        "trackCode": "AX",
+        "trackCondition": "ME",
+        "distance": {"sortValue": 2640},
+        "startMethod": "V",
+        "startPosition": {"sortValue": 2},
+        "placement": {"sortValue": 3},
+        "kilometerTime": {"sortValue": 1200},
+        "driver": {"name": "Driver"},
+        "trainer": {"name": "Trainer"},
+        "prizeMoney": {"sortValue": 10000},
+        "odds": {"sortValue": 60},
+        "withdrawn": False,
+    }
+    (cache_dir / "9003_results.json").write_text(
+        json.dumps([raw_start]), encoding="utf-8"
+    )
+
+    r1 = backfill_track_condition(db_path=db, cache_dir=cache_dir)
+    r2 = backfill_track_condition(db_path=db, cache_dir=cache_dir)
+
+    assert r1["updated"] == 1
+    assert r2["updated"] == 0   # toinen ajo ei päivitä mitään
 
 
 # ---------------------------------------------------------------------------

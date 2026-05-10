@@ -49,7 +49,7 @@ ATG_TZ = ZoneInfo("Europe/Stockholm")
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.betting.clv_tracker import calculate_vig, devig_odds
@@ -57,6 +57,7 @@ from src.data.atg_client import ATGClient
 from src.data.schema import Horse, HorseStart, OddsSnapshot, Race, Runner, migrate
 from src.paths import DB_PATH as _DB_PATH_ABS
 from src.paths import LOG_DIR as _LOG_DIR_ABS
+from src.paths import RAW_DIR as _RAW_DIR_ABS
 
 # Snapshot-offsetit lähtöajasta. T-2min on viimeinen "luotettava" piste
 # ennen kassa-aukon kiristymistä (ATG sulkee n. T-30s).
@@ -474,10 +475,99 @@ def _upsert_horse_starts(
                 withdrawn=s.get("withdrawn", False),
                 travsport_race_id=int(ts_race_id),
                 race_number=s.get("race_number"),
+                track_condition=s.get("track_condition"),
             )
         )
         stats["inserted"] += 1
     return stats
+
+
+def backfill_track_condition(
+    db_path: str = DB_PATH,
+    cache_dir: "Path | None" = None,
+) -> dict:
+    """Täytä track_condition kaikille olemassa oleville horse_starts-riveille
+    paikallisista Travsport-välimuistitiedostoista.
+
+    Ei tee yhtään API-kutsua — lukee pelkästään jo ladattuja JSON-tiedostoja
+    (`data/raw/travsport/{horse_id}_results.json`). Turvallista ajaa kun
+    scheduler pyörii samanaikaisesti: SQLite WAL-mode hoitaa rinnakkaiskirjoitukset.
+
+    Idempotentti: päivittää vain rivit joilla track_condition IS NULL.
+    Voidaan ajaa uudelleen jos keskeytyi.
+
+    Returns:
+        dict: {updated, skipped, errors, cache_files}
+    """
+    import json
+
+    from src.data.scrapers.travsport import _normalize_start
+    from pathlib import Path as _Path
+
+    if cache_dir is None:
+        cache_dir = _RAW_DIR_ABS / "travsport"
+    cache_dir = _Path(cache_dir)
+    engine = create_engine(f"sqlite:///{db_path}")
+    Session_ = sessionmaker(bind=engine)
+
+    updated = 0
+    skipped = 0
+    errors = 0
+
+    result_files = sorted(cache_dir.glob("*_results.json"))
+    logger.info(
+        "backfill_track_condition: %d välimuistitiedostoa löydetty", len(result_files)
+    )
+
+    with Session_() as session:
+        for cache_file in result_files:
+            # Tiedostonimi: {horse_id}_results.json
+            horse_id = cache_file.stem.rsplit("_", 1)[0]
+            try:
+                raw_starts = json.loads(cache_file.read_text(encoding="utf-8"))
+                for r in raw_starts:
+                    s = _normalize_start(r)
+                    ts_race_id = s.get("race_id")
+                    tc = s.get("track_condition")
+                    if ts_race_id is None or tc is None:
+                        # track_condition puuttuu tästä startista (normaalia)
+                        skipped += 1
+                        continue
+                    n = session.execute(
+                        text("""
+                            UPDATE horse_starts
+                               SET track_condition = :tc
+                             WHERE horse_id = :hid
+                               AND travsport_race_id = :rid
+                               AND track_condition IS NULL
+                        """),
+                        {"tc": tc, "hid": str(horse_id), "rid": int(ts_race_id)},
+                    ).rowcount
+                    updated += n
+                    if n == 0:
+                        skipped += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "backfill_track_condition: virhe tiedostossa %s: %s",
+                    cache_file.name,
+                    exc,
+                )
+                errors += 1
+        session.commit()
+
+    logger.info(
+        "backfill_track_condition valmis: päivitetty=%d, ohitettu=%d, virheitä=%d, tiedostoja=%d",
+        updated,
+        skipped,
+        errors,
+        len(result_files),
+    )
+    return {
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "cache_files": len(result_files),
+    }
 
 
 def fetch_daily_races(
@@ -872,7 +962,6 @@ def retry_incomplete_results(
         # Gallop-radat (GALLOP_TRACKS) jätetään pois: niillä ei ole
         # kmTime-objekteja ATG:ssa, joten ne olisivat aina vajaita.
         with Session_() as session:
-            from sqlalchemy import text
             gallop_sorted = sorted(GALLOP_TRACKS)
             not_in_clause = ", ".join(f":gt{i}" for i in range(len(gallop_sorted)))
             params: dict = {
@@ -1275,6 +1364,13 @@ def _main() -> None:
         "--date", help="YYYY-MM-DD (oletus: tänään)",
     )
 
+    sub.add_parser(
+        "backfill-track-condition",
+        help="Täytä track_condition kaikille horse_starts-riveille paikallisista "
+             "Travsport-välimuistitiedostoista. Ei API-kutsuja. Ajo kerran riittää "
+             "(idempotentti: päivittää vain NULL-rivit).",
+    )
+
     args = parser.parse_args()
     migrate(DB_PATH)  # varmista että uudet sarakkeet ovat olemassa
 
@@ -1292,6 +1388,8 @@ def _main() -> None:
     elif args.cmd == "refresh-day-runners":
         target = date.fromisoformat(args.date) if args.date else None
         print(refresh_day_runners(target))
+    elif args.cmd == "backfill-track-condition":
+        print(backfill_track_condition())
 
 
 if __name__ == "__main__":

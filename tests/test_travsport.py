@@ -17,6 +17,7 @@ from src.data.scrapers.travsport import (
     TravsportAPIClient,
     _kilometer_time_from_sort,
     _placement,
+    _track_condition,
     parse_kilometer_time,
 )
 
@@ -77,6 +78,7 @@ def test_get_results_returns_normalized_list(client_with_mocked_http):
         "finish_position",
         "kilometer_time_seconds",
         "position_at_800m",
+        "track_condition",
         "driver",
         "trainer",
         "prize_won",
@@ -184,3 +186,25 @@ def test_parse_kilometer_time_text():
     assert parse_kilometer_time("1.19,3a") == pytest.approx(79.3)
     assert parse_kilometer_time("") is None
     assert parse_kilometer_time("ei mitään") is None
+
+
+def test_track_condition_string():
+    """Merkkijono palautetaan sellaisenaan (trim)."""
+    assert _track_condition("LE") == "LE"
+    assert _track_condition("  ME  ") == "ME"
+    assert _track_condition("") is None
+
+
+def test_track_condition_dict_display_value():
+    """Dict-muoto: priorisoidaan displayValue."""
+    assert _track_condition({"sortValue": 1, "displayValue": "Latt"}) == "Latt"
+
+
+def test_track_condition_dict_sort_value_fallback():
+    """Dict-muoto ilman displayValue: käytetään sortValue-koodia."""
+    assert _track_condition({"sortValue": 2}) == "2"
+
+
+def test_track_condition_none():
+    """None → None (kenttä puuttuu tai ei raportoitu)."""
+    assert _track_condition(None) is None

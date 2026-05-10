@@ -195,7 +195,8 @@ def _normalize_start(r: dict) -> dict[str, Any]:
         "start_number": _sort_int(r.get("startPosition")),
         "finish_position": _placement(r.get("placement")),
         "kilometer_time_seconds": _kilometer_time_from_sort(r.get("kilometerTime")),
-        "position_at_800m": None,
+        "position_at_800m": None,   # ei saatavilla Travsport /results-endpointista
+        "track_condition": _track_condition(r.get("trackCondition")),
         "driver": (r.get("driver") or {}).get("name"),
         "trainer": (r.get("trainer") or {}).get("name"),
         "prize_won": _sort_int(r.get("prizeMoney")) or 0,
@@ -239,6 +240,28 @@ def _kilometer_time_from_sort(field: Any) -> float | None:
     seconds_int = (v % 1000) // 10
     tenths = v % 10
     return minutes * 60 + seconds_int + tenths / 10.0
+
+
+def _track_condition(field: Any) -> str | None:
+    """Normalisoi Travsportin trackCondition-kenttä.
+
+    Kenttä voi olla:
+      - merkkijono: "LE", "ME", "TU" (Lätt/Medium/Tung) tai pidempi kuvaus
+      - dict: {"sortValue": ..., "displayValue": "Latt"} (kuten raceType-kentässä)
+      - None: puuttuu (joillekin vanhoille starteille)
+
+    Tallennetaan sellaisenaan TEXT-kenttään; feature engineering -vaiheessa
+    enkoodataan kategoriseksi piirteeksi.
+    """
+    if field is None:
+        return None
+    if isinstance(field, str):
+        return field.strip() or None
+    if isinstance(field, dict):
+        # Priorisoi displayValue (ihmisluettava), fallback sortValue-koodi
+        val = field.get("displayValue") or field.get("shortName") or field.get("sortValue")
+        return str(val).strip() if val is not None else None
+    return None
 
 
 def parse_kilometer_time(text: str) -> float | None:

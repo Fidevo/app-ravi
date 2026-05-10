@@ -155,6 +155,7 @@ class HorseStart(Base):
     withdrawn = Column(Boolean, default=False)
     travsport_race_id = Column(Integer)     # Travsport-natiivi race_id
     race_number = Column(Integer)
+    track_condition = Column(String)        # radan kunto (Travsport: "LE", "ME", "TU" tms.)
 
 
 # Partial unique -indeksi horse_starts-deduplikointiin.
@@ -204,6 +205,9 @@ class OddsSnapshot(Base):
 # SQLAlchemy create_all luo PUUTTUVAT taulut mutta ei lisää uusia
 # sarakkeita olemassa oleviin - siksi tämä erillinen migraatio.
 _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    "horse_starts": [
+        ("track_condition", "TEXT"),
+    ],
     "runners": [
         ("atg_lifetime_starts", "INTEGER"),
         ("atg_lifetime_win_rate", "REAL"),
