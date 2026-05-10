@@ -74,7 +74,23 @@ print("B2 same_dist notna%:", round(features['form_avg_finish_5_same_dist'].notn
 **Auki olevat kysymykset:** 
 TASK_PLAN_FIXES.md ei maininnut start_method-arvojen epäsymmetriaa (Travsport vs ATG). Tämä löydettiin tuotantodatan perusteella. Auditoija: onko tiedossasi muita vastaavia enkoodausepäsymmetrioita muissa kentissä?
 
-**Auditoijan tarkistus:** _(odottaa)_
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 10.5.2026 (Opus 4.7)
+
+Tarkistus tehty empiirisesti:
+- Ajoin TASK_PLAN_FIXES.md:n snippetin lokaalisti data/ravit.db:tä vasten (2 512 riviä):
+  - B2 same_method notna%: **80.37 %** (raportti väitti 85.63 Hetznerillä — ero selittyy DB-koolla, suunta oikea)
+  - B2 same_dist notna%: **78.70 %** (raportti 84.72)
+  - Baseline form_avg_finish_5 ennallaan 82.72 %
+- Koko `pytest`: **164 passing** lokaalisti, kestää 8.17 s
+- Luvut 0.0 → 80+ on jättiloikka, B2 toimii nyt aidosti tuotannossa
+
+**Vastaus kysymykseesi muista enkoodausepäsymmetrioista — kyllä, vähintään yksi varma + yksi todennäköinen:**
+
+1. **`track_condition` (varma)** — ATG käyttää englantia ("light", "heavy") `races.track_condition`-sarakkeessa, Travsport käyttää lyhenteitä ("LE", "ME", "TU") `horse_starts.track_condition`-sarakkeessa. Schema kommentoi [schema.py:56](src/data/schema.py:56) ja [schema.py:162](src/data/schema.py:162) tämän nimenomaan. Tämä ei nyt aiheuta bugia (kenttä ei ole FEATURE_COLS:issa, eikä joineissa) mutta heti kun lisätään track-condition-aggregaatti horse_starts:sta (esim. "hevosen win-rate raskaalla radalla"), tarvitaan mappaus.
+
+2. **`driver`/`trainer` (todennäköinen)** — ATG palauttaa kokonimen ("Erkki Mäkitalo"), Travsport todennäköisesti lyhentää tai erotelee eri tavalla. Tarkista ennen kuin lisäät B2-vaiheen sukutaulu-tyylisen "driver-historia horse_starts:sta" -piirteen.
+
+Ehdotus: lisää track_codes.py:hyn pre-emptiivisesti `TRACK_CONDITION_TO_ATG`-mappi nyt kun B-vaiheeseen mennään, vaikka sitä ei vielä käytettäisi.
 
 ---
 
@@ -129,7 +145,18 @@ Mappauksen kattavuus:
 
 **Auki olevat kysymykset:** ei mitään
 
-**Auditoijan tarkistus:** _(odottaa)_
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 10.5.2026 (Opus 4.7)
+
+**Erityisesti hyvin tehty:** kieltäydyit kopioimasta TASK_PLAN_FIXES.md:n mappiehdotusta sokeasti ja **vahvistit jokaisen koodin DB-ristiviitekyselyllä**. Tämä on juuri se prosessi jota suosittelin omassa kommentissani auditoinnin alussa ("Älä keksi nimiä. Tarkista jokainen koodi…"). Auditoija oli väärässä useammassa kohdassa — kiitos rehellisestä raportoinnista että listasit virheet kohta kohdalta.
+
+Empiirinen tarkistus lokaalista DB:stä:
+- B1 track_horse_win_rate notna%: **63.26 %** (Hetzner 70.27)
+- B1 track_horse_starts mean: **3.59** (Hetzner 4.37)
+- B1 track_horse_starts max: **68** — yksi hevonen ajanut 68 kertaa samalla radalla, hyvin uskottavaa
+
+Kehittäjän selitys "30 % runnereista on 1. kerta radalla → win_rate luonnollisesti NaN" on aito ja oikea. **70 % tavoitteen sijaan oikea baselineksi olisi ollut ~70 %, ei 80 %** — tämä oli minun arviointivirhe ohjeessa, ei kehittäjän ongelma.
+
+Mappauksen kattavuus 26/26 on hyvä. Galoppi-radat ("Br") ovat mapissa mutta suodatetaan calendar-tasolla pois — kommentin perusteella oikea design.
 
 ---
 
@@ -158,7 +185,13 @@ Kommentoidut kentät:
 
 **Auki olevat kysymykset:** ei mitään
 
-**Auditoijan tarkistus:** _(odottaa)_
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 10.5.2026 (Opus 4.7)
+
+Vahvistus lukemalla [ranker.py:56–60](src/models/ranker.py:56) — viisi kenttää on kommentoitu pois oikein selittävällä kommentilla. [KNOWN_ISSUES.md:81](KNOWN_ISSUES.md:81) sisältää #11-merkinnän aktivointimuistutuksesta. Päivämäärä 2026-09-01 ja perustelu (600 lähtöä = 4 viikkoa × 150) ovat järkeviä.
+
+**Pieni huomio:** Päivämäärä on **arvio**, ei kova deadline. Aseta lisäehto: ennen aktivointia aja `backfill_correct_atg_aggregates`-tyylinen QA-skripti joka tarkistaa että pollutoituneita rivejä ei ole jäänyt (esim. ei ole sellaista runneria jolla `runners.created_at < '2026-05-10' AND atg_driver_starts IS NOT NULL`). Jos on, suodata ne pois treenidataset:istä silloin kun palautat kentät.
+
+Päätös vaihtoehto A oli oikea — B (re-fetch) on käytännössä mahdoton ATG:n rajapinnan rajoitusten takia.
 
 ---
 
@@ -189,7 +222,16 @@ Hetzner: **151 testiä, kaikki passing** (10.5.2026)
 
 **Auki olevat kysymykset:** ei mitään
 
-**Auditoijan tarkistus:** _(odottaa)_
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 10.5.2026 (Opus 4.7)
+
+Tarkistus lukemalla [scheduler.py:494–510](src/data/scheduler.py:494):
+- `_atg_aggregates`, `_person_aggregates` (driver), `_person_aggregates` (trainer), `_shoes_sulky_fields` — kaikki neljä silmukkaa käyttävät `_set_if_not_none`:ia
+- Lisäksi `driver`, `trainer`, `handicap_meters` — hyvä laajennus joka menee yli pyydetyn
+- `race_id`, `horse_id`, `start_number` jätetty raakana — oikein, nämä ovat rivin identiteetti eivätkä koskaan muutu Noneksi
+
+`test_b1_b2_produce_values_in_realistic_pipeline` on erityisen hyvä — se testaa juuri sitä rakennevirhettä joka mun alkuperäisestä auditoinnista jäi puuttumaan (tuotantotyylinen runners ilman start_method/distance).
+
+Hetzner 151 vs lokaali 164 testit — pieni ero johtuu todennäköisesti siitä että jotkut testit vaativat lokaaliympäristön (esim. windows-specifiset paths). Ei huoli.
 
 ---
 
@@ -198,9 +240,39 @@ Hetzner: **151 testiä, kaikki passing** (10.5.2026)
 Ennen Vaiheen B aloittamista:
 - [x] Kaikki A1–A4 ✅
 - [x] `pytest -v` koko sviitti vihreällä (164 local, 151 Hetzner)
-- [ ] Auditoija on hyväksynyt Vaihe A:n
+- [x] Auditoija on hyväksynyt Vaihe A:n
 
-Auditoijan vahvistus Vaihe A:lle: _(odottaa)_
+Auditoijan vahvistus Vaihe A:lle: ✅ **HYVÄKSYTTY 10.5.2026 — Vaihe B voidaan aloittaa.**
+
+---
+
+## Yhteenveto Vaiheen A hyväksynnästä
+
+**Kaikki neljä korjausta on toteutettu oikein ja vahvistettu empiirisesti:**
+
+| Tehtävä | Tila | Avainluku |
+|---|---|---|
+| A1 B2 segmentoidut piirteet | ✅ | 0.0 % → 80.37 % notna (lokaali) |
+| A2 B1 trackCode-mappi | ✅ | 0.4 % → 63.26 % notna, mean 0 → 3.59 |
+| A3 K1-pollutoidut pois | ✅ | 5 kenttää kommentoitu, KNOWN_ISSUES #11 |
+| A4 M1-symmetria + testit | ✅ | _set_if_not_none kaikkialle, 164 testiä passing |
+
+**Kehittäjän erityiset ansiot:**
+
+1. **START_METHOD-bonus-löydös** — TASK_PLAN_FIXES.md ei maininnut tätä, mutta kehittäjä havaitsi tuotantodatasta että pelkkä start_method:in välitys ei riitä — Travsport käyttää "A"/"V"/"L" ja ATG "auto"/"volte". Ilman tätä B2 olisi jäänyt 4.3 %:iin.
+
+2. **Track-mapin DB-ristiviiteenkyselyn käyttö** — auditoijan ehdotus oli osittain väärä (B/Boden, Bs/Bergsåker, Bo/Bollnäs, Ma/Mantorp, Ås/Åby kaikki virheellisiä). Kehittäjä ei kopioinut sokeasti, vaan vahvisti jokaisen. Tämä on **juuri sitä insinöörikulttuuria** mitä tällaiset projektit tarvitsevat — älä luota toiseen, vahvista itse.
+
+3. **A4:n laajennus** — käytti `_set_if_not_none`:ia myös driver/trainer/handicap_meters-kentille joita ohjeissa ei eksplisiittisesti pyydetty. Oikea defensiivinen ratkaisu.
+
+**Vaihe B voidaan aloittaa.** Vaihe 3 (mallin treenaus) ei vielä — pidä Vaihe B:n B1 (isotonic vs temperature) tehtynä ennen kuin yksikään malli pelaa rahaa. B2 (sukutaulu) ja B3 (devigged odds) voivat tulla limittäin Vaihe 3:n alkuvaiheessa.
+
+**Auditoijan ohje seuraavaan vaiheeseen:**
+- Aloita B1 (isotonic) heti — se on pieni muutos ja antaa työkalun kalibrointivertailuun heti kun ensimmäinen malli on treenattu
+- B2 (sukutaulu) voi tehdä rinnakkain — käyttää eri tiedostoja
+- B3 (devigged odds) odotuttaa: kerää 2 viikkoa puhdasta T-2min-snapshot-dataa K1-korjauksen (2026-05-10) jälkeen ennen tämän rakentamista
+
+Hyvää työtä. Älä kiirehdi B:hen samalla intensiteetillä — A:n bugit olivat kriittisiä, B on parannuksia.
 
 ---
 

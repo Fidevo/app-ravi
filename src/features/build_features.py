@@ -395,7 +395,100 @@ def derived_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------
-# 5. Treeniesiesimerkkien esikäsittely — puuttuvien sijoitusten täyttö
+# 5. Sukutaulupiirteet (B2 — Vaihe B)
+# ----------------------------------------------------------------------
+
+# Pienin otos-raja sire/dam_sire-aggregaateille. Alle tämän → NaN.
+# Liian pieni otos antaa kohinaisen estimaatin (overfitting yksilötasolle).
+_SIRE_MIN_STARTS = 30
+
+
+def sire_features(
+    runners: pd.DataFrame,
+    horses: pd.DataFrame,
+    horse_starts: pd.DataFrame,
+) -> pd.DataFrame:
+    """Lisää sire/dam_sire-aggregaatit runner-riveille.
+
+    Lasketaan horse_starts-koko-uradata:sta (ei rajoitettu 14 päivään).
+    Aggregaatit lasketaan MUIDEN saman isäoriin jälkeläisten starteista —
+    ei data leakagea nykyisen hevosen omasta startista koska laskenta
+    perustuu populaatiostatistiikkaan, ei hevosen omiin tuloksiin.
+
+    Piirteet:
+      sire_lifetime_win_rate     : isäoriin jälkeläisten voitto-% (kaikki ajat)
+      sire_lifetime_starts       : montako starttia estimaatin pohjana
+      dam_sire_lifetime_win_rate : emänisän jälkeläisten voitto-%
+      dam_sire_lifetime_starts   : montako starttia estimaatin pohjana
+
+    Pienet sample-koot suodatetaan:
+      Jos sire_lifetime_starts < _SIRE_MIN_STARTS (30), asetetaan
+      sire_lifetime_win_rate = NaN (kohina eikä signaali). LightGBM
+      käsittelee NaN:n automaattisesti puuttuvana arvona.
+
+    Args:
+        runners: DataFrame jossa horse_id (lähdöt joita ennustetaan)
+        horses: DataFrame jossa horse_id, sire, dam_sire
+        horse_starts: Travsport-historia (103k+ starttia, kaikki hevoset)
+
+    Returns:
+        runners-DataFrame lisättyinä sire/dam_sire-sarakkeilla
+    """
+    # --- 1. Liitä sire/dam_sire horse_starts-riveihin horses-taulusta ---
+    starts_with_pedigree = horse_starts.merge(
+        horses[["horse_id", "sire", "dam_sire"]].drop_duplicates("horse_id"),
+        on="horse_id",
+        how="left",
+    )
+    starts_with_pedigree["is_win"] = (
+        starts_with_pedigree["finish_position"] == 1
+    ).astype(float)
+
+    # --- 2. Per-sire aggregaatti (isäoriin kaikki jälkeläiset) ---
+    sire_stats = (
+        starts_with_pedigree.dropna(subset=["sire"])
+        .groupby("sire")
+        .agg(
+            sire_lifetime_starts=("is_win", "count"),
+            sire_lifetime_win_rate=("is_win", "mean"),
+        )
+        .reset_index()
+    )
+    # Suodata pois pienet otokset — kohinainen estimaatti on haitallisempi kuin NaN
+    sire_stats.loc[
+        sire_stats["sire_lifetime_starts"] < _SIRE_MIN_STARTS,
+        "sire_lifetime_win_rate",
+    ] = np.nan
+
+    # --- 3. Per-dam_sire aggregaatti (emänisän kaikki jälkeläiset) ---
+    dam_sire_stats = (
+        starts_with_pedigree.dropna(subset=["dam_sire"])
+        .groupby("dam_sire")
+        .agg(
+            dam_sire_lifetime_starts=("is_win", "count"),
+            dam_sire_lifetime_win_rate=("is_win", "mean"),
+        )
+        .reset_index()
+    )
+    dam_sire_stats.loc[
+        dam_sire_stats["dam_sire_lifetime_starts"] < _SIRE_MIN_STARTS,
+        "dam_sire_lifetime_win_rate",
+    ] = np.nan
+
+    # --- 4. Liitä runnersiin sire- ja dam_sire-tilastot ---
+    df = runners.merge(
+        horses[["horse_id", "sire", "dam_sire"]].drop_duplicates("horse_id"),
+        on="horse_id",
+        how="left",
+    )
+    df = df.merge(sire_stats, on="sire", how="left")
+    df = df.merge(dam_sire_stats, on="dam_sire", how="left")
+
+    return df
+
+
+# ----------------------------------------------------------------------
+# 6. Treeniesiesimerkkien esikäsittely — puuttuvien sijoitusten täyttö
 # ----------------------------------------------------------------------
 
 def fill_finish_positions(runners: pd.DataFrame) -> pd.DataFrame:
@@ -469,18 +562,23 @@ def build_feature_matrix(
     runners: pd.DataFrame,
     races: pd.DataFrame,
     horse_starts: pd.DataFrame | None = None,
+    horses: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Aja kaikki feature-funktiot ja palauta valmis matriisi mallille.
 
     Piirre-pipeline järjestyksessä:
-      1. form_features       — hevosen muoto viim. N startista
+      1. form_features           — hevosen muoto viim. N startista
       2. driver_trainer_features — rolling-tilastot ohjastajalle/valmentajalle
-      3. race_setup_features — lähtörata, rata-kokemus, lähdön luokka
-      4. derived_features    — johdetut piirteet (barfota, horse_age)
+      3. race_setup_features     — lähtörata, rata-kokemus, lähdön luokka
+      4. derived_features        — johdetut piirteet (barfota, horse_age)
+      5. sire_features           — sukutaulupiirteet (B2, valinnainen)
 
     Valinnainen horse_starts-parametri: Travsport-historia koko uralta.
     Jos annetaan, form_features() käyttää sitä laajentamaan muotodatan
     kattavuutta runners-taulun 14 päivän sijaan koko uraan.
+
+    Valinnainen horses-parametri: horses-taulu jossa sire/dam_sire-kentät.
+    Jos annetaan horse_starts:n kanssa, lasketaan sukutaulupiirteet (B2).
 
     Valinnainen horse_age-piirre: lisää birth_year runners-DataFrameen
     JOIN:lla horses-tauluun ennen tätä kutsua.
@@ -519,4 +617,9 @@ def build_feature_matrix(
     df = driver_trainer_features(df)
     df = race_setup_features(df, races, horse_starts=horse_starts)  # B1: track-historia
     df = derived_features(df)
+
+    # B2: sukutaulupiirteet — vaatii sekä horse_starts että horses-parametrin
+    if horse_starts is not None and horses is not None:
+        df = sire_features(df, horses, horse_starts)
+
     return df

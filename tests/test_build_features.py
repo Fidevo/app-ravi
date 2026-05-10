@@ -22,6 +22,7 @@ from src.features.build_features import (
     fill_finish_positions,
     form_features,
     race_setup_features,
+    sire_features,
 )
 
 

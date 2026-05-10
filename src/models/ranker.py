@@ -18,6 +18,7 @@ from typing import Sequence
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import log_loss
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,13 @@ FEATURE_COLS: list[str] = [
     # --- Johdetut piirteet (build_features.derived_features) ---
     "barfota_law_active",
     "horse_age",   # Vaatii birth_year runners-DataFramessa — ohitetaan jos puuttuu
+    # --- B2: Sukutaulupiirteet (build_features.sire_features) ---
+    # Vaatii horses-taulun horses-parametrina build_feature_matrix():lle.
+    # NaN jos isä/emänisä tuntematon tai liian pieni otos (< 30 starttia).
+    "sire_lifetime_win_rate",
+    "sire_lifetime_starts",
+    "dam_sire_lifetime_win_rate",
+    "dam_sire_lifetime_starts",
 ]
 
 CATEGORICAL_COLS: list[str] = [
@@ -220,6 +228,65 @@ def calibrate_temperature(
     T_opt: float = float(result.x)
     logger.info("calibrate_temperature: T=%.4f (NLL=%.4f)", T_opt, result.fun)
     return T_opt
+
+
+def calibrate_isotonic(
+    predictions: pd.DataFrame,
+) -> IsotonicRegression:
+    """Opi ei-parametrinen kalibrointikäyrä softmax-ennusteille (B1).
+
+    Vaihtoehto temperature scalingille: monotoninen mutta ei-parametrinen,
+    osaa korjata epälineaarista miskalibrointia. Temperature scaling olettaa
+    yhtenäisen kertoimen koko todennäköisyysavaruudelle — isotonic regression
+    oppii eri korjauksen eri alueille (esim. tiukemman korjauksen 40–70 %
+    alueelle jossa mallit usein ylikalibroituvat).
+
+    Vaatii vähintään ~500 validointiriviä luotettavaan oppimiseen. Pienemmällä
+    datalla on ylisovittumisriski — suosi temperature scalingia jos n < 500.
+
+    Tarvittavat sarakkeet predictions-DataFramessa:
+      race_id, win_prob, finish_position
+
+    Returns:
+        IsotonicRegression-objekti joka on sovitettu validointidataan.
+        Tallenna mallin metatietoihin calibration_method="isotonic".
+        Soveltaminen: apply_isotonic(predictions, iso).
+    """
+    df = predictions.dropna(subset=["finish_position", "win_prob"]).copy()
+    actual_win = (df["finish_position"] == 1).astype(int).values
+    raw_probs = df["win_prob"].values
+    iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    iso.fit(raw_probs, actual_win)
+    logger.info(
+        "calibrate_isotonic: sovitettu %d validointiriville", len(df)
+    )
+    return iso
+
+
+def apply_isotonic(
+    predictions: pd.DataFrame,
+    iso: IsotonicRegression,
+) -> pd.DataFrame:
+    """Sovella isotonic-kalibrointi ennusteisiin ja re-normalisoi per lähtö.
+
+    Isotonic regression voi rikkoa summautuvuuden (∑P_i ≠ 1.0 lähdössä)
+    koska se on hevoskohtainen. Re-normalisoidaan per lähtö jotta
+    todennäköisyydet summautuvat 1.0:aan.
+
+    Args:
+        predictions: DataFrame jossa race_id, win_prob
+        iso: calibrate_isotonic():sta saatu sovitettu malli
+
+    Returns:
+        Kopio DataFramesta jossa win_prob korvattu kalibroituilla arvoilla.
+    """
+    out = predictions.copy()
+    out["win_prob"] = iso.transform(out["win_prob"].values)
+    # Re-normalisoi per lähtö — summautuvuus vaatii tämän
+    out["win_prob"] = out.groupby("race_id")["win_prob"].transform(
+        lambda s: s / s.sum() if s.sum() > 0 else s
+    )
+    return out
 
 
 def predict_win_probabilities(

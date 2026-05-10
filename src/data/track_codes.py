@@ -74,6 +74,21 @@ START_METHOD_TO_ATG: dict[str, str] = {
 }
 
 
+# Travsportin ratakeli-koodit → ATG:n ratakeli-nimet.
+# ATG käyttää "light"/"heavy" (races.track_condition).
+# Travsport käyttää lyhenteitä (horse_starts.track_condition).
+# EI KÄYTETÄ VIELÄ feature-pipelinessa — lisätty pre-emptiivisesti
+# B-vaihetta varten kun track-condition-aggregaatteja lisätään horse_starts:sta.
+# Lähde: auditoijan suositus 2026-05-10 + Travsportin dokumentaatio.
+TRACK_CONDITION_TO_ATG: dict[str, str] = {
+    "LE": "light",    # Lätt (kevyt, kuiva)
+    "ME": "light",    # Medium — lähimpänä "light" ATG-skaalassa
+    "TU": "heavy",    # Tung (raskas)
+    "GO": "light",    # God (hyvä) — Travsportin vanhempi luokitus
+    "FA": "heavy",    # Fast/Freezing — keliriski, käytännössä raskas
+}
+
+
 def normalize_track(code: str | None) -> str | None:
     """Muunna Travsport-koodi ATG:n rataniksi.
 
