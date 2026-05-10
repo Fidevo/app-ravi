@@ -415,32 +415,44 @@ def _parse_terms(terms: list | None) -> dict:
     return result
 
 
+def _set_if_not_none(obj: Any, field: str, value: Any) -> None:
+    """Kirjoita kenttä vain jos value ei ole None (M1-suoja).
+
+    Estää olemassa olevan ei-None-arvon ylikirjoittumisen None:lla
+    retry- ja refresh-ajoissa, joissa API voi palauttaa vajaan vastauksen.
+    """
+    if value is not None:
+        setattr(obj, field, value)
+
+
 def _upsert_race(session: Session, race: dict) -> None:
     rid = str(race["id"])
     obj = session.get(Race, rid)
     if obj is None:
         obj = Race(race_id=rid)
         session.add(obj)
-    obj.race_date = (
-        date.fromisoformat(race["date"]) if race.get("date") else None
-    )
-    obj.track = _track_name(race)
-    obj.race_number = race.get("number")
-    obj.distance = race.get("distance")
-    obj.start_method = race.get("startMethod")
-    obj.purse_sek = race.get("prize") if isinstance(race.get("prize"), int) else None
+
+    # Ydinkenttien asetus — nämä ovat vakaita eivätkä muutu pre→post
+    _set_if_not_none(obj, "race_date",
+                     date.fromisoformat(race["date"]) if race.get("date") else None)
+    _set_if_not_none(obj, "track", _track_name(race) or None)
+    _set_if_not_none(obj, "race_number", race.get("number"))
+    _set_if_not_none(obj, "distance", race.get("distance"))
+    _set_if_not_none(obj, "start_method", race.get("startMethod"))
+    _set_if_not_none(obj, "purse_sek",
+                     race.get("prize") if isinstance(race.get("prize"), int) else None)
 
     # Ratakunto — ATG track.condition ("light", "heavy" tms.)
     # Tämä on kyseisen lähdön ratakunto ennustushetkellä — arvokas suora piirre.
     track_obj = race.get("track") or {}
-    obj.track_condition = track_obj.get("condition")
+    _set_if_not_none(obj, "track_condition", track_obj.get("condition"))
 
     # Race class terms[0]:sta — luokka, ikä, kylmäveri-lippu
     terms_data = _parse_terms(race.get("terms"))
-    obj.race_terms = terms_data["race_terms"]
-    obj.race_min_earnings = terms_data["race_min_earnings"]
-    obj.race_max_earnings = terms_data["race_max_earnings"]
-    obj.race_age_group = terms_data["race_age_group"]
+    _set_if_not_none(obj, "race_terms", terms_data["race_terms"])
+    _set_if_not_none(obj, "race_min_earnings", terms_data["race_min_earnings"])
+    _set_if_not_none(obj, "race_max_earnings", terms_data["race_max_earnings"])
+    _set_if_not_none(obj, "race_age_group", terms_data["race_age_group"])
 
 
 def _upsert_horse(session: Session, horse: dict) -> None:
@@ -491,6 +503,26 @@ def _upsert_runner(
     for k, v in _shoes_sulky_fields(horse).items():
         setattr(obj, k, v)
     return (inserted, not inserted)
+
+
+def _ensure_runner_exists(session: Session, race: dict, start: dict) -> None:
+    """Kylmäkäynnistys-suoja fetch_results():lle (K1-korjaus).
+
+    Luo runner-rivin vain jos sitä ei ole olemassa. JOS runner on jo
+    olemassa (normaali tapaus: pre-race-haku on ajettu), ei kosketa
+    atg_*-aggregaatteihin eikä muihin pre-race-kenttiin.
+
+    Tämä estää K1-vuodon: ATG päivittää atg_lifetime_starts/-win_rate jne.
+    post-race (hevosen tilastot kasvavat), joten fetch_results ei saa
+    ylikirjoittaa pre-race-arvoja näillä post-race-arvoilla.
+    """
+    horse = start.get("horse") or {}
+    if not horse.get("id"):
+        return
+    runner_id = f"{race['id']}_{start.get('number')}"
+    if session.get(Runner, runner_id) is None:
+        # Cold-start: pre-race-haku puuttui — luodaan runner nyt
+        _upsert_runner(session, race, start)
 
 
 # ----------------------------------------------------------------------
@@ -888,7 +920,11 @@ def fetch_results(
                 if not horse.get("id"):
                     continue
                 _upsert_horse(session, horse)
-                _upsert_runner(session, race, s)
+                # K1-korjaus: käytetään _ensure_runner_exists() eikä
+                # _upsert_runner(). Näin post-race-päivitetyt atg_*-
+                # aggregaatit (lifetime_starts, win_rate jne.) eivät
+                # ylikirjoita pre-race-arvoja jotka haettiin aamulla.
+                _ensure_runner_exists(session, race, s)
 
                 runner_id = f"{race_id}_{s.get('number')}"
                 runner = session.get(Runner, runner_id)
@@ -1464,6 +1500,112 @@ def run_forever(db_path: str = DB_PATH) -> None:
         travsport.close()
 
 
+def backfill_correct_atg_aggregates(db_path: str = DB_PATH) -> dict:
+    """Korjaa K1-vuodosta johtuvat virheelliset atg_*-aggregaatit runners-taulussa.
+
+    Tausta: fetch_results() kutsui aiemmin _upsert_runner() joka kirjoitti
+    post-race-päivitetyt ATG-aggregaatit (atg_lifetime_starts, _win_rate,
+    _top3_rate) olemassa oleville runner-riveille. ATG kasvattaa näitä
+    lukuja kilpailun jälkeen, joten jokaisen runner-rivin atg_lifetime_starts
+    on +1 liikaa ja win/top3-raten laskija on väärin.
+
+    Korjauslogiikka:
+      - atg_lifetime_starts  -= 1
+      - atg_lifetime_win_rate  = (wins - is_win) / (starts - 1)
+        missä wins = round(stored_rate * stored_starts)
+        ja is_win = 1 jos finish_position == 1 muuten 0
+      - atg_lifetime_top3_rate = (top3 - is_top3) / (starts - 1)
+        missä is_top3 = 1 jos finish_position IN (1, 2, 3) muuten 0
+      - Muut kentät (atg_current_year_win_rate, atg_driver_win_pct,
+        atg_trainer_win_pct): jätetään — nimittäjä ei ole tiedossa.
+
+    Idempotentti: korjaus on turvallista ajaa useaan kertaan saman runner-
+    rivin kohdalla (pienellä pyöristysvirheellä korjaus on jo lähellä 0).
+
+    Returns:
+        dict: {updated: int, skipped_zero_starts: int, errors: int}
+    """
+    Session_ = sessionmaker(bind=_engine(db_path))
+    stats = {"updated": 0, "skipped_zero_starts": 0, "errors": 0}
+
+    with Session_() as session:
+        runners = session.execute(text("""
+            SELECT runner_id,
+                   atg_lifetime_starts,
+                   atg_lifetime_win_rate,
+                   atg_lifetime_top3_rate,
+                   finish_position
+            FROM runners
+            WHERE atg_lifetime_starts IS NOT NULL
+        """)).fetchall()
+
+        logger.info(
+            "backfill_correct_atg_aggregates: %d runners to process", len(runners)
+        )
+
+        for row in runners:
+            runner_id, s_stored, wr_stored, t3r_stored, fp = row
+            try:
+                if s_stored is None or s_stored <= 0:
+                    stats["skipped_zero_starts"] += 1
+                    continue
+
+                s_pre = s_stored - 1
+                if s_pre <= 0:
+                    # Hevosella ei ollut aiempaa starttihistoriaa ennen tätä lähtöä
+                    stats["skipped_zero_starts"] += 1
+                    session.execute(text("""
+                        UPDATE runners
+                        SET atg_lifetime_starts    = 0,
+                            atg_lifetime_win_rate  = NULL,
+                            atg_lifetime_top3_rate = NULL
+                        WHERE runner_id = :rid
+                    """), {"rid": runner_id})
+                    stats["updated"] += 1
+                    continue
+
+                is_win  = 1 if (isinstance(fp, int) and fp == 1) else 0
+                is_top3 = 1 if (isinstance(fp, int) and 1 <= fp <= 3) else 0
+
+                # Estimoi voittojen kokonaismäärä tallennetusta suhteesta
+                wins_stored  = round((wr_stored  or 0.0) * s_stored)
+                top3_stored  = round((t3r_stored or 0.0) * s_stored)
+
+                wins_pre = max(0, wins_stored - is_win)
+                top3_pre = max(0, top3_stored - is_top3)
+
+                new_wr  = wins_pre  / s_pre
+                new_t3r = top3_pre  / s_pre
+
+                session.execute(text("""
+                    UPDATE runners
+                    SET atg_lifetime_starts    = :s_pre,
+                        atg_lifetime_win_rate  = :wr,
+                        atg_lifetime_top3_rate = :t3r
+                    WHERE runner_id = :rid
+                """), {
+                    "s_pre": s_pre,
+                    "wr":    new_wr,
+                    "t3r":   new_t3r,
+                    "rid":   runner_id,
+                })
+                stats["updated"] += 1
+            except Exception as exc:  # noqa: BLE001
+                stats["errors"] += 1
+                logger.warning(
+                    "backfill_correct_atg_aggregates: runner %s failed: %s",
+                    runner_id, exc,
+                )
+
+        session.commit()
+
+    logger.info(
+        "backfill_correct_atg_aggregates: updated=%d, skipped_zero=%d, errors=%d",
+        stats["updated"], stats["skipped_zero_starts"], stats["errors"],
+    )
+    return stats
+
+
 # ----------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------
@@ -1534,6 +1676,13 @@ def _main() -> None:
              "Noin 325 lähtöä ≈ 6 min (1 req/sek rate limit). Idempotentti.",
     )
 
+    sub.add_parser(
+        "backfill-atg-aggregates",
+        help="Korjaa K1-vuodosta johtuvat virheelliset atg_lifetime_starts/-win_rate/"
+             "-top3_rate -arvot kaikille runners-riveille. "
+             "Ajo kerran riittää (idempotentti). Ei API-kutsuja.",
+    )
+
     args = parser.parse_args()
     migrate(DB_PATH)  # varmista että uudet sarakkeet ovat olemassa
 
@@ -1555,6 +1704,8 @@ def _main() -> None:
         print(backfill_track_condition())
     elif args.cmd == "backfill-race-class":
         print(backfill_race_class())
+    elif args.cmd == "backfill-atg-aggregates":
+        print(backfill_correct_atg_aggregates())
 
 
 if __name__ == "__main__":

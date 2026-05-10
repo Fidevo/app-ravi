@@ -12,8 +12,11 @@ from sqlalchemy.orm import sessionmaker
 from src.data.schema import Horse, HorseStart, OddsSnapshot, Race, Runner, migrate
 from src.data import scheduler as scheduler_mod
 from src.data.scheduler import (
+    _ensure_runner_exists,
     _parse_terms,
     _person_aggregates,
+    _set_if_not_none,
+    backfill_correct_atg_aggregates,
     backfill_race_class,
     capture_odds_snapshot,
     fetch_daily_races,
@@ -1558,3 +1561,276 @@ def test_backfill_race_class_is_idempotent(tmp_path):
     with Session_() as s:
         race = s.get(Race, "2026-04-27_99_1")
         assert race.track_condition == "heavy"
+
+
+# ---------------------------------------------------------------------------
+# K1-korjaus: _ensure_runner_exists + fetch_results ei ylikirjoita atg_*
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_results_does_not_overwrite_atg_aggregates(tmp_path):
+    """K1-regressiotesti: fetch_results EI saa ylikirjoittaa atg_*-aggregaatteja.
+
+    Pre-race-haussa runner saa atg_lifetime_starts=10.
+    Post-race-haussa ATG palauttaa starts=11 (päivitetty).
+    Odotus: DB:ssä pysyy 10 — pre-race-arvo säilyy.
+    """
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    # Vaihe 1: pre-race-haku (starts=10)
+    pre_race = copy.deepcopy(SAMPLE_RACE)
+    pre_race["starts"][0]["horse"]["statistics"]["life"]["starts"] = 10
+    pre_race["starts"][0]["horse"]["statistics"]["life"]["placement"] = {
+        "1": 2, "2": 1, "3": 1
+    }
+    fetch_daily_races(date(2026, 4, 27), db_path=db, atg=FakeATG(pre_race))
+
+    with _session(db) as s:
+        runner = s.query(Runner).filter_by(start_number=1).one()
+        assert runner.atg_lifetime_starts == 10  # saniteettitarkistus
+
+    # Vaihe 2: post-race-haku (ATG päivitti starts=11, voitto lisätty)
+    post_race = copy.deepcopy(pre_race)
+    post_race["starts"][0]["horse"]["statistics"]["life"]["starts"] = 11
+    post_race["starts"][0]["horse"]["statistics"]["life"]["placement"] = {
+        "1": 3, "2": 1, "3": 1
+    }
+    post_race["starts"][0]["result"] = {
+        "place": 1,
+        "kmTime": {"minutes": 1, "seconds": 13, "tenths": 8},
+        "finalOdds": 3.20,
+    }
+    fetch_results(RACE_ID, db_path=db, atg=FakeATG(post_race))
+
+    with _session(db) as s:
+        runner = s.query(Runner).filter_by(start_number=1).one()
+        # atg_lifetime_starts EI saa kasvaa — pre-race-arvo säilyy
+        assert runner.atg_lifetime_starts == 10, (
+            f"K1-vuoto: atg_lifetime_starts muuttui 10 → {runner.atg_lifetime_starts}"
+        )
+        # Tulos kuitenkin päivittyy normaalisti
+        assert runner.finish_position == 1
+        assert runner.kilometer_time_seconds == 73.8
+
+
+def test_fetch_results_cold_start_writes_atg_aggregates(tmp_path):
+    """Cold-start: runner ei ole olemassa ennen fetch_results-kutsua.
+    Tässä tapauksessa _ensure_runner_exists() SAA kirjoittaa atg_*-arvot
+    (koska ei ole pre-race-arvoja ylikirjoitettavaksi).
+    """
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    # Ei ennakkohakua — suoraan fetch_results cold-startina
+    race_with_results = copy.deepcopy(SAMPLE_RACE)
+    race_with_results["starts"][0]["horse"]["statistics"]["life"]["starts"] = 42
+    race_with_results["starts"][0]["result"] = {
+        "place": 2,
+        "kmTime": {"minutes": 1, "seconds": 14, "tenths": 5},
+        "finalOdds": 8.50,
+    }
+
+    fetch_results(RACE_ID, db_path=db, atg=FakeATG(race_with_results))
+
+    with _session(db) as s:
+        runner = s.query(Runner).filter_by(start_number=1).one()
+        # Cold-start: atg_* kirjoitetaan koska riviä ei ollut olemassa
+        assert runner.atg_lifetime_starts == 42
+        assert runner.finish_position == 2
+
+
+def test_set_if_not_none_does_not_overwrite_with_none():
+    """_set_if_not_none: olemassa oleva arvo ei muutu jos uusi arvo on None."""
+    class FakeObj:
+        field = "alkuperäinen"
+
+    obj = FakeObj()
+    _set_if_not_none(obj, "field", None)
+    assert obj.field == "alkuperäinen"
+
+
+def test_set_if_not_none_writes_non_none_value():
+    """_set_if_not_none kirjoittaa arvon kun se ei ole None."""
+    class FakeObj:
+        field = None
+
+    obj = FakeObj()
+    _set_if_not_none(obj, "field", "uusi_arvo")
+    assert obj.field == "uusi_arvo"
+
+
+def test_upsert_race_does_not_overwrite_existing_fields_with_none(tmp_path):
+    """M1-suoja: _upsert_race ei ylikirjoita olemassa olevaa arvoa None:lla.
+
+    Esimerkki: purse_sek asetetaan pre-race-haussa. Fetch_results-haussa
+    race.prize puuttuu (None). Odotus: purse_sek säilyy DB:ssä.
+    """
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    # Pre-race: race kaikilla kentillä
+    fetch_daily_races(date(2026, 4, 27), db_path=db, atg=FakeATG())
+
+    with _session(db) as s:
+        race = s.get(Race, RACE_ID)
+        assert race.purse_sek == 50000  # saniteettitarkistus
+
+    # Post-race: race jolla prize=None (ATG ei aina palauta tätä uudelleen)
+    race_no_prize = copy.deepcopy(SAMPLE_RACE)
+    race_no_prize["prize"] = None
+    race_no_prize["track"]["condition"] = None  # myös track_condition puuttuu
+
+    fetch_results(RACE_ID, db_path=db, atg=FakeATG(race_no_prize))
+
+    with _session(db) as s:
+        race = s.get(Race, RACE_ID)
+        assert race.purse_sek == 50000, (
+            f"M1-vuoto: purse_sek ylikirjoitettiin None:lla "
+            f"(sai {race.purse_sek!r})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# backfill_correct_atg_aggregates
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_correct_atg_aggregates_fixes_starts_and_rates(tmp_path):
+    """backfill_correct_atg_aggregates korjaa atg_lifetime_starts -= 1
+    ja laskee win/top3-raten oikein pre-race-tilaan."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+    with Session_() as s:
+        s.add(Horse(horse_id="77001", name="Backfill Horse"))
+        # Hevosella: stored starts=51 (K1-vuoto, pitäisi olla 50)
+        # stored win_rate = 10/51 (voitti tämän lähdön → is_win=1)
+        # stored top3_rate = 20/51
+        stored_starts = 51
+        stored_wr = 10 / 51   # 10 voittoa 51 startista (post-race)
+        stored_t3r = 20 / 51  # 20 top3:a 51 startista
+        s.add(Runner(
+            runner_id=f"{RACE_ID}_99",
+            race_id=RACE_ID,
+            horse_id="77001",
+            start_number=99,
+            atg_lifetime_starts=stored_starts,
+            atg_lifetime_win_rate=stored_wr,
+            atg_lifetime_top3_rate=stored_t3r,
+            finish_position=1,  # voitti
+        ))
+        s.commit()
+
+    result = backfill_correct_atg_aggregates(db_path=db)
+
+    assert result["updated"] == 1
+    assert result["skipped_zero_starts"] == 0
+    assert result["errors"] == 0
+
+    with Session_() as s:
+        runner = s.get(Runner, f"{RACE_ID}_99")
+        # starts: 51 → 50
+        assert runner.atg_lifetime_starts == 50
+        # win_rate: (10 - 1) / 50 = 9/50 = 0.18
+        assert abs(runner.atg_lifetime_win_rate - 9 / 50) < 0.005
+        # top3_rate: (20 - 1) / 50 = 19/50 = 0.38
+        assert abs(runner.atg_lifetime_top3_rate - 19 / 50) < 0.005
+
+
+def test_backfill_correct_atg_aggregates_non_winner(tmp_path):
+    """Hevonen ei voittanut: wins ei vähennetä is_win=0 koska ei voittoa."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+    with Session_() as s:
+        s.add(Horse(horse_id="77002", name="Non Winner"))
+        stored_starts = 21
+        stored_wr = 5 / 21    # 5 voittoa, hevonen tuli 3. tässä lähdössä
+        stored_t3r = 10 / 21
+        s.add(Runner(
+            runner_id=f"{RACE_ID}_98",
+            race_id=RACE_ID,
+            horse_id="77002",
+            start_number=98,
+            atg_lifetime_starts=stored_starts,
+            atg_lifetime_win_rate=stored_wr,
+            atg_lifetime_top3_rate=stored_t3r,
+            finish_position=3,  # ei voittanut, oli top3
+        ))
+        s.commit()
+
+    backfill_correct_atg_aggregates(db_path=db)
+
+    with Session_() as s:
+        runner = s.get(Runner, f"{RACE_ID}_98")
+        assert runner.atg_lifetime_starts == 20
+        # win_rate: 5/20 = 0.25 (voittoja ei vähennetä — ei voittanut)
+        assert abs(runner.atg_lifetime_win_rate - 5 / 20) < 0.005
+        # top3_rate: (10 - 1) / 20 = 0.45 (oli top3, vähennetään 1)
+        assert abs(runner.atg_lifetime_top3_rate - 9 / 20) < 0.005
+
+
+def test_backfill_correct_atg_aggregates_skips_zero_starts(tmp_path):
+    """Hevosella stored_starts=1: korjaus → 0 alkustart, rate=NULL."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+    with Session_() as s:
+        s.add(Horse(horse_id="77003", name="Debut Horse"))
+        s.add(Runner(
+            runner_id=f"{RACE_ID}_97",
+            race_id=RACE_ID,
+            horse_id="77003",
+            start_number=97,
+            atg_lifetime_starts=1,   # debyytti: stored=1 → pre=0
+            atg_lifetime_win_rate=1.0,
+            atg_lifetime_top3_rate=1.0,
+            finish_position=1,
+        ))
+        s.commit()
+
+    result = backfill_correct_atg_aggregates(db_path=db)
+    assert result["skipped_zero_starts"] == 1
+    assert result["updated"] == 1  # päivitetään starts=0, rate=NULL
+
+    with Session_() as s:
+        runner = s.get(Runner, f"{RACE_ID}_97")
+        assert runner.atg_lifetime_starts == 0
+        assert runner.atg_lifetime_win_rate is None
+        assert runner.atg_lifetime_top3_rate is None
+
+
+def test_backfill_correct_atg_aggregates_skips_null_starts(tmp_path):
+    """Runner jolla atg_lifetime_starts IS NULL ohitetaan kokonaan.
+
+    SQL-filtteri (WHERE atg_lifetime_starts IS NOT NULL) poistaa nämä
+    rivit jo ennen Python-looppia — ne eivät näy missään laskurissa.
+    """
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+    with Session_() as s:
+        s.add(Horse(horse_id="77004", name="No Stats"))
+        s.add(Runner(
+            runner_id=f"{RACE_ID}_96",
+            race_id=RACE_ID,
+            horse_id="77004",
+            start_number=96,
+            atg_lifetime_starts=None,  # tieto puuttui ATG:lta
+        ))
+        s.commit()
+
+    result = backfill_correct_atg_aggregates(db_path=db)
+    # NULL-rivit suodatetaan SQL:ssä — ei updated, ei skipped
+    assert result["updated"] == 0
+    assert result["skipped_zero_starts"] == 0
+    assert result["errors"] == 0
