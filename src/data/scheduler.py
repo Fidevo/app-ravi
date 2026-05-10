@@ -342,6 +342,78 @@ def _pool_odds_to_decimal(pool: Any) -> float | None:
 # Idempotentit upsertit (session.get + in-place update)
 # ----------------------------------------------------------------------
 
+# Ruotsissa käytetään pistettä tuhaterottimena: "10.000" = 10 000.
+import re as _re
+
+
+def _parse_terms(terms: list | None) -> dict:
+    """Pura ATG:n terms[0] -teksti rakenteisiksi kentiksi.
+
+    terms on lista kolmesta merkkijonosta:
+      [0] Kelpoisuusehdot (luokka, ikä, rotu, kuljettajarajoitukset)
+      [1] Kunniapalkintojen kuvaus  (ei tallenneta)
+      [2] Tekniset tiedot: matka, starttitapa, starttereiden määrä  (ei tallenneta)
+
+    Palautetaan dict jossa avaimet:
+      race_terms        : str | None — terms[0] raakana
+      race_min_earnings : int | None — ansainnan alaraja (SEK)
+      race_max_earnings : int | None — ansainnan yläraja (NULL = avoin ylöspäin)
+      race_age_group    : str | None — "2yo" | "3yo" | "3yo+" | "4yo+" | "5yo+"
+
+    Bugiriski: ruotsalaisessa numeroformaatissa piste on tuhaterottelija
+    ("10.000" = 10 000). Poistetaan pisteet ennen int()-muunnosta.
+    Erikoislähdöillä (finaalit, sponsorilähdöt) ansaintaehdot saattavat
+    puuttua — kaikki kentät ovat silloin None.
+    """
+    if not terms or not isinstance(terms, list):
+        return {"race_terms": None, "race_min_earnings": None,
+                "race_max_earnings": None, "race_age_group": None}
+
+    t0 = terms[0] if terms else ""
+    result: dict = {
+        "race_terms": t0 or None,
+        "race_min_earnings": None,
+        "race_max_earnings": None,
+        "race_age_group": None,
+    }
+
+    def _sek(s: str) -> int:
+        """Muunna ruotsalainen numeroformaatti int:ksi: '10.000' → 10000."""
+        return int(s.replace(".", "").replace(" ", ""))
+
+    # Ansaintaraja: "X - Y kr"  →  min=X, max=Y
+    m = _re.search(r"([\d\. ]+)\s*-\s*([\d\. ]+)\s*kr", t0)
+    if m:
+        result["race_min_earnings"] = _sek(m.group(1).strip())
+        result["race_max_earnings"] = _sek(m.group(2).strip())
+    else:
+        # "högst X kr"  →  min=0, max=X  (alkeislähtö / maiden)
+        m = _re.search(r"högst\s+([\d\. ]+)\s*kr", t0)
+        if m:
+            result["race_min_earnings"] = 0
+            result["race_max_earnings"] = _sek(m.group(1).strip())
+        else:
+            # "lägst X kr"  →  min=X, max=NULL  (korkein luokka)
+            m = _re.search(r"lägst\s+([\d\. ]+)\s*kr", t0)
+            if m:
+                result["race_min_earnings"] = _sek(m.group(1).strip())
+                result["race_max_earnings"] = None
+
+    # Ikärajaus — "och äldre" tarkistettava ensin jotta ei osu lyhyempään
+    if "5-åriga och äldre" in t0:
+        result["race_age_group"] = "5yo+"
+    elif "4-åriga och äldre" in t0:
+        result["race_age_group"] = "4yo+"
+    elif "3-åriga och äldre" in t0:
+        result["race_age_group"] = "3yo+"
+    elif "3-åriga" in t0:
+        result["race_age_group"] = "3yo"
+    elif "2-åriga" in t0:
+        result["race_age_group"] = "2yo"
+    # Muut (esim. "4-åriga" ilman "och äldre") ovat harvinaisia, jäävät None
+
+    return result
+
 
 def _upsert_race(session: Session, race: dict) -> None:
     rid = str(race["id"])
@@ -357,6 +429,18 @@ def _upsert_race(session: Session, race: dict) -> None:
     obj.distance = race.get("distance")
     obj.start_method = race.get("startMethod")
     obj.purse_sek = race.get("prize") if isinstance(race.get("prize"), int) else None
+
+    # Ratakunto — ATG track.condition ("light", "heavy" tms.)
+    # Tämä on kyseisen lähdön ratakunto ennustushetkellä — arvokas suora piirre.
+    track_obj = race.get("track") or {}
+    obj.track_condition = track_obj.get("condition")
+
+    # Race class terms[0]:sta — luokka, ikä, kylmäveri-lippu
+    terms_data = _parse_terms(race.get("terms"))
+    obj.race_terms = terms_data["race_terms"]
+    obj.race_min_earnings = terms_data["race_min_earnings"]
+    obj.race_max_earnings = terms_data["race_max_earnings"]
+    obj.race_age_group = terms_data["race_age_group"]
 
 
 def _upsert_horse(session: Session, horse: dict) -> None:
@@ -568,6 +652,78 @@ def backfill_track_condition(
         "errors": errors,
         "cache_files": len(result_files),
     }
+
+
+def backfill_race_class(
+    db_path: str = DB_PATH,
+    atg: ATGClient | None = None,
+) -> dict:
+    """Täytä race_terms, race_min_earnings, race_max_earnings, race_age_group
+    ja track_condition kaikille olemassa oleville races-riveille.
+
+    Hakee jokaisen racen ATG:n /races/{race_id} -endpointista.
+    ATGClient hoitaa rate limitauksen (1 req/sek) — noin 325 lähtöä ≈ 6 min.
+    Turvallista ajaa kun scheduler pyörii samanaikaisesti (SQLite WAL-mode).
+
+    Idempotentti: voidaan ajaa uudelleen, käy läpi kaikki races-rivit
+    (päivittää myös jos arvo on muuttunut). Uudet sarakkeet otetaan käyttöön
+    automaattisesti via _upsert_race().
+
+    Returns:
+        dict: {updated, skipped, errors, total_races}
+    """
+    engine = create_engine(f"sqlite:///{db_path}")
+    Session_ = sessionmaker(bind=engine)
+
+    # Hae kaikki race_id:t
+    with Session_() as session:
+        race_ids = [
+            row[0]
+            for row in session.execute(text("SELECT race_id FROM races ORDER BY race_id")).fetchall()
+        ]
+
+    total = len(race_ids)
+    logger.info("backfill_race_class: %d lähtöä käsiteltävänä", total)
+
+    own_atg = atg is None
+    if own_atg:
+        atg = ATGClient()
+
+    updated = 0
+    skipped = 0
+    errors = 0
+    BATCH = 50  # commit-väli
+
+    try:
+        with Session_() as session:
+            for i, race_id in enumerate(race_ids, 1):
+                try:
+                    race = atg.get_race(race_id)
+                    _upsert_race(session, race)
+                    updated += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "backfill_race_class: virhe race %s: %s", race_id, exc
+                    )
+                    errors += 1
+
+                if i % BATCH == 0:
+                    session.commit()
+                    logger.info(
+                        "backfill_race_class: %d/%d käsitelty (%d virheitä)",
+                        i, total, errors,
+                    )
+
+            session.commit()
+    finally:
+        if own_atg:
+            atg.close()
+
+    logger.info(
+        "backfill_race_class valmis: päivitetty=%d, ohitettu=%d, virheitä=%d, yhteensä=%d",
+        updated, skipped, errors, total,
+    )
+    return {"updated": updated, "skipped": skipped, "errors": errors, "total_races": total}
 
 
 def fetch_daily_races(
@@ -1371,6 +1527,13 @@ def _main() -> None:
              "(idempotentti: päivittää vain NULL-rivit).",
     )
 
+    sub.add_parser(
+        "backfill-race-class",
+        help="Täytä race_terms, race_min/max_earnings, race_age_group ja track_condition "
+             "kaikille races-riveille ATG:n /races-endpointista. "
+             "Noin 325 lähtöä ≈ 6 min (1 req/sek rate limit). Idempotentti.",
+    )
+
     args = parser.parse_args()
     migrate(DB_PATH)  # varmista että uudet sarakkeet ovat olemassa
 
@@ -1390,6 +1553,8 @@ def _main() -> None:
         print(refresh_day_runners(target))
     elif args.cmd == "backfill-track-condition":
         print(backfill_track_condition())
+    elif args.cmd == "backfill-race-class":
+        print(backfill_race_class())
 
 
 if __name__ == "__main__":

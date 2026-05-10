@@ -53,7 +53,11 @@ class Race(Base):
     distance = Column(Integer)         # metreissä
     start_method = Column(String)      # "auto" | "voltstart"
     purse_sek = Column(Integer)        # palkintosumma
-    track_condition = Column(String)   # rata: kuiva/pehmeä jne.
+    track_condition = Column(String)   # ATG track.condition: "light","heavy" tms.
+    race_terms = Column(String)        # ATG terms[0] raakana (koko ehtojen teksti)
+    race_min_earnings = Column(Integer)  # lähdön luokka: alaraja ansainnalle (SEK)
+    race_max_earnings = Column(Integer)  # lähdön luokka: yläraja (NULL = avoin ylös)
+    race_age_group = Column(String)    # ikärajaus: "2yo","3yo","3yo+","4yo+" tms.
 
     runners = relationship("Runner", back_populates="race")
 
@@ -207,6 +211,13 @@ class OddsSnapshot(Base):
 _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     "horse_starts": [
         ("track_condition", "TEXT"),
+    ],
+    "races": [
+        ("track_condition", "TEXT"),
+        ("race_terms", "TEXT"),
+        ("race_min_earnings", "INTEGER"),
+        ("race_max_earnings", "INTEGER"),
+        ("race_age_group", "TEXT"),
     ],
     "runners": [
         ("atg_lifetime_starts", "INTEGER"),

@@ -12,7 +12,9 @@ from sqlalchemy.orm import sessionmaker
 from src.data.schema import Horse, HorseStart, OddsSnapshot, Race, Runner, migrate
 from src.data import scheduler as scheduler_mod
 from src.data.scheduler import (
+    _parse_terms,
     _person_aggregates,
+    backfill_race_class,
     capture_odds_snapshot,
     fetch_daily_races,
     fetch_results,
@@ -1360,3 +1362,199 @@ def test_refresh_day_runners_calls_fetch_daily_without_scheduling(monkeypatch):
     assert captured["target"] == date(2026, 4, 27)
     assert captured["scheduler"] is None  # EI uudelleen-ajasteta snapshotteja
     assert captured["travsport"] is None  # EI uudelleen-haeta horse_starts
+
+
+# ---------------------------------------------------------------------------
+# _parse_terms
+# ---------------------------------------------------------------------------
+
+
+def test_parse_terms_none_input():
+    """None tai tyhjä lista → kaikki kentät None."""
+    r = _parse_terms(None)
+    assert r == {
+        "race_terms": None,
+        "race_min_earnings": None,
+        "race_max_earnings": None,
+        "race_age_group": None,
+    }
+    assert _parse_terms([]) == r
+
+
+def test_parse_terms_range_swedish_thousands():
+    """'X - Y kr' ruotsalaisella tuhaterottelupisteel → min=X, max=Y."""
+    terms = ["För 3-åriga och äldre, 1.500 - 85.000 kr.", "Bonus", "2140m auto"]
+    r = _parse_terms(terms)
+    assert r["race_min_earnings"] == 1500
+    assert r["race_max_earnings"] == 85000
+    assert r["race_age_group"] == "3yo+"
+    assert r["race_terms"] == terms[0]
+
+
+def test_parse_terms_hogst_maiden():
+    """'högst X kr' → min=0, max=X (alkeislähtö / maiden)."""
+    terms = ["För 2-åriga, högst 30.000 kr."]
+    r = _parse_terms(terms)
+    assert r["race_min_earnings"] == 0
+    assert r["race_max_earnings"] == 30000
+    assert r["race_age_group"] == "2yo"
+
+
+def test_parse_terms_lagst_top_class():
+    """'lägst X kr' → min=X, max=None (korkein luokka, avoin ylöspäin)."""
+    terms = ["För 5-åriga och äldre, lägst 500.000 kr."]
+    r = _parse_terms(terms)
+    assert r["race_min_earnings"] == 500000
+    assert r["race_max_earnings"] is None
+    assert r["race_age_group"] == "5yo+"
+
+
+def test_parse_terms_4yo_plus():
+    """4-åriga och äldre → '4yo+'."""
+    terms = ["För 4-åriga och äldre, 50.000 - 200.000 kr."]
+    r = _parse_terms(terms)
+    assert r["race_age_group"] == "4yo+"
+    assert r["race_min_earnings"] == 50000
+    assert r["race_max_earnings"] == 200000
+
+
+def test_parse_terms_3yo_exact():
+    """3-åriga (ilman 'och äldre') → '3yo'."""
+    terms = ["För 3-åriga, 10.000 - 60.000 kr."]
+    r = _parse_terms(terms)
+    assert r["race_age_group"] == "3yo"
+
+
+def test_parse_terms_no_earnings_criteria():
+    """Finaalit / sponsorilähdöt — ei ansaintaehtoja → min/max None."""
+    terms = ["Grand Prix Final, 5-åriga och äldre, kallblod."]
+    r = _parse_terms(terms)
+    assert r["race_min_earnings"] is None
+    assert r["race_max_earnings"] is None
+    assert r["race_age_group"] == "5yo+"
+    assert r["race_terms"] is not None
+
+
+def test_parse_terms_no_space_in_amount():
+    """Yhteen kirjoitettu luku ('10000' ilman tuhaterottelua) toimii myös."""
+    terms = ["För 4-åriga och äldre, 10000 - 80000 kr."]
+    r = _parse_terms(terms)
+    assert r["race_min_earnings"] == 10000
+    assert r["race_max_earnings"] == 80000
+
+
+# ---------------------------------------------------------------------------
+# backfill_race_class
+# ---------------------------------------------------------------------------
+
+
+def _make_atg_race(race_id: str, terms: list | None = None, condition: str | None = None) -> dict:
+    """Luo minimaalinen ATG-race-dict backfill_race_class-testejä varten."""
+    return {
+        "id": race_id,
+        "date": "2026-04-27",
+        "number": 1,
+        "distance": 2140,
+        "startMethod": "auto",
+        "startTime": "2026-04-27T18:00:00",
+        "track": {"name": "Solvalla", "condition": condition},
+        "prize": 50000,
+        "terms": terms or ["För 3-åriga och äldre, 1.500 - 85.000 kr.", "", ""],
+        "starts": [],
+    }
+
+
+def test_backfill_race_class_populates_fields(tmp_path):
+    """backfill_race_class täyttää uudet kentät kaikille races-riveille."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+
+    # Lisää race ilman termejä
+    with Session_() as s:
+        race = Race(
+            race_id="2026-04-27_99_1",
+            race_date=date(2026, 4, 27),
+            track="Solvalla",
+        )
+        s.add(race)
+        s.commit()
+
+    # Mock ATGClient
+    mock_atg = MagicMock()
+    mock_atg.get_race.return_value = _make_atg_race(
+        "2026-04-27_99_1",
+        terms=["För 3-åriga och äldre, 1.500 - 85.000 kr.", "", ""],
+        condition="light",
+    )
+
+    result = backfill_race_class(db_path=db, atg=mock_atg)
+
+    assert result["updated"] == 1
+    assert result["errors"] == 0
+    assert result["total_races"] == 1
+
+    with Session_() as s:
+        race = s.get(Race, "2026-04-27_99_1")
+        assert race.race_min_earnings == 1500
+        assert race.race_max_earnings == 85000
+        assert race.race_age_group == "3yo+"
+        assert race.track_condition == "light"
+        assert race.race_terms is not None
+
+
+def test_backfill_race_class_handles_api_errors_gracefully(tmp_path):
+    """Yksittäinen virhe ei keskeytä koko backfilliä."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+
+    with Session_() as s:
+        for i in range(1, 4):
+            s.add(Race(race_id=f"2026-04-27_99_{i}", race_date=date(2026, 4, 27), track="Solvalla"))
+        s.commit()
+
+    mock_atg = MagicMock()
+
+    def fake_get_race(race_id):
+        if race_id == "2026-04-27_99_2":
+            raise RuntimeError("API virhe")
+        return _make_atg_race(race_id)
+
+    mock_atg.get_race.side_effect = fake_get_race
+
+    result = backfill_race_class(db_path=db, atg=mock_atg)
+
+    assert result["total_races"] == 3
+    assert result["updated"] == 2   # 2 onnistui
+    assert result["errors"] == 1    # 1 epäonnistui
+
+
+def test_backfill_race_class_is_idempotent(tmp_path):
+    """Sama ajo kahdesti ei aiheuta ongelmia (idempotentti)."""
+    db = str(tmp_path / "test.db")
+    migrate(db)
+
+    engine = create_engine(f"sqlite:///{db}")
+    Session_ = sessionmaker(bind=engine)
+
+    with Session_() as s:
+        s.add(Race(race_id="2026-04-27_99_1", race_date=date(2026, 4, 27), track="Solvalla"))
+        s.commit()
+
+    mock_atg = MagicMock()
+    mock_atg.get_race.return_value = _make_atg_race("2026-04-27_99_1", condition="heavy")
+
+    r1 = backfill_race_class(db_path=db, atg=mock_atg)
+    r2 = backfill_race_class(db_path=db, atg=mock_atg)
+
+    assert r1["errors"] == 0
+    assert r2["errors"] == 0
+    # Toisella ajolla arvo on sama — ei datakonfliktivirheitä
+    with Session_() as s:
+        race = s.get(Race, "2026-04-27_99_1")
+        assert race.track_condition == "heavy"
