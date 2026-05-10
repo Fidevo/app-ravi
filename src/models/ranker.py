@@ -11,6 +11,7 @@ Pisteet -> todennäköisyydet softmaxilla per lähtö.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Sequence
 
@@ -19,9 +20,20 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import log_loss
 
-# Piirteet joita käytetään mallissa
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Piirremäärittelyt
+# ---------------------------------------------------------------------------
+# HUOM: horse_age vaatii birth_year-sarakkeen runners-DataFramessa (JOIN
+# horses-tauluun ennen build_feature_matrix()-kutsua). Jos sarake puuttuu,
+# train_ranker() / predict_win_probabilities() ohittaa sen automaattisesti
+# ja kirjaa varoituksen. Muut piirteet tulevat runners- tai races-taulusta
+# suoraan eikä niille tarvita erillistä JOIN:ia.
+# ---------------------------------------------------------------------------
+
 FEATURE_COLS: list[str] = [
-    # Muoto
+    # --- Hevosen muoto (build_features.form_features) ---
     "form_avg_finish_5",
     "form_win_rate_5",
     "form_top3_rate_5",
@@ -29,21 +41,72 @@ FEATURE_COLS: list[str] = [
     "form_best_km_time_5",
     "form_market_avg_5",
     "form_days_since_last",
-    # Ohjastaja & valmentaja
-    "driver_is_win_mean",
-    "driver_is_win_count",
-    "driver_is_top3_mean",
-    "trainer_is_win_mean",
-    "trainer_is_top3_mean",
-    # Lähtöasetelma
+    # --- ATG-aggregaatit hevosesta: koko ura (runners-taulusta suoraan) ---
+    "atg_lifetime_win_rate",
+    "atg_lifetime_top3_rate",
+    "atg_lifetime_starts",
+    "atg_current_year_win_rate",
+    "atg_best_km_for_this_setup",   # paras km tämä matka+starttimuoto
+    # --- ATG-aggregaatit ohjastajasta ja valmentajasta (kuluva vuosi) ---
+    "atg_driver_win_pct",
+    "atg_driver_starts",
+    "atg_trainer_win_pct",
+    "atg_trainer_starts",
+    # --- Meistä lasketut rolling-tilastot (kasvavat ajan myötä, parempia V4+) ---
+    "driver_win_rate_365d",
+    "driver_starts_365d",
+    "driver_top3_rate_365d",
+    "trainer_win_rate_365d",
+    "trainer_top3_rate_365d",
+    # --- Lähtöasetelma (build_features.race_setup_features) ---
     "inside_post",
     "back_row",
     "handicap_meters",
     "track_horse_starts",
     "track_horse_win_rate",
+    # --- Lähdön luokka (races-taulusta) ---
+    "race_min_earnings",
+    "race_max_earnings",
+    # --- Kengät ja sulky: muutossignaalit (runners-taulusta suoraan) ---
+    "shoes_changed_front",
+    "shoes_changed_back",
+    "sulky_changed",
+    # --- Johdetut piirteet (build_features.derived_features) ---
+    "barfota_law_active",
+    "horse_age",   # Vaatii birth_year runners-DataFramessa — ohitetaan jos puuttuu
 ]
 
-CATEGORICAL_COLS: list[str] = ["distance_category", "start_method"]
+CATEGORICAL_COLS: list[str] = [
+    "distance_category",   # sprint / middle / long
+    "start_method",        # auto / voltstart
+    "race_age_group",      # 2yo / 3yo / 3yo+ / 4yo+ / 5yo+
+    "track_condition",     # light / heavy (ATG races.condition)
+    "sulky_type",          # VA / AM
+]
+
+
+def _resolve_cols(
+    df: pd.DataFrame,
+    feature_cols: Sequence[str],
+    categorical_cols: Sequence[str],
+) -> tuple[list[str], list[str]]:
+    """Suodata piirrelistat df:ssä olemassa oleviin sarakkeisiin.
+
+    Ohitetaan puuttuvat sarakkeet ja kirjataan varoitus. Tämä mahdollistaa
+    valinnaisten piirteiden (esim. horse_age) lisäämisen FEATURE_COLS:iin
+    ilman että kaikki ympäristöt vaativat kyseistä saraketta.
+    """
+    avail_feat = [c for c in feature_cols if c in df.columns]
+    avail_cat = [c for c in categorical_cols if c in df.columns]
+    missing_feat = set(feature_cols) - set(avail_feat)
+    missing_cat = set(categorical_cols) - set(avail_cat)
+    if missing_feat or missing_cat:
+        logger.warning(
+            "Puuttuvat piirteet ohitetaan — lisää birth_year JOIN:lla tai "
+            "tarkista data: numeeriset=%s, kategoriset=%s",
+            sorted(missing_feat), sorted(missing_cat),
+        )
+    return avail_feat, avail_cat
 
 
 def train_ranker(
@@ -56,10 +119,14 @@ def train_ranker(
 
     Args:
         train_df: pitää sisältää race_id, finish_position, ja feature-sarakkeet.
-        feature_cols: numeeriset piirteet
-        categorical_cols: kategoriset piirteet (label-encodataan)
+        feature_cols: numeeriset piirteet (puuttuvat ohitetaan automaattisesti)
+        categorical_cols: kategoriset piirteet (puuttuvat ohitetaan automaattisesti)
     """
     df = train_df.dropna(subset=["finish_position"]).copy()
+
+    # Suodata saatavilla oleviin sarakkeisiin — valinnaisia piirteitä
+    # (esim. horse_age) ei vaadita kaikissa ympäristöissä.
+    avail_feat, avail_cat = _resolve_cols(df, feature_cols, categorical_cols)
 
     # Ranker-target: käännetään sijoitus pisteeksi (1. -> korkein)
     max_pos = df.groupby("race_id")["finish_position"].transform("max")
@@ -68,8 +135,8 @@ def train_ranker(
     # Ryhmäkoot per lähtö (lambdarankin vaatimus)
     group_sizes = df.groupby("race_id").size().values
 
-    X = df[list(feature_cols) + list(categorical_cols)].copy()
-    for col in categorical_cols:
+    X = df[avail_feat + avail_cat].copy()
+    for col in avail_cat:
         X[col] = X[col].astype("category")
 
     y = df["relevance"].values
@@ -78,7 +145,7 @@ def train_ranker(
         X,
         label=y,
         group=group_sizes,
-        categorical_feature=list(categorical_cols),
+        categorical_feature=avail_cat,
     )
 
     params = {
@@ -108,8 +175,9 @@ def predict_win_probabilities(
     Muunto pisteistä todennäköisyyksiksi: softmax per lähtö.
     Tämä takaa että todennäköisyydet summautuvat 1.0:aan per lähtö.
     """
-    X = race_df[list(feature_cols) + list(categorical_cols)].copy()
-    for col in categorical_cols:
+    avail_feat, avail_cat = _resolve_cols(race_df, feature_cols, categorical_cols)
+    X = race_df[avail_feat + avail_cat].copy()
+    for col in avail_cat:
         X[col] = X[col].astype("category")
 
     raw_scores = model.predict(X)

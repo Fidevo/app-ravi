@@ -18,6 +18,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# Races-taulun aina läsnä olevat sarakkeet race_setup_features()-mergessä.
+_RACE_COLS_BASE = ["race_id", "track", "distance", "start_method"]
+# Lisäsarakkeet: otetaan mukaan vain jos ne löytyvät races-DataFramesta.
+# Näin backward-yhteensopivuus säilyy vanhojen testitietojen kanssa.
+_RACE_COLS_EXTRA = ["track_condition", "race_min_earnings", "race_max_earnings", "race_age_group"]
+
 
 # ----------------------------------------------------------------------
 # 1. Hevosen muoto
@@ -154,11 +160,8 @@ def race_setup_features(runners: pd.DataFrame, races: pd.DataFrame) -> pd.DataFr
         välillä (esim. Solvalla-Bergsåker-Solvalla → 2. Solvalla-startti sai väärän
         wins_cum-arvon). .transform() pitää laskun ryhmän sisällä.
     """
-    df = runners.merge(
-        races[["race_id", "track", "distance", "start_method"]],
-        on="race_id",
-        how="left",
-    )
+    race_cols = _RACE_COLS_BASE + [c for c in _RACE_COLS_EXTRA if c in races.columns]
+    df = runners.merge(races[race_cols], on="race_id", how="left")
 
     df["inside_post"] = (df["start_number"] <= 3).astype(int)
     df["back_row"] = (df["handicap_meters"].fillna(0) > 0).astype(int)
@@ -192,14 +195,60 @@ def race_setup_features(runners: pd.DataFrame, races: pd.DataFrame) -> pd.DataFr
 
 
 # ----------------------------------------------------------------------
+# 4. Johdetut piirteet
+# ----------------------------------------------------------------------
+
+def derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Laskee piirteet jotka voidaan johtaa suoraan olemassa olevasta datasta.
+
+    Ei vaadi ulkoisia lähteitä — kaikki lasketaan muista sarakkeista.
+
+    Lisää:
+      barfota_law_active : 1 jos talvikielto (1.12.–28.2.), muuten 0.
+        ATG ei raportoi barfota-tietoa talvikieltoaikana → shoes_*=NULL.
+        Ilman tätä piirrettä malli ei tiedä johtuuko NULL talvikiellosta
+        vai siitä että hevosella todella on kengät.
+
+      horse_age : hevosen ikä kilpailupäivänä (race_date.year - birth_year).
+        Lasketaan vain jos birth_year on df:ssä — muuten ohitetaan hiljaisesti.
+        birth_year saadaan JOIN:lla horses-tauluun ennen build_feature_matrix()-
+        kutsua. Puuttuva birth_year → horse_age puuttuu → train_ranker() ohittaa
+        sen FEATURE_COLS:ista automaattisesti.
+    """
+    dates = pd.to_datetime(df["race_date"])
+
+    # Talvikielto: joulukuu, tammikuu tai helmikuu
+    df["barfota_law_active"] = (
+        (dates.dt.month == 12) | (dates.dt.month <= 2)
+    ).astype(int)
+
+    # Hevosen ikä: lasketaan vain kun birth_year on saatavilla
+    if "birth_year" in df.columns:
+        df["horse_age"] = dates.dt.year - df["birth_year"].astype("Int64")
+
+    return df
+
+
+# ----------------------------------------------------------------------
 # Yhdistäjä
 # ----------------------------------------------------------------------
 
 def build_feature_matrix(
     runners: pd.DataFrame, races: pd.DataFrame
 ) -> pd.DataFrame:
-    """Aja kaikki feature-funktiot ja palauta valmis matriisi mallille."""
+    """Aja kaikki feature-funktiot ja palauta valmis matriisi mallille.
+
+    Piirre-pipeline järjestyksessä:
+      1. form_features       — hevosen muoto viim. N startista
+      2. driver_trainer_features — rolling-tilastot ohjastajalle/valmentajalle
+      3. race_setup_features — lähtörata, rata-kokemus, lähdön luokka
+      4. derived_features    — johdetut piirteet (barfota, horse_age)
+
+    Valinnainen horse_age-piirre: lisää birth_year runners-DataFrameen
+    JOIN:lla horses-tauluun ennen tätä kutsua.
+    """
     df = form_features(runners)
     df = driver_trainer_features(df)
     df = race_setup_features(df, races)
+    df = derived_features(df)
     return df

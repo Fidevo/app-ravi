@@ -15,7 +15,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.features.build_features import driver_trainer_features, race_setup_features
+from src.features.build_features import (
+    build_feature_matrix,
+    derived_features,
+    driver_trainer_features,
+    form_features,
+    race_setup_features,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -46,12 +52,22 @@ def _runners(*rows: dict) -> pd.DataFrame:
 
 
 def _races(*rows: dict) -> pd.DataFrame:
-    """Luo minimaalisen races-DataFramen annetuilla riveillä."""
+    """Luo minimaalisen races-DataFramen annetuilla riveillä.
+
+    Sisältää uudet race-luokkasarakkeet oletuksena None:lla jotta olemassa
+    olevat testit toimivat muuttumattomina — NaN/None on sallittu arvo
+    kaikille uusille sarakkeille (valinnainen data).
+    """
     defaults: dict = {
         "race_id": 1,
         "track": "Solvalla",
         "distance": 2000,
         "start_method": "auto",
+        # Uudet race-luokkasarakkeet — None = ei tietoa (esim. finaalit)
+        "track_condition": None,
+        "race_min_earnings": None,
+        "race_max_earnings": None,
+        "race_age_group": None,
     }
     return pd.DataFrame([{**defaults, **r} for r in rows])
 
@@ -287,3 +303,187 @@ class TestRaceSetupFeatures:
         )
         result = race_setup_features(runners, races)
         assert len(result) == len(runners)
+
+    def test_race_class_columns_merged_when_present(self):
+        """race_setup_features sisällyttää race-luokkasarakkeet kun races niitä sisältää."""
+        runners = _runners({"race_id": 1, "horse_id": 10, "race_date": "2024-01-01",
+                            "finish_position": 2})
+        races = _races({"race_id": 1, "track": "Solvalla",
+                        "track_condition": "light",
+                        "race_min_earnings": 1500,
+                        "race_max_earnings": 85000,
+                        "race_age_group": "3yo+"})
+        result = race_setup_features(runners, races)
+        assert result.iloc[0]["track_condition"] == "light"
+        assert result.iloc[0]["race_min_earnings"] == pytest.approx(1500)
+        assert result.iloc[0]["race_max_earnings"] == pytest.approx(85000)
+        assert result.iloc[0]["race_age_group"] == "3yo+"
+
+    def test_race_class_absent_when_races_lacks_columns(self):
+        """race_setup_features ei kaadu kun races ei sisällä uusia sarakkeita.
+
+        Varmistaa backward-yhteensopivuuden vanhan datan kanssa: puuttuvat
+        sarakkeet eivät näy tuloksessa (ei NaN-sarakkeita tyhjästä).
+        """
+        runners = _runners({"race_id": 1, "horse_id": 10, "race_date": "2024-01-01",
+                            "finish_position": 2})
+        # Vanha races ilman uusia sarakkeita
+        races = pd.DataFrame([{"race_id": 1, "track": "Solvalla",
+                               "distance": 2000, "start_method": "auto"}])
+        result = race_setup_features(runners, races)
+        # Ei kaadu — uudet sarakkeet puuttuvat mutta se on ok
+        assert len(result) == 1
+        assert "track_condition" not in result.columns
+        assert "race_min_earnings" not in result.columns
+
+
+# ---------------------------------------------------------------------------
+# Korjaus 5 — derived_features
+# ---------------------------------------------------------------------------
+
+class TestDerivedFeatures:
+    """Testit derived_features()-funktiolle."""
+
+    def _base_df(self, race_date: str, **extra) -> pd.DataFrame:
+        row = {"horse_id": 1, "race_id": 1, "race_date": race_date,
+               "finish_position": 2, **extra}
+        return pd.DataFrame([row])
+
+    def test_barfota_law_active_in_december(self):
+        """Joulukuu → talvikielto aktiivinen."""
+        df = self._base_df("2024-12-15")
+        result = derived_features(df)
+        assert result.iloc[0]["barfota_law_active"] == 1
+
+    def test_barfota_law_active_in_january(self):
+        """Tammikuu → talvikielto aktiivinen."""
+        df = self._base_df("2024-01-10")
+        result = derived_features(df)
+        assert result.iloc[0]["barfota_law_active"] == 1
+
+    def test_barfota_law_active_in_february(self):
+        """Helmikuu → talvikielto aktiivinen."""
+        df = self._base_df("2024-02-29")
+        result = derived_features(df)
+        assert result.iloc[0]["barfota_law_active"] == 1
+
+    def test_barfota_law_inactive_in_march(self):
+        """Maaliskuu → talvikielto ei aktiivinen (kielto loppuu 28.2.)."""
+        df = self._base_df("2024-03-01")
+        result = derived_features(df)
+        assert result.iloc[0]["barfota_law_active"] == 0
+
+    def test_barfota_law_inactive_in_summer(self):
+        """Kesäkuu → talvikielto ei aktiivinen."""
+        df = self._base_df("2024-06-15")
+        result = derived_features(df)
+        assert result.iloc[0]["barfota_law_active"] == 0
+
+    def test_horse_age_computed_when_birth_year_available(self):
+        """horse_age lasketaan oikein kun birth_year on df:ssä."""
+        df = self._base_df("2024-05-10", birth_year=2018)
+        result = derived_features(df)
+        assert "horse_age" in result.columns
+        assert result.iloc[0]["horse_age"] == 6  # 2024 - 2018
+
+    def test_horse_age_skipped_without_birth_year(self):
+        """horse_age puuttuu jos birth_year ei ole df:ssä — ei kaadu."""
+        df = self._base_df("2024-05-10")
+        result = derived_features(df)
+        # Ei kaadu, horse_age ei yksinkertaisesti ole tuloksessa
+        assert "horse_age" not in result.columns
+        assert "barfota_law_active" in result.columns  # muut piirteet kyllä
+
+    def test_derived_features_does_not_drop_existing_columns(self):
+        """derived_features ei poista olemassa olevia sarakkeita."""
+        df = self._base_df("2024-06-01")
+        df["some_existing_col"] = 42
+        result = derived_features(df)
+        assert "some_existing_col" in result.columns
+        assert result.iloc[0]["some_existing_col"] == 42
+
+
+# ---------------------------------------------------------------------------
+# Integraatiotesti — FEATURE_COLS vs. build_feature_matrix
+# ---------------------------------------------------------------------------
+
+class TestFeatureColsIntegration:
+    """Varmistaa että FEATURE_COLS-nimet täsmäävät build_feature_matrix()-tulosteeseen.
+
+    Tämä on regressiotesti bugi #1:lle: ranker.py:n FEATURE_COLS:in ja
+    build_features.py:n tuottamien sarakkeiden nimiristiriita joka kaatoi
+    train_ranker():n KeyError:iin.
+    """
+
+    def test_computed_cols_present_after_build_feature_matrix(self):
+        """build_feature_matrix() tuottaa kaikki laskennalliset piirteet
+        jotka FEATURE_COLS odottaa (poislukien pass-through runners-sarakkeet
+        ja valinnainen horse_age joka vaatii birth_year JOIN:in)."""
+        from src.models.ranker import FEATURE_COLS
+
+        runners = _runners(
+            {"race_id": 1, "horse_id": 10, "race_date": "2024-01-01",
+             "finish_position": 1, "driver": "Arto", "trainer": "Matti",
+             "start_number": 2, "handicap_meters": 0},
+            {"race_id": 1, "horse_id": 11, "race_date": "2024-01-01",
+             "finish_position": 2, "driver": "Arto", "trainer": "Teppo",
+             "start_number": 4, "handicap_meters": 0},
+            {"race_id": 2, "horse_id": 10, "race_date": "2024-01-08",
+             "finish_position": 2, "driver": "Arto", "trainer": "Matti",
+             "start_number": 1, "handicap_meters": 0},
+        )
+        races = _races(
+            {"race_id": 1, "track": "Solvalla", "distance": 2140,
+             "start_method": "auto", "track_condition": "light",
+             "race_min_earnings": 1500, "race_max_earnings": 85000,
+             "race_age_group": "3yo+"},
+            {"race_id": 2, "track": "Solvalla", "distance": 2140,
+             "start_method": "auto", "track_condition": "heavy",
+             "race_min_earnings": 0, "race_max_earnings": 30000,
+             "race_age_group": "2yo"},
+        )
+
+        result = build_feature_matrix(runners, races)
+
+        # Piirteet jotka build_feature_matrix laskee (ei pass-through)
+        computed_cols = [
+            "form_avg_finish_5", "form_win_rate_5", "form_top3_rate_5",
+            "form_avg_km_time_5", "form_best_km_time_5",
+            "form_market_avg_5", "form_days_since_last",
+            "driver_win_rate_365d", "driver_starts_365d", "driver_top3_rate_365d",
+            "trainer_win_rate_365d", "trainer_top3_rate_365d",
+            "inside_post", "back_row", "distance_category",
+            "track_horse_starts", "track_horse_win_rate",
+            "track_condition", "race_min_earnings", "race_max_earnings",
+            "race_age_group",
+            "barfota_law_active",
+        ]
+        missing = [c for c in computed_cols if c not in result.columns]
+        assert not missing, (
+            f"build_feature_matrix() ei tuottanut näitä FEATURE_COLS-sarakkeita: "
+            f"{missing}\nKaikki sarakkeet: {sorted(result.columns.tolist())}"
+        )
+
+    def test_driver_col_names_match_feature_cols(self):
+        """Varmistaa ettei vanha bugi #1 palaa: ohjastajasarakkeiden nimet
+        täsmäävät FEATURE_COLS:iin."""
+        from src.models.ranker import FEATURE_COLS
+
+        runners = _runners(
+            {"race_id": 1, "horse_id": 1, "race_date": "2024-01-01",
+             "finish_position": 1, "driver": "Arto", "trainer": "Matti"},
+            {"race_id": 2, "horse_id": 2, "race_date": "2024-01-08",
+             "finish_position": 2, "driver": "Arto", "trainer": "Matti"},
+        )
+        races = _races(
+            {"race_id": 1, "track": "Solvalla"},
+            {"race_id": 2, "track": "Solvalla"},
+        )
+        result = build_feature_matrix(runners, races)
+
+        driver_cols_in_feature_cols = [c for c in FEATURE_COLS if c.startswith("driver_win") or c.startswith("trainer_win")]
+        for col in driver_cols_in_feature_cols:
+            assert col in result.columns, (
+                f"Sarake '{col}' on FEATURE_COLS:issa mutta puuttuu "
+                f"build_feature_matrix()-tuloksesta. Vanha bugi #1 palasi."
+            )
