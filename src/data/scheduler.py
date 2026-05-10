@@ -78,7 +78,11 @@ DB_PATH = str(_DB_PATH_ABS)
 # eikä tee turhia API-kutsuja. atg_client.get_calendar_day suodattaa
 # nämä pois jo calendar-tasolla (sport != "trot"), joten uusia gallop-
 # lähtöjä ei tule DB:hen - tämä lista suojaa jo olemassa olevia rivejä.
-GALLOP_TRACKS: frozenset[str] = frozenset({"Bro Park", "Jägersro Galopp"})
+GALLOP_TRACKS: frozenset[str] = frozenset({
+    "Bro Park",        # Stockholm-alue
+    "Göteborg Galopp", # Göteborg/Åby-alue
+    "Jägersro Galopp", # Malmö-alue
+})
 
 logger = logging.getLogger("ravit_edge.scheduler")
 

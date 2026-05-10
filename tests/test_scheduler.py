@@ -1138,9 +1138,10 @@ def test_get_calendar_day_filters_gallop_tracks():
 def test_retry_incomplete_results_skips_gallop_tracks(tmp_path):
     """retry_incomplete_results ei yritä hakea gallop-ratojen tuloksia.
 
-    Bro Park ja Jägersro Galopp eivät koskaan saa kmTime-objekteja ATG:sta
-    → ne olisivat aina vajaita → turhia API-kutsuja joka päivä.
-    GALLOP_TRACKS NOT IN -filtteri poistaa ne kyselystä.
+    Bro Park, Göteborg Galopp ja Jägersro Galopp eivät koskaan saa
+    kmTime-objekteja ATG:sta → ne olisivat aina vajaita → turhia
+    API-kutsuja joka päivä. GALLOP_TRACKS NOT IN -filtteri poistaa ne.
+    Testataan Bro Parkillla; logiikka on sama kaikille GALLOP_TRACKS-radoille.
     """
     db = str(tmp_path / "test.db")
     migrate(db)
@@ -1149,7 +1150,7 @@ def test_retry_incomplete_results_skips_gallop_tracks(tmp_path):
     gallop_race = _build_partial_results_race(
         "2026-04-27_gallop_1", n_runners=5, n_with_results=0
     )
-    gallop_race["track"] = {"name": "Bro Park"}  # gallop-rata
+    gallop_race["track"] = {"name": "Bro Park"}  # gallop-rata (GALLOP_TRACKS)
 
     # Tallenna race DB:hen suoraan fetch_results:llä (calendar-filtteri
     # ei ole käytössä tässä kutsussa - simuloi jo olemassa olevaa dataa)
