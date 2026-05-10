@@ -487,3 +487,184 @@ class TestFeatureColsIntegration:
                 f"Sarake '{col}' on FEATURE_COLS:issa mutta puuttuu "
                 f"build_feature_matrix()-tuloksesta. Vanha bugi #1 palasi."
             )
+
+
+# ---------------------------------------------------------------------------
+# Testit form_features() + horse_starts-integraatiolle (korjaus #6)
+# ---------------------------------------------------------------------------
+
+def _horse_starts(*rows: dict) -> pd.DataFrame:
+    """Luo minimaalisen horse_starts-DataFramen.
+
+    Vaaditut sarakkeet: horse_id, race_date, finish_position,
+    kilometer_time_seconds, win_odds_final.
+    """
+    defaults: dict = {
+        "horse_id": 1,
+        "race_date": "2023-01-01",
+        "finish_position": 2,
+        "kilometer_time_seconds": 90.0,
+        "win_odds_final": 5.0,
+    }
+    return pd.DataFrame([{**defaults, **r} for r in rows])
+
+
+class TestFormFeaturesWithHorseStarts:
+    """Testit form_features()-funktiolle horse_starts-parametrin kanssa.
+
+    Varmistaa:
+      - Backward-yhteensopivuus: horse_starts=None toimii kuten ennen
+      - Historia parantaa piirteitä: enemmän dataa → paremmat estimaatit
+      - Ei data leakage: tulevat horse_starts-rivit eivät vuoda piirteisiin
+      - Deduplikaatio: runners-taulun arvo voittaa horse_starts-arvon
+      - Rivisäilyvyys: runners-rivien määrä pysyy samana
+      - Lepoaika lasketaan horse_starts-päivämäärästä
+      - build_feature_matrix() välittää horse_starts form_features():lle
+    """
+
+    def test_without_horse_starts_backward_compat(self):
+        """Ilman horse_starts form_features() käyttäytyy kuten ennen (ei kaadu)."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 1, "race_date": "2024-05-01",
+             "finish_position": 1, "kilometer_time_seconds": 88.0, "win_odds_final": 3.0},
+            {"horse_id": 1, "race_id": 2, "race_date": "2024-05-10",
+             "finish_position": 2, "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+        )
+        # Ei horse_starts — vanhan käyttötavan pitää toimia
+        result = form_features(runners)
+        assert len(result) == 2
+        assert "form_avg_finish_5" in result.columns
+        assert "form_days_since_last" in result.columns
+        # Toinen rivi: käyttää ensimmäisen rivin tietoja (shift(1))
+        assert result.iloc[1]["form_avg_finish_5"] == pytest.approx(1.0)
+        assert result.iloc[1]["form_days_since_last"] == 9
+
+    def test_history_improves_form_when_runners_sparse(self):
+        """Kun horse_starts antaa useampia starteja, rolling-piirteet
+        lasketaan täydestä historiasta eivätkä ole NaN vaikka runners-data ohuet."""
+        # runners: vain 1 rivi (ei historiaa runners-taulussa)
+        runners = _runners(
+            {"horse_id": 42, "race_id": 99, "race_date": "2024-05-01",
+             "finish_position": 3, "kilometer_time_seconds": 91.0, "win_odds_final": 6.0},
+        )
+        # horse_starts: 4 aikaisempaa starttia samalle hevoselle
+        hs = _horse_starts(
+            {"horse_id": 42, "race_date": "2023-11-01", "finish_position": 1, "kilometer_time_seconds": 87.0, "win_odds_final": 4.0},
+            {"horse_id": 42, "race_date": "2023-12-01", "finish_position": 2, "kilometer_time_seconds": 89.0, "win_odds_final": 5.0},
+            {"horse_id": 42, "race_date": "2024-01-15", "finish_position": 1, "kilometer_time_seconds": 88.0, "win_odds_final": 3.0},
+            {"horse_id": 42, "race_date": "2024-03-10", "finish_position": 3, "kilometer_time_seconds": 92.0, "win_odds_final": 7.0},
+        )
+        result_without = form_features(runners)
+        result_with = form_features(runners, horse_starts=hs)
+
+        # Ilman historiaa: 1. rivi on NaN (shift(1) → tyhjä)
+        assert pd.isna(result_without.iloc[0]["form_avg_finish_5"])
+
+        # Historian kanssa: on 4 aiempaa starttia → piirre ei ole NaN
+        assert not pd.isna(result_with.iloc[0]["form_avg_finish_5"])
+        # Odotusarvo: (1+2+1+3)/4 = 1.75 (4 viimeisintä startia ennen 2024-05-01)
+        assert result_with.iloc[0]["form_avg_finish_5"] == pytest.approx(1.75)
+
+    def test_no_leakage_future_history_excluded(self):
+        """horse_starts-rivit jotka ovat MYÖHEMMIN kuin runners-lähtö
+        eivät saa vuotaa piirteisiin (shift(1) + rolling käsittelee tämän)."""
+        runners = _runners(
+            {"horse_id": 5, "race_id": 10, "race_date": "2024-03-01",
+             "finish_position": 2, "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+        )
+        hs = _horse_starts(
+            # Yksi vanhempi rivi (OK) ja yksi tulevaisuuden rivi (EI saa vaikuttaa)
+            {"horse_id": 5, "race_date": "2024-01-01", "finish_position": 1, "kilometer_time_seconds": 87.0, "win_odds_final": 3.0},
+            {"horse_id": 5, "race_date": "2024-06-01", "finish_position": 5, "kilometer_time_seconds": 99.0, "win_odds_final": 2.0},
+        )
+        result = form_features(runners, horse_starts=hs)
+        # Vain 1 aiempi startti (2024-01-01) pitäisi vaikuttaa.
+        # shift(1) poolissa: runners-rivi on 2. (2024-03-01), näkee vain 2024-01-01.
+        # Tulevaisuuden rivi (2024-06-01) on poolissa 3. sijoilla, ei vuoda.
+        assert result.iloc[0]["form_avg_finish_5"] == pytest.approx(1.0)
+        # win_rate: 1 voitto / 1 näytetty startti = 1.0
+        assert result.iloc[0]["form_win_rate_5"] == pytest.approx(1.0)
+
+    def test_dedup_runners_take_priority_over_horse_starts(self):
+        """Jos sama (horse_id, race_date) löytyy sekä runners- että horse_starts-
+        taulusta, runners-taulun arvo säilytetään (deduplikaatiosääntö)."""
+        runners = _runners(
+            {"horse_id": 7, "race_id": 1, "race_date": "2024-01-15",
+             "finish_position": 1, "kilometer_time_seconds": 88.5, "win_odds_final": 2.0},
+            {"horse_id": 7, "race_id": 2, "race_date": "2024-02-01",
+             "finish_position": 3, "kilometer_time_seconds": 92.0, "win_odds_final": 5.0},
+        )
+        # horse_starts sisältää saman 2024-01-15 rivin eri arvoilla
+        hs = _horse_starts(
+            {"horse_id": 7, "race_date": "2024-01-15", "finish_position": 4,
+             "kilometer_time_seconds": 95.0, "win_odds_final": 10.0},
+        )
+        result = form_features(runners, horse_starts=hs)
+        # Rivimäärä pysyy 2 (ei duplikaatteja)
+        assert len(result) == 2
+        # 2. rivi (2024-02-01): form_avg_finish_5 pitää perustua runners-arvoon 1
+        # eikä horse_starts-arvoon 4
+        assert result.iloc[1]["form_avg_finish_5"] == pytest.approx(1.0)
+
+    def test_row_count_preserved_with_horse_starts(self):
+        """horse_starts ei lisää ylimääräisiä rivejä runners-DataFrameen."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 1, "race_date": "2024-04-01", "finish_position": 2},
+            {"horse_id": 1, "race_id": 2, "race_date": "2024-04-15", "finish_position": 1},
+            {"horse_id": 2, "race_id": 1, "race_date": "2024-04-01", "finish_position": 3},
+        )
+        hs = _horse_starts(
+            {"horse_id": 1, "race_date": "2024-01-10", "finish_position": 1},
+            {"horse_id": 1, "race_date": "2024-02-20", "finish_position": 2},
+            {"horse_id": 99, "race_date": "2024-03-01", "finish_position": 1},  # hevonen jota ei runners:issa
+        )
+        result = form_features(runners, horse_starts=hs)
+        # Rivimäärä = runners-rivit, ei enemmän
+        assert len(result) == len(runners)
+
+    def test_days_since_last_uses_horse_starts_dates(self):
+        """form_days_since_last lasketaan horse_starts-historian viimeisestä
+        startista, ei vain runners-datan edellisestä startista."""
+        runners = _runners(
+            {"horse_id": 3, "race_id": 5, "race_date": "2024-04-10",
+             "finish_position": 2, "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+        )
+        # Viimeisin horse_starts-rivi on 30 päivää aiemmin
+        hs = _horse_starts(
+            {"horse_id": 3, "race_date": "2024-03-11", "finish_position": 1,
+             "kilometer_time_seconds": 87.0, "win_odds_final": 3.0},
+        )
+        result_without = form_features(runners)
+        result_with = form_features(runners, horse_starts=hs)
+
+        # Ilman historiaa: ensimmäinen rivi → NaN (ei edellistä starttia)
+        assert pd.isna(result_without.iloc[0]["form_days_since_last"])
+        # Historian kanssa: 2024-04-10 - 2024-03-11 = 30 päivää
+        assert result_with.iloc[0]["form_days_since_last"] == 30
+
+    def test_build_feature_matrix_passes_horse_starts_through(self):
+        """build_feature_matrix() välittää horse_starts-parametrin
+        form_features():lle — integraatiotesti koko pipelinelle."""
+        runners = _runners(
+            {"horse_id": 10, "race_id": 1, "race_date": "2024-05-01",
+             "finish_position": 2, "kilometer_time_seconds": 90.0, "win_odds_final": 4.0,
+             "driver": "Arto", "trainer": "Matti", "start_number": 3, "handicap_meters": 0},
+        )
+        races = _races({"race_id": 1, "track": "Solvalla", "distance": 2140, "start_method": "auto"})
+        hs = _horse_starts(
+            {"horse_id": 10, "race_date": "2024-01-01", "finish_position": 1,
+             "kilometer_time_seconds": 87.0, "win_odds_final": 3.0},
+            {"horse_id": 10, "race_date": "2024-02-15", "finish_position": 3,
+             "kilometer_time_seconds": 92.0, "win_odds_final": 6.0},
+            {"horse_id": 10, "race_date": "2024-03-20", "finish_position": 2,
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+        )
+        result_without = build_feature_matrix(runners, races)
+        result_with = build_feature_matrix(runners, races, horse_starts=hs)
+
+        # Ilman historiaa: NaN (vain 1 runners-rivi, shift(1) → tyhjä)
+        assert pd.isna(result_without.iloc[0]["form_avg_finish_5"])
+        # Historian kanssa: 3 aiempaa starttia → laskettu arvo
+        assert not pd.isna(result_with.iloc[0]["form_avg_finish_5"])
+        # (1+3+2)/3 = 2.0
+        assert result_with.iloc[0]["form_avg_finish_5"] == pytest.approx(2.0)
