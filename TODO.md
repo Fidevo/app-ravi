@@ -9,16 +9,19 @@ mutta jotka pitää muistaa. Järjestys = prioriteetti.
 
 ## Datan suodatus
 
-### 3. Galoppirata vs ravirata -erottelu
-ATG palauttaa SE-radoilla myös galoppia (mm. **Bro Park**, **Jägersro
-Galopp**). Galopissa ei ole `kmTime`-objekteja → kaikki gallop-runnerit
-näyttävät NULL km-ajalla. Tällä hetkellä ne ovat datassa "näennäisinä
-puutteina".
+### ✅ #3. Galoppirata vs ravirata -erottelu — TEHTY (10.5.2026)
+ATG palautti SE-radoilla myös galoppia (Bro Park, Jägersro Galopp).
+Galopin lähdöillä ei ole `kmTime`-objekteja → runnerit olisivat aina
+NULL km-ajalla → `retry_incomplete_results` hakisi niitä turhaan joka
+päivä (~50+ turhaa API-kutsua/vrk).
 
-**Korjaus:** Käytä `track.sport == "trot"` -suodatusta `atg_client.py`:n
-`get_calendar_day(swedish_only=True)` -metodissa, tai erottele
-discipline-kenttä erilliseksi sarakkeeksi `Race`-mallissa jotta
-gallop-rivit voi suodattaa pois ML-treenissä.
+**Toteutus:**
+- `atg_client.py`: `get_calendar_day` suodattaa nyt `sport == "trot"`
+  -ehdolla. Gallop-radat eivät enää päädy DB:hen.
+- `scheduler.py`: `GALLOP_TRACKS` frozenset (`{"Bro Park", "Jägersro
+  Galopp"}`). `retry_incomplete_results`-kysely lisää `NOT IN`
+  -filterin jotta jo olemassa olevia gallop-rivejä ei haeta uudelleen.
+- **2 uutta pytestiä** (48/48 läpi).
 
 ## Schedulerin robusttius
 
