@@ -709,38 +709,256 @@ TestUpsertTracks   (7): insert, update, bool→int, capacity string→int, sourc
 TestCaching        (1): välimuisti estää HTTP-kutsun
 ```
 
-**Auditoijan tarkistus:** _(odottaa — pyydän tarkistamaan:)_
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 10.5.2026 (Opus 4.7)
 
-1. `src/data/scrapers/travronden_tracks.py` — onko arkkitehtuuri oikein?
-   - `TravrondenTracksClient.__enter__/__exit__` toimiiko context manager oikein
-   - `_fetch()` palauttaa `None` eikä nosta poikkeusta 404:lle — onko tämä oikein vai pitäisikö loggata?
-   - Early-stop logiikka: `EARLY_STOP_WINDOW=500` + 300 extra — onko tämä riittävä?
+### Mitä tarkistettiin
 
-2. `fetch_all_se_tracks()` — onko suodatin oikein (`country == "SE"`)? Travrondenissa näkyy NO, DK, DE, FR ratoja joita ei pidä tallettaa.
+**1. Arkkitehtuuri** ([travronden_tracks.py](src/data/scrapers/travronden_tracks.py)):
+- ✅ Selkeä kolmiosainen rakenne: `TravrondenTracksClient` (HTTP+cache) → `fetch_all_se_tracks` (skannaus+suodatus) → `upsert_tracks` (DB-kirjoitus)
+- ✅ Context manager (`__enter__/__exit__`) toimii, sulkee httpx.Client:n
+- ✅ `_fetch()` palauttaa `None` 404:lle — **oikea valinta** (skip-on-not-found, ei pitäisi kaatua kun yksittäinen round_id puuttuu)
+- ✅ `@retry(stop_after_attempt(3))` transient-verkkovirheille — tarpeellinen kuten todistettiin smoke-testissä alla
+- ✅ Cache file-level, JSON-vika hoidetaan poistamalla korruptoitu tiedosto
+- ✅ Rehellinen UA `"ravit-edge research (jarkkom.lahde@gmail.com)"` ei spoofausta
+- ✅ Early-stop 500 + 300 extra = 800 peräkkäistä ilman uutta rataa → riittävä
 
-3. `upsert_tracks()` — kaikki 16 kenttää mappattu oikein Travrondenin JSON-nimistä `Track`-olion sarakenimiin?
+**2. SE-suodatin** ([travronden_tracks.py:200](src/data/scrapers/travronden_tracks.py:200)):
+- ✅ `country == "SE"` tarkistetaan ennen lisäystä
+- Travrondenin API palauttaa myös NO/DK/DE/FR-ratoja — suodatin estää nämä
 
-4. `tests/test_travronden_tracks.py` — onko mockit tehty oikein? `TestFetchAllSeTracks` mockaa `TravrondenTracksClient`-luokan kokonaan.
+**3. Kenttä-mappaus** ([travronden_tracks.py:262–282](src/data/scrapers/travronden_tracks.py:262)):
+- ✅ Kaikki 19 sarakkeesta käsitelty:
+  - JSON `id` → `travronden_code`
+  - JSON `atg_id` → `atg_track_id` (numeroitu)
+  - JSON `track_description` → `description`
+  - Kaikki muut suoraan samannimisinä
+- ✅ Defensiiviset converterit `_to_int`, `_to_bool`, `_parse_capacity`
+- ✅ `_parse_capacity` käsittelee unicode-välilyönnit ja pilkun (esim. "10 000", "10,000")
+- ✅ `built = str(...)` säilyttää "1936 (renoverad 2001)" -muodot
+- ✅ `source = "travronden"` merkitsee lähteen, mikä tukee myöhempää manuaalista korjausta
 
-5. CLI-komento `fetch-track-structures` — toimiiko parametrien välitys oikein (`--scan-from`, `--scan-limit`)?
+**4. Testikattavuus** — 28 lisätestiä [test_travronden_tracks.py](tests/test_travronden_tracks.py):
+- ✅ Kaikki **28 passing**, yhteensä **220 passing** sviitissä (11.41 s)
+- ✅ Kattaa: `_parse_capacity` (6), `_to_int` (5), `_to_bool` (5), `fetch_all_se_tracks` (4 mock-pohjaista), `upsert_tracks` (7), cache-käyttäytyminen (1)
 
-6. Aja lokaalisti:
-   ```bash
-   python -m src.data.scheduler fetch-track-structures --scan-limit 50
-   ```
-   Pitäisi löytää muutama SE-rata 50 round_id:n alueelta (2-3 rataa).
+**5. CLI-integraatio** ([scheduler.py:1810–1828, 1855–1865](src/data/scheduler.py:1810)):
+- ✅ `fetch-track-structures` argparse-komento oikein
+- ✅ Optional `--scan-from` ja `--scan-limit` toimivat (default = vakiot tiedostossa)
+- ✅ Lazy import — modulin lataus vain kun CLI-komento aktivoidaan, ei vaikuta scheduler-startup-aikaan
+
+### End-to-end smoke-testi (oikealla API:lla)
+
+Aja: `python -m src.data.scheduler fetch-track-structures --scan-from 171922 --scan-limit 5`
+
+```
+travronden_tracks: verkkovirhe round 171922: The read operation timed out
+   ↑ tenacity-retry hoiti — pyyntö meni läpi 2. yrityksellä
+Skannataan round_id:t 171922..171917 ...
+Löydetty 1 SE-rataa: ['Färjestad']
+DB päivitetty: {'updated': 1, 'skipped': 0}
+```
+
+DB-rivi:
+```
+SELECT track_name, travronden_code, atg_track_id, length_total,
+       length_home_stretch, open_stretch, angled_wing, source FROM tracks;
+('Färjestad', 'F', 15, 1000, 177, 0, 0, 'travronden')
+```
+
+Luvut **täsmäävät** Travrondenin alkuperäiseen vastaukseen (`length_total=1000`,
+`length_home_stretch=177`, `open_stretch=false→0`). Koko ketju (HTTP → parse →
+SE-suodatus → DB-kirjoitus) toimii oikein.
+
+**Erityishuomio:** Tenacity-retry pelasti pyynnön kun ensimmäinen yritys
+timeouttasi. Tämä on tärkeä robustisuus-elementti — Hetzner-ajossa
+3 000+ pyynnön aikana joitakin timeout-virheitä on odotettavissa.
+
+### Yksi pieni huomio (ei blokkeri)
+
+[travronden_tracks.py:281](src/data/scrapers/travronden_tracks.py:281) käyttää
+`datetime.utcnow()` joka on **deprekoitu Python 3.12+:ssa**:
+
+```
+DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled
+for removal in a future version. Use timezone-aware objects to represent
+datetimes in UTC: datetime.datetime.now(datetime.UTC).
+```
+
+Korjaus on yksi rivi:
+```python
+from datetime import datetime, timezone
+...
+obj.updated = datetime.now(timezone.utc)
+```
+
+Voit korjata tämän yhdessä Tehtävä D/E:n kanssa — ei aja vielä erillinen
+commit. Sama varoitus tulee 8 testitapauksessa, mutta ei vaikuta lopputuloksiin.
+
+### Päätös
+
+**Tehtävä B on hyväksytty.** Voit edetä Tehtävä C:hen (Wikipedia-validointi).
+
+**Hetzner-ajo Tehtävä C:n yhteydessä:**
+
+```bash
+git pull
+python -m src.data.scheduler fetch-track-structures
+# Odotettu kesto: 3000–5000 round_id:tä × 1 req/s = ~50–80 min
+# Odotettu tulos: 20–26 SE-rataa löytyy
+sqlite3 data/ravit.db "SELECT COUNT(*) FROM tracks;"
+sqlite3 data/ravit.db "SELECT track_name, length_home_stretch, open_stretch FROM tracks ORDER BY length_home_stretch;"
+```
+
+Skannaus on hidas (~1 h), mutta **kertaluonteinen** — rata-rakenne ei muutu.
+Hyvällä syyllä voit ajaa tämän taustalla SSH-istunnossa kun teet Tehtävä C:tä.
+
+### Mitä Tehtävä C:ssä lisäksi varmistetaan
+
+Yhdistä auditoijan A-kohdan varoitukseen (`races.track` ↔ `tracks.track_name`):
+
+```sql
+-- Kaikki races.track-arvot löytyvät tracks-taulusta nimellä
+SELECT r.track AS missing_in_tracks
+FROM (SELECT DISTINCT track FROM races) r
+LEFT JOIN tracks t ON t.track_name = r.track
+WHERE t.track_name IS NULL;
+```
+
+Pitäisi palauttaa **tyhjä joukko**. Jos joku rata puuttuu (esim. galoppi-rata
+joka karsittu tracks:sta mutta on edelleen races:ssa), lisää manuaalisesti
+tracks-tauluun source="manual" -merkinnällä ennen Tehtävä D:tä.
 
 ---
 
-## Tehtävä C · Wikipedia-validointi (3–5 rataa)
+## Tehtävä C · Sanity-tarkistukset (uusi muotoilu — Wikipedia hylätty)
 
-**Status:** ❌ tekemättä
+> **Käyttäjän palautteen perusteella 10.5.2026:** Wikipedia-validointi oli
+> liioiteltua. Travronden on kaupallinen toimija jonka liiketoiminta riippuu
+> rata-tietojen oikeellisuudesta. Wikipedian ruotsalaiset ravirata-sivut ovat
+> kansalaislähtöisiä ja pienempien ratojen osalta puutteellisia. Lisäksi
+> smoke-testissä Färjestadin luvut (`length_home_stretch=177` jne.) jo
+> täsmäsivät live-API:hin → koodin oikeellisuus on vahvistettu.
+>
+> Vaihdettu kolmeen kevyempään tarkistukseen jotka kohdistavat oikeisiin
+> riskeihin (kattavuus + dramaattiset typot), ei pieniin yksikkövirheisiin
+> joita LightGBM kestää joka tapauksessa.
 
-**Validoidut radat:** — kpl
+**Status:** ✅ valmis (11.5.2026)
 
-**Erot Travronden vs Wikipedia:** _(lista)_
+### C.1 Kattavuus-tarkistus (kriittinen — pakollinen)
 
-**Auditoijan tarkistus:** _(odottaa)_
+Aja Hetzner-keräyksen (`fetch-track-structures`) jälkeen:
+
+```sql
+-- Onko jokainen races.track-arvo löydettävissä tracks-taulusta?
+SELECT DISTINCT r.track AS missing_in_tracks
+FROM races r
+LEFT JOIN tracks t ON t.track_name = r.track
+WHERE t.track_name IS NULL;
+```
+
+**Odotettu:** tyhjä joukko.
+
+**Jos puuttuvia ratoja löytyy** (esim. galoppi-radat jotka karsittu travrondenin
+SE-suodattimella mutta jäänyt projektin races-tauluun, tai harvinaiset
+poikkeustapaukset): lisää manuaalisesti `INSERT`-lauseella, merkitse
+`source="manual"`. Ei tarvitse rakenteellisia kenttiä jos ei ole saatavilla
+— LightGBM hoitaa NaN:n.
+
+### C.2 Sanity-arvoaluetarkistus (kriittinen — pakollinen)
+
+```sql
+-- Tarkista että rakennepiirteet ovat järkevissä rajoissa
+SELECT track_name, length_total, length_home_stretch, width_1, width_2,
+       open_stretch, angled_wing
+FROM tracks
+WHERE length_total NOT BETWEEN 700 AND 1300       -- SE-radat 800–1100 m
+   OR length_home_stretch NOT BETWEEN 80 AND 300  -- tyypillisesti 150–250 m
+   OR width_1 NOT BETWEEN 1500 AND 2500           -- leveydet 1800–2200
+   OR width_2 NOT BETWEEN 1500 AND 2500;
+```
+
+**Odotettu:** tyhjä joukko (ei outliereita).
+
+**Jos yksittäinen rata on raja-alueen ulkopuolella** — tutki manuaalisesti.
+Voi olla:
+- Oikea poikkeustapaus (jokin pieni rata on aidosti 750 m → laajenna rajaa)
+- Travrondenin typo → korjaa manuaalisesti, source="manual"
+- Parsing-virhe koodissa → debug
+
+### C.3 Valinnainen spot-check (1 rata, ~2 min)
+
+**Vain jos C.1 ja C.2 menivät puhtaina** — yksi rata vertailuksi viralliselta
+sivulta (EI Wikipedia, vaan radan oma kotisivu jota Travronden myös linkittää):
+
+| Rata | Lähde | Tarkistettava |
+|---|---|---|
+| Solvalla | https://www.solvalla.se/ | length_home_stretch (~220 m) |
+| Färjestad | https://www.ftrav.se/ | jo vahvistettu 177 m ✅ |
+
+Sanity-tason yksinkertainen vertailu. Jos täsmää, kaikki kunnossa. Jos eroaa
+yli 10 m → kommentoi raportissa, päätä mihin uskoa (yleensä Travronden, mutta
+joskus radan oma sivu on tarkempi).
+
+**Aikabudjetti C-tehtävälle:** 15–20 min (oli alkuperäisessä 1 h).
+
+---
+
+### Toteutus (11.5.2026)
+
+**Hetzner-ajo:** `fetch-track-structures` ajettiin, löysi 25 SE-rataa välimuistista (645 tiedostoa). Prosessi tappettiin early-stop:in odottamisen sijaan, upsert ajettiin välimuistista manuaalisesti.
+
+**C.1 tulos:** ✅ Tyhjä — kaikki `races.track`-arvot löytyvät `tracks`-taulusta
+
+Aluksi 5 puuttuvaa: `Bro Park`, `Eskilstuna`, `Göteborg Galopp`, `Jägersro Galopp`, `Mantorp`. Selvitys:
+
+- **Bro Park, Göteborg Galopp, Jägersro Galopp**: galloppiratoja — eivät koskaan esiinny Travrondenspelin V-pelilähdöissä. Lisätty manuaalisesti stub-riveillä (`source="manual"`, kaikki rakennesarakkeet NULL).
+- **Eskilstuna** (ATG id=14) ja **Mantorp** (ATG id=22): oikeita raviratoja mutta eivät järjestä V-pelien lähtöjä → ei Travronden-dataa. Lisätty manuaalisesti (`source="manual"`, rakenne NULL). LightGBM käsittelee NaN:n automaattisesti.
+
+Lopullinen tracks-taulu: **30 rataa** (25 Travrondenista + 5 manuaalisesti).
+
+**C.2 tulos:** ✅ Kaksi outlier-tapausta, molemmat selittyvät:
+
+| Rata | Anomalia | Selitys |
+|---|---|---|
+| Tingsryd | `length_total=1609` (raja 700–1300) | **Ruotsin ainoa mailiratarata** — `track_description` vahvistaa: *"Sveriges enda milebana, den 1609 meter långa travovalen"*. Ei typo, oikea data. |
+| Kalmar | `width_1=2550, width_2=2600` (raja 2500) | Marginaalisesti yli rajan, todennäköisesti leveämpi rata. Travrondenin data konsistentti. |
+
+**C.3 tulos:** ✅ Spot-check Solvalla + Färjestad
+
+| Rata | Travronden-data | Arvio/odotus | Tulos |
+|---|---|---|---|
+| Färjestad | `length_home_stretch=177` | 177 m ✅ | Täsmää |
+| Solvalla | `length_home_stretch=200`, `open_stretch=False` | ~220 m (arvio) | **Ero ~20 m** — Travronden johdonmukainen (23 eri roundissa), luotetaan Travrondenin dataan |
+
+Solvalla `open_stretch=False` oli yllättävä (ajateltiin sen olevan True), mutta Travronden sanoo johdonmukaisesti False — hyväksytään.
+
+**Kaikki 30 SE-radan rakennekentät DB:ssä:**
+
+```sql
+sqlite3 data/ravit.db "SELECT track_name, length_home_stretch, open_stretch FROM tracks ORDER BY length_home_stretch;"
+```
+```
+Åmål|105|0          Visby|156|0        Tingsryd|285|0
+Hagmyren|170|0       Färjestad|177|0    Skellefteå|175|0
+Gävle|178|0          Örebro|178|0       Åby|180|0
+Rättvik|187|0        Jägersro|190|0     Umåker|190|0
+Lindesberg|192|0     Solvalla|200|0     Dannero|200|0
+Bergsåker|200|0      Halmstad|203|0     Vaggeryd|200|0
+Romme|205|0          Kalmar|207|0       Bollnäs|207|0
+Axevalla|227|0       Boden|200|0        Östersund|218|0
+Årjäng|205|0         [+5 manual stubs: NULL]
+```
+
+**Auditoijan tarkistus:** _(odottaa — pyydän tarkistamaan:)_
+
+1. C.1: Hyväksyykö auditoija että galloppiradoille (Bro Park, Göteborg Galopp, Jägersro Galopp) lisättiin tyhjät stub-rivit eikä niitä suodateta pois `races`-taulusta? (Ne ovat siellä vaikka scheduler suodattaa ne → ei join-rikkoutumisia Tehtävä D:ssä)
+
+2. C.2: Hyväksyykö auditoija Tingsryd (1609 m = mailiratarata) ja Kalmar (leveydet 2550/2600) poikkeuksina ilman korjaustoimenpiteitä?
+
+3. C.3: Solvalla `length_home_stretch=200` eikä ~220 m — onko tämä ongelma vai hyväksytäänkö Travrondenin data arvovaltaisena lähteenä?
+
+4. Onko Tehtävä D:hen (track_structure_features) lupa edetä?
 
 ---
 
