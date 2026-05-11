@@ -1807,6 +1807,26 @@ def _main() -> None:
              "Ajo kerran riittää (idempotentti). Ei API-kutsuja.",
     )
 
+    p_tracks = sub.add_parser(
+        "fetch-track-structures",
+        help="Hae SE-ratojen rakennetiedot Travrondenspel.se:n API:sta "
+             "ja tallenna tracks-tauluun. Ajetaan kerran tai harvoin — "
+             "rata-rakenne ei muutu. Idempotentti. "
+             "Skannaa round_id:t taaksepäin kunnes kaikki tunnetut radat löydetty.",
+    )
+    p_tracks.add_argument(
+        "--scan-from",
+        type=int,
+        default=None,
+        help="Aloita skannaus tästä round_id:stä (oletus: SCAN_FROM-vakio tiedostossa).",
+    )
+    p_tracks.add_argument(
+        "--scan-limit",
+        type=int,
+        default=None,
+        help="Kuinka monta round_id:tä yritetään enintään (oletus: SCAN_LIMIT-vakio).",
+    )
+
     args = parser.parse_args()
     migrate(DB_PATH)  # varmista että uudet sarakkeet ovat olemassa
 
@@ -1832,6 +1852,17 @@ def _main() -> None:
         print(backfill_dam_sire())
     elif args.cmd == "backfill-atg-aggregates":
         print(backfill_correct_atg_aggregates())
+    elif args.cmd == "fetch-track-structures":
+        from src.data.scrapers.travronden_tracks import (
+            SCAN_FROM, SCAN_LIMIT, fetch_all_se_tracks, upsert_tracks,
+        )
+        scan_from = args.scan_from if args.scan_from is not None else SCAN_FROM
+        scan_limit = args.scan_limit if args.scan_limit is not None else SCAN_LIMIT
+        print(f"Skannataan round_id:t {scan_from}..{scan_from - scan_limit} ...")
+        tracks_data = fetch_all_se_tracks(scan_from=scan_from, scan_limit=scan_limit)
+        print(f"Löydetty {len(tracks_data)} SE-rataa: {sorted(tracks_data.keys())}")
+        result = upsert_tracks(DB_PATH, tracks_data)
+        print(f"DB päivitetty: {result}")
 
 
 if __name__ == "__main__":
