@@ -547,10 +547,14 @@ def track_structure_features(
         .rename(columns={"track_name": "track", **available})
     )
 
+    # Defensiivinen duplikaattisuojaus: track_name on PK (schema suojaa), mutta
+    # jos ladatussa DataFramessa jostain syystä duplikaattirivejä, merge räjäyttäisi
+    # runners-rivimäärän. Halvempi tarkistaa kuin selvitellä jälkeenpäin.
+    t = t.drop_duplicates(subset=["track"], keep="last")
+
     # Boolean-sarakkeet → int (0/1) jotta NaN:it myöhemmin selkeitä
     for bool_col in ("track_open_stretch", "track_angled_wing"):
         if bool_col in t.columns:
-            t = t.copy()
             t[bool_col] = t[bool_col].astype("Int64")  # nullable int → NaN säilyy
 
     return runners.merge(t, on="track", how="left")
