@@ -63,7 +63,9 @@ lähtö. Tällöin todennäköisyydet summautuvat 1.0:aan per lähtö.
 | Lähtöasetelma | `inside_post`, `back_row`, `distance_category` | Lähtökortti |
 | Lähdön luokka | `race_min_earnings`, `race_max_earnings`, `race_age_group` | ATG terms-parsinta |
 | Varusteet | `shoes_changed_front`, `sulky_changed`, `sulky_type` | ATG per startti |
+| Sukutaulu | `sire`, `dam_sire` | ATG pedigree (88 % notna) |
 | Johdetut | `barfota_law_active`, `horse_age` | Laskettu |
+| Ratarakenne *(tulossa)* | `track_length_home_stretch`, `track_open_stretch`, `track_dosage` | Travronden-scraper |
 
 **Tärkeä yksityiskohta — treeniesimerkit:**
 ATG raportoi viralliset sijoitukset vain top 6–8 hevoselle per lähtö.
@@ -78,9 +80,10 @@ ATG raportoi viralliset sijoitukset vain top 6–8 hevoselle per lähtö.
 |---|---|---|
 | `races` | 356 | Lähtöjen perustiedot, luokka, ratakunto |
 | `runners` | 3 757 | Starttaavat hevoset, kertoimet, tulokset, kengät |
-| `horses` | ~3 500 | Hevosen perustiedot, syntymävuosi |
+| `horses` | ~3 500 | Hevosen perustiedot, syntymävuosi, isä, emänisä |
 | `horse_starts` | 103 747 | Hevosen koko ura Travsportista (2014→) |
 | `odds_snapshots` | 14 758 | Pre-race kertoimet (4 snapshotia/lähtö) |
+| `tracks` | *(täytetään)* | Ratarakenne: pituudet, avosuora, kulmasiiveke, dosage |
 
 Runners-taulu sisältää ATG:n valmiit aggregaatit (`atg_*`-sarakkeet) jotka
 kattavat koko kuluvan vuoden — paljon kattavammat kuin meidän 14 päivän
@@ -126,13 +129,19 @@ ravit-edge/
 │   └── betting/
 │       ├── bankroll.py             Kelly-panostus + stop-loss
 │       └── clv_tracker.py         CLV + devig-laskuri
-├── tests/                          104 pytest-testiä
+├── tests/                          192 pytest-testiä
 ├── data/                           ⚠ .gitignore — luodaan paikallisesti
 │   ├── ravit.db                    SQLite-tietokanta (Hetznerillä ~19 MB)
 │   ├── raw/travsport/              Travsport-cache (7 vrk TTL)
 │   └── logs/scheduler.log          Pyörivä loki
 ├── ROADMAP.md                      Vaiheistus ja aikataulu
 ├── KNOWN_ISSUES.md                 Avoimet bugit ja tunnetut rajoitukset
+├── TASK_PROGRESS.md                Koodari ↔ auditoija -seurantadokumentti
+├── docs/
+│   ├── TASK_PLAN_FIXES.md          Korjaustehtävät (B1–B3)
+│   ├── TASK_TRACK_FEATURES.md      Ratarakenne-piirteet (Vaihe 2.5)
+│   ├── TASK_TRAVRONDEN_INVESTIGATION.md  Travronden-scraper-tutkimus
+│   └── archive/                    Valmiit/vanhentuneet suunnitelmat
 └── requirements.txt
 ```
 
@@ -179,7 +188,8 @@ python -m src.data.scheduler fetch-results --race-id 2026-04-28_8_5
 python -m src.data.scheduler capture-snapshot --race-id 2026-04-28_8_5 --label T-15min
 
 # Datan backfill (kertaluontoinen täydennys)
-python -m src.data.scheduler backfill-race-class   # Täyttää race_terms → race_min/max_earnings, race_age_group
+python -m src.data.scheduler backfill-race-class    # Täyttää race_terms → race_min/max_earnings, race_age_group
+python -m src.data.scheduler backfill-dam-sire      # Täyttää horses.dam_sire ATG pedigree-kutsusta (grandfather)
 ```
 
 **Schedulerin aikataulu (Stockholm-aika):**
@@ -221,7 +231,7 @@ koko uran ajalta — muotopiirteiden NaN-% putoaa 95 %:sta 11 %:iin.
 ## Testien ajaminen
 
 ```bash
-# Kaikki testit (104 kpl)
+# Kaikki testit (192 kpl)
 PYTHONPATH=. python -m pytest
 
 # Tiivis output

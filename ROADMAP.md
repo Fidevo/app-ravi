@@ -1,6 +1,6 @@
 # Ravit Edge — Roadmap
 
-## Nykytila (10.5.2026 — Vaihe 2 valmis, Vaihe 3 voidaan aloittaa)
+## Nykytila (11.5.2026 — Vaihe 2 valmis + korjaukset, Vaihe 2.5 käynnissä)
 
 Datankeräys on pyörinyt tuotannossa 4.5.2026 alkaen. Feature engineering
 -pipeline on valmis ja validoitu oikealla datalla. Mallin treenaukselle ei
@@ -16,7 +16,7 @@ ole teknisiä esteitä.
 | Koulutuskelpoiset rivit | **3 685** (fill_finish_positions jälkeen) |
 | Hevoshistoriastartteja | **103 747** (Travsport, 2014→) |
 | Odds-snapshotteja | **14 758** (T-15/10/5/2min + tulos) |
-| Testejä | **104** (kaikki vihreällä) |
+| Testejä | **192** (kaikki vihreällä) |
 | Keräysvauhti | ~23 trot-lähtöä/vrk (lauantait ~35+) |
 
 **Piirteiden laatu (validoitu 10.5.2026):**
@@ -66,6 +66,36 @@ Kaikki tehtiin ennen Vaihetta 3, testit jokaiselle muutokselle:
 | `form_features()` käyttää horse_starts (103k) | `build_features.py` | NaN 95 % → 11 % |
 | `fill_finish_positions()` — treeniesimerkit | `build_features.py` | 2 332 → 3 685 koulutuskelp. riviä |
 | Bugit #1, #5, #6, #8 korjattu | scheduler + build_features | Ks. KNOWN_ISSUES.md |
+
+---
+
+## Vaihe 2B: Korjaukset (11.5.2026) ✅ VALMIS
+
+Ennen Vaihetta 3 korjattu auditoijan löytämät ongelmat:
+
+| Korjaus | Tiedosto | Tulos |
+|---|---|---|
+| B1: Isotoninen regressio kalibroinnissa | `ranker.py` | Kalibrointi nyt monotoninen |
+| B2: `pedigree.grandfather` → `horses.dam_sire` | `scheduler.py` | 88 % notna (oli 0 %) |
+| B2: `backfill_dam_sire()` — ryhmästrategia | `scheduler.py` | 3 477 hevosta, 356 race-kutsua |
+
+Ks. tarkemmin: `docs/TASK_PLAN_FIXES.md` ja `TASK_PROGRESS.md`.
+
+---
+
+## Vaihe 2.5: Ratarakenne-piirteet 🟡 KÄYNNISSÄ
+
+Track-piirteet antavat mallin oppia ratafysiikan vaikutukset automaattisesti.
+
+| Tehtävä | Status | Kuvaus |
+|---|---|---|
+| A: `Track`-luokka schemaan | ✅ VALMIS | 19 saraketta, `tracks`-taulu |
+| B: Travronden-scraper | ⬜ | `src/data/scrapers/travronden_tracks.py` |
+| C: Validointi (Wikipedia) | ⬜ | 3–5 rataa vertaillaan |
+| D: `track_structure_features()` | ⬜ | Lisätään `build_features.py` + `FEATURE_COLS` |
+| E: Smoke test | ⬜ | `track_length_total notna% >= 95` |
+
+Ks. tarkemmin: `docs/TASK_TRACK_FEATURES.md` ja `TASK_PROGRESS.md` (VAIHE 2.5).
 
 ---
 
@@ -166,4 +196,4 @@ positiivisella lopputuloksella — rehellinen näkymä, ei pessimismiä.
 - **Sää-integraatio:** Open-Meteo — rata × sade × hevosen rata-kokemus
 - **Conditional logit / Plackett-Luce** trifecta-todennäköisyyksille
 - **Postgres** jos DB kasvaa yli 500 MB
-- **Sukutaulupiirteet** (isä/emänisä-tilastot Travsportista)
+- **Sukutaulupiirteet** (isä/emänisä kerätty — `horses.sire` + `horses.dam_sire` 88 % notna; tilastoanalyysi tulevaisuudessa)

@@ -579,7 +579,7 @@ Hyvää työtä koodarille. Vaihe A:n ja B:n korjaukset ovat huomattava parannus
 
 # VAIHE 2.5 — Rata-piirteet (tehdään ennen Vaihetta 3)
 
-> Lähde: TASK_TRACK_FEATURES.md — auditoijan prioriteettimuutos 10.5.2026.
+> Lähde: docs/TASK_TRACK_FEATURES.md — auditoijan prioriteettimuutos 10.5.2026.
 > Rata-rakennepiirteet (loppusuoran pituus, open stretch jne.) lisätään
 > ennen Vaiheen 3 treenausta — ilman niitä malli oppii vain rata × outcome
 > -korrelaatioita eikä ymmärrä raviradan fysiikkaa.
@@ -629,10 +629,42 @@ migrate() → kaikki 6 taulua luodaan oikein (races, runners, horses, horse_star
 
 **Auki olevat kysymykset:** ei mitään — `Base.metadata.create_all` hoitaa uuden taulun automaattisesti.
 
-**Auditoijan tarkistus:** _(odottaa — pyydän tarkistamaan:)_
-1. `src/data/schema.py` — onko `Track`-luokka oikein (`__tablename__ = "tracks"`, 19 saraketta)?
-2. Onko `from datetime import datetime` lisätty importteihin?
-3. Aja lokaalisti: `python -m src.data.schema` tai `python -c "from src.data.schema import migrate; print(migrate(':memory:'))"` — syntyykö tracks-taulu?
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 10.5.2026 (Opus 4.7)
+
+Tarkistus tehty empiirisesti:
+
+1. ✅ **`Track`-luokka oikein** ([schema.py:210–253](src/data/schema.py:210)):
+   - `__tablename__ = "tracks"`
+   - 19 saraketta tarkistettu, kaikki tyypit oikein
+   - `track_name` PK vastaa suoraan `races.track`-arvoja → **ei tarvita erillistä mappausta** (toisin kuin trackCode→nimi B1:ssä)
+   - `built = Column(String)` — hyvä valinta, koska "1936 (renoverad 2001)" -tyyliset arvot toimivat
+   - `source`-kenttä erottaa "travronden" / "wikipedia" / "manual"
+   - `updated = Column(DateTime, default=datetime.utcnow)` — automaattinen aikaleima
+
+2. ✅ **`from datetime import datetime`** lisätty ([schema.py:19](src/data/schema.py:19))
+
+3. ✅ **Migraatio luo taulun puhtaaseen DB:hen automaattisesti**:
+   ```
+   Tables: ['horse_starts', 'horses', 'odds_snapshots', 'races', 'runners', 'tracks']
+   tracks cols (19): ['track_name', 'travronden_code', 'atg_track_id', 'slug', 'country',
+     'length_total', 'length_home_stretch', 'width_1', 'width_2', 'dosage',
+     'open_stretch', 'angled_wing', 'description', 'track_analysis',
+     'built', 'capacity', 'homepage', 'source', 'updated']
+   ```
+   Verifioitu väliaikaisella tiedostokannalla — `migrate(tmp_path)` → 6 taulua, joista tracks uusin. **Ei muutoksia `_COLUMN_MIGRATIONS`-dictiin tarvittu** kuten koodari oikein teki — `Base.metadata.create_all` hoitaa kokonaan uudet taulut.
+
+4. ✅ **Ei regressiota**: koko `pytest` sviitti 192 testiä passing 18.78 s.
+
+**Pieni huomio jatkoa varten** (ei blokkeri):
+
+- `track_name` on String PK — case-sensitive ja ääkköset huomioiden. Varmista että Travrondenin antama nimi (`name` = "Färjestad") **vastaa täsmälleen** `races.track`-arvoa (myös ATG:sta tulee "Färjestad"). Jos joku radan nimi tulee eri muodossa (esim. "Aby" vs "Åby", "Goteborg" vs "Göteborg"), join hajoaa hiljaisesti. Tarkista Tehtävä B:ssä että kerätyt rata-nimet matchaavat 1:1 `SELECT DISTINCT track FROM races`-listaan ennen kuin merkkaat valmiiksi. Lisää testi:
+  ```python
+  def test_all_races_tracks_have_track_row(tmp_path):
+      # Varmistaa että jokainen races.track löytyy tracks-taulusta nimellä
+      ...
+  ```
+
+Hyvää työtä — yksinkertainen tehtävä mutta toteutettu puhtaasti. Voit edetä Tehtävä B:hen.
 
 ---
 
