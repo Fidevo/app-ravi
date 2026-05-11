@@ -10,11 +10,13 @@ Päätaulut:
   - horses         : hevosen perustiedot (sukupuoli, syntymävuosi, sukutaulu)
   - results        : ajetut lähdöt + voittokerroin
   - odds_snapshots : kerroinhistoria (markkinaliikkeet)
+  - tracks         : ratojen staattiset rakennepiirteet (loppusuoran pituus, jne.)
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
@@ -203,6 +205,52 @@ class OddsSnapshot(Base):
     vig_pct = Column(Float)
     snapshot_label = Column(String, index=True)
     source = Column(String, index=True)
+
+
+class Track(Base):
+    """Raviradan staattiset rakennepiirteet.
+
+    Yksi rivi per uniikki rata. Rakenne ei muutu — tämä täytetään kerran
+    Travrondenspel:n /api/v1/public/round/{id}/statistics/ -vastauksesta
+    (round.tracks[i]-objekti). Vaihtoehtoinen lähde: Wikipedia, manuaalinen
+    koonti (merkitse source="manual" jos korjattu käsin).
+
+    track_name on pääavain ja vastaa races.track-sarakkeen arvoja ("Färjestad").
+
+    Numeerisia piirteitä (length_home_stretch, length_total, jne.) käytetään
+    suoraan FEATURE_COLS:issa — LightGBM oppii interaktiot automaattisesti
+    puurakenteiden kautta.
+    """
+
+    __tablename__ = "tracks"
+
+    track_name = Column(String, primary_key=True)     # "Färjestad" — vastaa races.track:n arvoa
+    travronden_code = Column(String, index=True)      # "F" (yhdistää horse_starts.track track_codes-mapin kautta)
+    atg_track_id = Column(Integer, index=True)        # 15
+    slug = Column(String)                             # "farjestad"
+    country = Column(String, default="SE")
+
+    # --- Rakennepiirteet (numeerinen — käytetään FEATURE_COLS:issa) ---
+    length_total = Column(Integer)                    # radan kokonaispituus metreinä
+    length_home_stretch = Column(Integer)             # loppusuoran pituus metreinä — kriittisin piirre
+    width_1 = Column(Integer)                         # sisempi leveys (autostart-mittaus)
+    width_2 = Column(Integer)                         # ulompi leveys
+    dosage = Column(Integer)                          # kaarteen kallistus (yksikkö epäselvä, säilytä raakana)
+
+    # --- Rakennepiirteet (boolean → tallennetaan int 0/1 SQLite:ssä) ---
+    open_stretch = Column(Boolean)                    # onko toinen passing-linja loppusuoralla
+    angled_wing = Column(Boolean)                     # kaltevat keulakaaret autostartille
+
+    # --- Tekstidata (ihmistarkastus + myöhempi NLP, ei FEATURE_COLS:iin) ---
+    description = Column(String)                      # yleinen kuvaus
+    track_analysis = Column(String)                   # ravialan asiantuntija-arvio radasta
+
+    # --- Meta ---
+    built = Column(String)                            # rakennusvuosi (String, koska "1936 (renoverad 2001)")
+    capacity = Column(Integer)                        # yleisömäärä
+    homepage = Column(String)
+    source = Column(String)                           # "travronden" | "wikipedia" | "manual"
+    updated = Column(DateTime, default=datetime.utcnow)
 
 
 # Sarakkeet jotka pitää lisätä olemassa oleviin tauluihin (puuttuvina).
