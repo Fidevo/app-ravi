@@ -513,6 +513,28 @@ ja täydennä alla oleva luku:
 
   `grandfather`-avain on vahvistettu oikeaksi — 88 % notna todistaa sen toimivan tuotantodatalla.
 
+**Auditoijan lopullinen vahvistus B2-jälkityölle:** ✅ **TÄYSIN HYVÄKSYTTY** 10.5.2026 (Opus 4.7)
+
+Hetzner-tulokset ovat erinomaisia, jokaisella mittarilla yli tavoitteen:
+
+| Mittari | Tavoite | Tulos | Tila |
+|---|---|---|---|
+| dam_sire-täytön kattavuus | > 2 000 | **3 477 / 3 477** | ✅ 100 % |
+| Backfillin virheet | 0 | **0** | ✅ |
+| dam_sire_lifetime_win_rate notna% | > 50 % | **88.00 %** | ✅ +38 pp |
+| sire_lifetime_win_rate notna% | > 50 % | **89.62 %** | ✅ +39 pp |
+| dam_sire mediaani-otoskoko | > 30 | **532** | ✅ 17× |
+
+**Mitä tämä todistaa:**
+
+1. **`grandfather`-avain on oikea.** 88 % onnistunut mappaus ei ole sattumaa — se vahvistaa että live-API käyttää tätä avainta. Edellinen `mothersFather` oli 0 % → silkka spekulointi koodin alkuperäisellä kirjoittajalla.
+
+2. **Backfill-optimointi toimi.** 3 477 hevosta × 1 req/s = 58 min naiivisti. Race_id-grouping vei 356 kutsuun = ~6 min. **10× nopeutus** kuten ennakkolaskelma lupasi.
+
+3. **Otoskoot vahvoja sekä sirelle että dam_sirelle.** Mediaani 532–554 starttia per oriin → estimaatit ovat tilastollisesti merkityksellisiä. Pieni-otoksen suodatin `_SIRE_MIN_STARTS = 30` osoittautuu reilusti alimitoitetuksi todelliseen jakaumaan — voidaan harkita nostoa myöhemmin (esim. 100), mutta ei pakollinen muutos.
+
+**Ei jäljelle jääviä blokkereita Vaiheelle 3.** Mallin treenaus voi alkaa milloin tahansa B1 (isotonic) + B2 (sire+dam_sire) -piirteiden kanssa.
+
 ---
 
 ## B3 · Devigged closing odds piirteenä
@@ -525,20 +547,148 @@ ja täydennä alla oleva luku:
 
 ---
 
-### 🛑 PYSÄYTYS — Vaihe B: jälkityö tehty, odottaa auditoijan lopullista vahvistusta
+### ✅ Vaihe B valmis (lukuun ottamatta odotuksessa olevaa B3:a)
 
 - [x] B1 ✅ (isotonic regression hyväksytty 10.5.2026)
-- [x] B2 jälkityö tehty ✅ (commit 1d36448) — `grandfather`-avainkorjaus + `backfill_dam_sire()` + 2 uutta testiä. Hetzner-backfill + empiirinen verifiointi odottaa auditoijan tarkistusta.
+- [x] B2 ✅ TÄYSIN VALMIS (commit 1d36448 + Hetzner-backfill) — sire 89.62 % notna, dam_sire 88.00 % notna, kaikki tavoitteet ylitetty
 - [⏸] B3 odotuksessa kunnes T-2min-dataa kertynyt (~24.5.2026)
-- [ ] Mallin ensimmäinen treenausajo tehty B1:n vertailussa (Vaihe 3)
+- [ ] Mallin ensimmäinen treenausajo tehty B1:n vertailussa (Vaihe 3 voi alkaa)
 
-### Auditoijan vahvistus Vaihe B:lle: 🟡 OSITTAINEN HYVÄKSYNTÄ 10.5.2026
+### Auditoijan vahvistus Vaihe B:lle: ✅ **HYVÄKSYTTY 10.5.2026 — Vaihe 3 voidaan aloittaa**
 
-**Voi siirtyä Vaiheeseen C** mutta:
-- **Ennen Vaihetta 3 (mallin treenaus)**: korjaa B2:n dam_sire-puoli (vaihtoehto A tai B yllä). Tämä on **blokkeri Vaiheelle 3**, ei pelkkä kosmeettinen.
-- B3 jatketaan ~24.5.2026 kun T-2min-puhdasta dataa on kertynyt 2 viikkoa.
+Vaihe B:n päivitetty tila:
+- B1 ja B2 ovat tuotantokelpoisia → Vaihe 3 (mallin treenaus) voi alkaa milloin tahansa.
+- B3 (devigged odds) ei ole Vaihe 3:n blokkeri — se on incremental feature joka lisätään myöhemmin parantamaan tuotannossa olevaa mallia.
+- Vaihe C voidaan tehdä rinnakkain Vaihe 3:n kanssa.
 
-**B1 isotonic on käyttövalmis** ensimmäiseen Vaiheen 3 treenausvertailuun.
+**Suositeltu työnkulku tästä eteenpäin:**
+
+1. **Aloita Vaihe 3 (mallin treenaus) heti** — alkuperäinen baseline ilman B3-piirrettä on hyvä lähtökohta. Käytä:
+   - Sekä `calibrate_temperature` että `calibrate_isotonic` rinnakkain validointijoukolla
+   - Sire + dam_sire-piirteet mukana (FEATURE_COLS:issa)
+   - K1-pollutoidut kentät pois (ne palautetaan 2026-09)
+2. **Vaihe C voi alkaa rinnakkain**:
+   - C1 (drift-monitorointi) on tärkein — rakenna ennen kuin malli pelaa rahaa
+   - C2 (walk-forward dokumentaatio) on pieni dokumentaatiomuutos
+   - C3 (pace-pilotti) voi odottaa Vaiheen 3 ensimmäisten tulosten jälkeen
+3. **B3 (devigged odds)** lisätään takaisin ~24.5.2026 ja malli treenataan uudelleen
+
+Hyvää työtä koodarille. Vaihe A:n ja B:n korjaukset ovat huomattava parannus alkuperäiseen toteutukseen verrattuna — kaksi vakavaa bugia (K1 + B1/B2-implementaatiovirheet) on korjattu, kaksi piilevää (dam_sire-avainvirhe + K1-aggregaatti-pollutio) löydetty ja korjattu.
+
+---
+
+# VAIHE 2.5 — Rata-piirteet (tehdään ennen Vaihetta 3)
+
+> Lähde: TASK_TRACK_FEATURES.md — auditoijan prioriteettimuutos 10.5.2026.
+> Rata-rakennepiirteet (loppusuoran pituus, open stretch jne.) lisätään
+> ennen Vaiheen 3 treenausta — ilman niitä malli oppii vain rata × outcome
+> -korrelaatioita eikä ymmärrä raviradan fysiikkaa.
+
+## Tehtävä A · Track-luokka schemaan
+
+**Status:** ✅ valmis (commit 95f71d1, 10.5.2026)
+
+**Mitä muutettiin:**
+- `src/data/schema.py`: lisätty `Track`-luokka (`__tablename__ = "tracks"`) — 19 saraketta (commit 95f71d1)
+  - `from datetime import datetime` lisätty importteihin
+  - Docstringin taulut-lista päivitetty sisältämään `tracks`
+- Uusi taulu syntyy automaattisesti `Base.metadata.create_all`:lla — **ei muutoksia `_COLUMN_MIGRATIONS`-dictiin**
+
+**Sarakkeet:**
+
+| Sarake | Tyyppi | Käyttö |
+|---|---|---|
+| `track_name` | String PK | "Färjestad" — vastaa `races.track`:n arvoa |
+| `travronden_code` | String | "F" — yhdistää `horse_starts.track`-koodeihin |
+| `atg_track_id` | Integer | ATG:n sisäinen rata-id |
+| `slug` | String | "farjestad" |
+| `country` | String | "SE" (default) |
+| `length_total` | Integer | Radan kokonaispituus metreinä → FEATURE_COLS |
+| `length_home_stretch` | Integer | Loppusuoran pituus metreinä → **kriittisin piirre** |
+| `width_1`, `width_2` | Integer | Leveydet → FEATURE_COLS |
+| `dosage` | Integer | Kaarteen kallistus → FEATURE_COLS |
+| `open_stretch` | Boolean | Toinen passing-linja → FEATURE_COLS |
+| `angled_wing` | Boolean | Kaltevat keulakaaret autostartille → FEATURE_COLS |
+| `description` | String | Tekstikuvaus (ei FEATURE_COLS) |
+| `track_analysis` | String | Travronden asiantuntija-arvio (ei FEATURE_COLS) |
+| `built` | String | Rakennusvuosi (String, koska "1936 (renoverad 2001)") |
+| `capacity` | Integer | Yleisömäärä |
+| `homepage` | String | |
+| `source` | String | "travronden" / "wikipedia" / "manual" |
+| `updated` | DateTime | Viimeisin päivitysaika |
+
+**Verifiointi lokaalisti:**
+```
+tracks-sarakkeet: ['track_name', 'travronden_code', 'atg_track_id', 'slug', 'country',
+  'length_total', 'length_home_stretch', 'width_1', 'width_2', 'dosage',
+  'open_stretch', 'angled_wing', 'description', 'track_analysis',
+  'built', 'capacity', 'homepage', 'source', 'updated']
+migrate() → kaikki 6 taulua luodaan oikein (races, runners, horses, horse_starts, odds_snapshots, tracks)
+192 testiä passing
+```
+
+**Auki olevat kysymykset:** ei mitään — `Base.metadata.create_all` hoitaa uuden taulun automaattisesti.
+
+**Auditoijan tarkistus:** _(odottaa — pyydän tarkistamaan:)_
+1. `src/data/schema.py` — onko `Track`-luokka oikein (`__tablename__ = "tracks"`, 19 saraketta)?
+2. Onko `from datetime import datetime` lisätty importteihin?
+3. Aja lokaalisti: `python -m src.data.schema` tai `python -c "from src.data.schema import migrate; print(migrate(':memory:'))"` — syntyykö tracks-taulu?
+
+---
+
+## Tehtävä B · Travronden track-fetcher + CLI
+
+**Status:** ❌ tekemättä
+
+**Kerätyt radat:** — kpl
+
+**Esimerkki tulos:** _(yksi rivi DB:stä)_
+
+**Auditoijan tarkistus:** _(odottaa)_
+
+---
+
+## Tehtävä C · Wikipedia-validointi (3–5 rataa)
+
+**Status:** ❌ tekemättä
+
+**Validoidut radat:** — kpl
+
+**Erot Travronden vs Wikipedia:** _(lista)_
+
+**Auditoijan tarkistus:** _(odottaa)_
+
+---
+
+## Tehtävä D · track_structure_features() + FEATURE_COLS
+
+**Status:** ❌ tekemättä
+
+**Auditoijan tarkistus:** _(odottaa)_
+
+---
+
+## Tehtävä E · Smoke-testi
+
+**Status:** ❌ tekemättä
+
+**track_length_total notna%:** — %
+
+**track_home_stretch_m notna%:** — %
+
+**Auditoijan tarkistus:** _(odottaa)_
+
+---
+
+### 🛑 PYSÄYTYS — Vaihe 2.5
+
+- [x] Tehtävä A ✅ Track-luokka schemaan (commit 95f71d1)
+- [ ] Tehtävä B — scraper + CLI
+- [ ] Tehtävä C — Wikipedia-validointi
+- [ ] Tehtävä D — track_structure_features + FEATURE_COLS
+- [ ] Tehtävä E — smoke-testi (track_length_total notna% ≥ 95)
+
+Auditoijan vahvistus Vaihe 2.5:lle: _(odottaa)_
 
 ---
 
