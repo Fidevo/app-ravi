@@ -48,7 +48,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -278,7 +278,7 @@ def upsert_tracks(db_path: str, tracks_data: dict[str, dict]) -> dict:
             obj.capacity = _parse_capacity(t.get("capacity"))
             obj.homepage = t.get("homepage")
             obj.source = "travronden"
-            obj.updated = datetime.utcnow()
+            obj.updated = datetime.now(timezone.utc)
 
             session.add(obj)
             updated += 1
