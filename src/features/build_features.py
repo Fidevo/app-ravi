@@ -488,7 +488,76 @@ def sire_features(
 
 
 # ----------------------------------------------------------------------
-# 6. Treeniesiesimerkkien esikäsittely — puuttuvien sijoitusten täyttö
+# 6. Ratarakenne (track_structure_features)
+# ----------------------------------------------------------------------
+
+def track_structure_features(
+    runners: pd.DataFrame,
+    tracks: pd.DataFrame,
+) -> pd.DataFrame:
+    """Liitä rata-rakennepiirteet runners-DataFrameen.
+
+    Avain: runners.track (saatavilla race_setup_features():n jälkeen —
+    race_setup_features() mergaa track:n races-taulusta runners:iin).
+
+    LEFT JOIN tracks-tauluun: jos rata puuttuu (esim. gallop-rata tai
+    manuaalinen stub ilman rakennetietoja), kaikki tr_*-sarakkeet ovat NaN.
+    LightGBM käsittelee NaN:t automaattisesti.
+
+    Sarakkeet jotka lisätään:
+      track_length_total      radan kokonaispituus (m)
+      track_home_stretch_m    loppusuoran pituus (m) — kriittisin piirre
+      track_open_stretch      onko toinen passing-linja (int 0/1)
+      track_angled_wing       kaltevat keulakaaret autostartille (int 0/1)
+      track_width_1           sisempi leveys (autostart-mittaus)
+      track_width_2           ulompi leveys
+      track_dosage            kaarteen kallistus (raaka luku)
+
+    Toleroi puuttuvia sarakkeita: jos tracks-DataFramessa ei ole jotain
+    saraketta (esim. vanha tietokanta ilman dosage-kenttää), se sivuutetaan
+    ja vastaava piirresarake jätetään pois. Näin backward-yhteensopivuus
+    säilyy.
+
+    Args:
+        runners: DataFrame jossa on sarake 'track' (saatu race_setup_features():lta).
+        tracks:  DataFrame joka vastaa tracks-taulua (sqlalchemy Track-mallin kenttänimet).
+
+    Returns:
+        runners-DataFrame lisättyjen piirresarakkeiden kanssa (rivimäärä ei muutu).
+    """
+    # Sarakkeet tracks-taulussa → piirrenimi runners-DataFramessa
+    COL_MAP = {
+        "length_total": "track_length_total",
+        "length_home_stretch": "track_home_stretch_m",
+        "open_stretch": "track_open_stretch",
+        "angled_wing": "track_angled_wing",
+        "width_1": "track_width_1",
+        "width_2": "track_width_2",
+        "dosage": "track_dosage",
+    }
+
+    # Ota vain ne sarakkeet jotka löytyvät syöttedatasta (+ pääavain)
+    available = {src: dst for src, dst in COL_MAP.items() if src in tracks.columns}
+    if not available:
+        # tracks-DataFrame tyhjä tai sarakkeet puuttuvat kokonaan — ei mergattavaa
+        return runners
+
+    t = (
+        tracks[["track_name"] + list(available.keys())]
+        .rename(columns={"track_name": "track", **available})
+    )
+
+    # Boolean-sarakkeet → int (0/1) jotta NaN:it myöhemmin selkeitä
+    for bool_col in ("track_open_stretch", "track_angled_wing"):
+        if bool_col in t.columns:
+            t = t.copy()
+            t[bool_col] = t[bool_col].astype("Int64")  # nullable int → NaN säilyy
+
+    return runners.merge(t, on="track", how="left")
+
+
+# ----------------------------------------------------------------------
+# 7. Treeniesiesimerkkien esikäsittely — puuttuvien sijoitusten täyttö
 # ----------------------------------------------------------------------
 
 def fill_finish_positions(runners: pd.DataFrame) -> pd.DataFrame:
@@ -563,15 +632,17 @@ def build_feature_matrix(
     races: pd.DataFrame,
     horse_starts: pd.DataFrame | None = None,
     horses: pd.DataFrame | None = None,
+    tracks: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Aja kaikki feature-funktiot ja palauta valmis matriisi mallille.
 
     Piirre-pipeline järjestyksessä:
-      1. form_features           — hevosen muoto viim. N startista
-      2. driver_trainer_features — rolling-tilastot ohjastajalle/valmentajalle
-      3. race_setup_features     — lähtörata, rata-kokemus, lähdön luokka
-      4. derived_features        — johdetut piirteet (barfota, horse_age)
-      5. sire_features           — sukutaulupiirteet (B2, valinnainen)
+      1. form_features             — hevosen muoto viim. N startista
+      2. driver_trainer_features   — rolling-tilastot ohjastajalle/valmentajalle
+      3. race_setup_features       — lähtörata, rata-kokemus, lähdön luokka
+      4. track_structure_features  — ratarakenne (loppusuora, leveys jne.)
+      5. derived_features          — johdetut piirteet (barfota, horse_age)
+      6. sire_features             — sukutaulupiirteet (B2, valinnainen)
 
     Valinnainen horse_starts-parametri: Travsport-historia koko uralta.
     Jos annetaan, form_features() käyttää sitä laajentamaan muotodatan
@@ -579,6 +650,10 @@ def build_feature_matrix(
 
     Valinnainen horses-parametri: horses-taulu jossa sire/dam_sire-kentät.
     Jos annetaan horse_starts:n kanssa, lasketaan sukutaulupiirteet (B2).
+
+    Valinnainen tracks-parametri: tracks-taulu rakennepiirteineen.
+    Jos annetaan, liitetään ratarakenne (track_length_total,
+    track_home_stretch_m, jne.) runners:iin LEFT JOIN:lla.
 
     Valinnainen horse_age-piirre: lisää birth_year runners-DataFrameen
     JOIN:lla horses-tauluun ennen tätä kutsua.
@@ -616,6 +691,11 @@ def build_feature_matrix(
     df = form_features(runners_with_meta, horse_starts=horse_starts)
     df = driver_trainer_features(df)
     df = race_setup_features(df, races, horse_starts=horse_starts)  # B1: track-historia
+
+    # D: ratarakenne — track-sarake on saatavilla race_setup_features():n jälkeen
+    if tracks is not None:
+        df = track_structure_features(df, tracks)
+
     df = derived_features(df)
 
     # B2: sukutaulupiirteet — vaatii sekä horse_starts että horses-parametrin

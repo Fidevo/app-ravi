@@ -89,6 +89,17 @@ FEATURE_COLS: list[str] = [
     "sire_lifetime_starts",
     "dam_sire_lifetime_win_rate",
     "dam_sire_lifetime_starts",
+    # --- D: Ratarakenne (build_features.track_structure_features) ---
+    # Vaatii tracks-taulun tracks-parametrina build_feature_matrix():lle.
+    # NaN jos rata puuttuu taulusta (gallop-radat, manuaaliset stub-rivit).
+    # LightGBM käsittelee NaN:t automaattisesti — malli ei kaadu.
+    "track_length_total",
+    "track_home_stretch_m",
+    "track_open_stretch",
+    "track_angled_wing",
+    "track_width_1",
+    "track_width_2",
+    "track_dosage",
 ]
 
 CATEGORICAL_COLS: list[str] = [

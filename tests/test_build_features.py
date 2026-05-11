@@ -1037,3 +1037,228 @@ class TestB1B2RealisticPipeline:
         # B2: form_avg_finish_5_same_method ei saa olla NaN
         assert not pd.isna(result.iloc[0]["form_avg_finish_5_same_method"]), \
             "form_avg_finish_5_same_method on NaN — A1-pre-merge ei toimi"
+
+
+# ---------------------------------------------------------------------------
+# D — track_structure_features: yksikkötestit
+# ---------------------------------------------------------------------------
+
+def _tracks(*rows: dict) -> pd.DataFrame:
+    """Luo minimaalisen tracks-DataFramen annetuilla riveillä.
+
+    Kutsuttuna ilman argumentteja palauttaa yhden oletusrivin (Solvalla).
+    """
+    defaults: dict = {
+        "track_name": "Solvalla",
+        "length_total": 1000,
+        "length_home_stretch": 220,
+        "width_1": 1000,
+        "width_2": 1000,
+        "dosage": 1500,
+        "open_stretch": True,
+        "angled_wing": False,
+    }
+    if not rows:
+        rows = ({},)
+    return pd.DataFrame([{**defaults, **r} for r in rows])
+
+
+def _runners_with_track(*rows: dict) -> pd.DataFrame:
+    """Luo runners-DataFramen jossa on track-sarake (simuloi race_setup_features():n jälkeistä tilaa).
+
+    Kutsuttuna ilman argumentteja palauttaa yhden oletusrivin.
+    """
+    defaults: dict = {
+        "horse_id": 1,
+        "race_id": 1,
+        "race_date": "2024-01-01",
+        "finish_position": 2,
+        "kilometer_time_seconds": 90.0,
+        "win_odds_final": 3.0,
+        "driver": "Arto",
+        "trainer": "Matti",
+        "start_number": 2,
+        "handicap_meters": 0,
+        "track": "Solvalla",
+    }
+    if not rows:
+        rows = ({},)
+    return pd.DataFrame([{**defaults, **r} for r in rows])
+
+
+class TestTrackStructureFeatures:
+    """Testit track_structure_features()-funktiolle (Tehtävä D)."""
+
+    def test_adds_track_columns(self):
+        """track_structure_features() lisää kaikki 7 piirresaraketta."""
+        from src.features.build_features import track_structure_features
+
+        runners = _runners_with_track()
+        tracks = _tracks()
+        result = track_structure_features(runners, tracks)
+
+        for col in [
+            "track_length_total", "track_home_stretch_m",
+            "track_open_stretch", "track_angled_wing",
+            "track_width_1", "track_width_2", "track_dosage",
+        ]:
+            assert col in result.columns, f"Sarake '{col}' puuttuu tuloksesta"
+
+    def test_correct_values_mapped(self):
+        """Sarakkeiden arvot vastaavat tracks-taulun rivejä."""
+        from src.features.build_features import track_structure_features
+
+        runners = _runners_with_track({"track": "Färjestad"})
+        tracks = _tracks({"track_name": "Färjestad", "length_home_stretch": 177,
+                          "length_total": 1000, "open_stretch": False, "angled_wing": False,
+                          "width_1": 2040, "width_2": 2110, "dosage": 1700})
+        result = track_structure_features(runners, tracks)
+
+        row = result.iloc[0]
+        assert row["track_home_stretch_m"] == 177
+        assert row["track_length_total"] == 1000
+        assert row["track_width_1"] == 2040
+        assert row["track_width_2"] == 2110
+        assert row["track_dosage"] == 1700
+
+    def test_unknown_track_gives_nan(self):
+        """Rata joka ei löydy tracks-taulusta saa NaN-arvot (LEFT JOIN)."""
+        from src.features.build_features import track_structure_features
+
+        runners = _runners_with_track({"track": "TuntematonRata"})
+        tracks = _tracks({"track_name": "Solvalla"})
+        result = track_structure_features(runners, tracks)
+
+        assert pd.isna(result.iloc[0]["track_length_total"])
+        assert pd.isna(result.iloc[0]["track_home_stretch_m"])
+
+    def test_row_count_unchanged(self):
+        """Rivimäärä ei muutu mergen jälkeen."""
+        from src.features.build_features import track_structure_features
+
+        runners = _runners_with_track(
+            {"horse_id": 1, "track": "Solvalla"},
+            {"horse_id": 2, "track": "Solvalla"},
+            {"horse_id": 3, "track": "Färjestad"},
+        )
+        tracks = _tracks(
+            {"track_name": "Solvalla"},
+            {"track_name": "Färjestad", "length_home_stretch": 177},
+        )
+        result = track_structure_features(runners, tracks)
+        assert len(result) == 3
+
+    def test_tolerates_missing_columns_in_tracks(self):
+        """Jos tracks-DataFrame puuttuu sarakkeita, ne sivuutetaan eikä kaaduta."""
+        from src.features.build_features import track_structure_features
+
+        runners = _runners_with_track()
+        # Poistetaan dosage-sarake — simuloidaan vanhaa tietokantaa
+        tracks = _tracks().drop(columns=["dosage"])
+        result = track_structure_features(runners, tracks)
+
+        # dosage-sarake puuttuu tracks:sta → ei track_dosage-saraketta tuloksessa
+        assert "track_dosage" not in result.columns
+        # Muut sarakkeet kyllä löytyvät
+        assert "track_home_stretch_m" in result.columns
+
+    def test_open_stretch_boolean_to_int(self):
+        """open_stretch (True/False) muunnetaan int-tyyppiseksi (0/1)."""
+        from src.features.build_features import track_structure_features
+
+        runners = _runners_with_track(
+            {"track": "A"},
+            {"track": "B"},
+        )
+        tracks = _tracks(
+            {"track_name": "A", "open_stretch": True, "angled_wing": False},
+            {"track_name": "B", "open_stretch": False, "angled_wing": True},
+        )
+        result = track_structure_features(runners, tracks)
+
+        row_a = result[result["track"] == "A"].iloc[0]
+        row_b = result[result["track"] == "B"].iloc[0]
+        assert row_a["track_open_stretch"] == 1
+        assert row_a["track_angled_wing"] == 0
+        assert row_b["track_open_stretch"] == 0
+        assert row_b["track_angled_wing"] == 1
+
+    def test_empty_tracks_returns_all_nan(self):
+        """Tyhjä tracks-DataFrame → kaikki piirresarakkeet NaN, rivimäärä ei muutu."""
+        from src.features.build_features import track_structure_features
+
+        runners = _runners_with_track()
+        # Luo tracks-DataFrame jossa on oikeat sarakkeet mutta ei rivejä
+        tracks = _tracks().iloc[0:0]  # tyhjä, mutta schema sama
+        result = track_structure_features(runners, tracks)
+
+        assert len(result) == 1
+        assert pd.isna(result.iloc[0]["track_length_total"])
+
+    def test_no_duplicate_rows_when_track_appears_once(self):
+        """Tracks-taulussa yksi rivi per rata — merger ei saa tuplata rivejä."""
+        from src.features.build_features import track_structure_features
+
+        runners = _runners_with_track(
+            {"horse_id": 1},
+            {"horse_id": 2},
+        )
+        tracks = _tracks()  # yksi rivi: Solvalla
+        result = track_structure_features(runners, tracks)
+        assert len(result) == 2
+
+
+class TestBuildFeatureMatrixWithTracks:
+    """Testit build_feature_matrix():lle tracks-parametrilla (integraatio)."""
+
+    def test_tracks_none_does_not_add_columns(self):
+        """Ilman tracks-parametria track_*-sarakkeet eivät ilmesty tulokseen."""
+        runners = _runners(
+            {"race_id": 1, "horse_id": 1, "race_date": "2024-01-01",
+             "finish_position": 2, "driver": "A", "trainer": "B",
+             "start_number": 2, "handicap_meters": 0},
+        )
+        races = _races({"race_id": 1, "track": "Solvalla"})
+        result = build_feature_matrix(runners, races)  # ei tracks-parametria
+
+        track_struct_cols = [c for c in result.columns if c.startswith("track_") and c not in
+                             ("track_horse_starts", "track_horse_win_rate", "track_condition")]
+        assert not track_struct_cols, (
+            f"track_*-sarakkeet ilmestyivät ilman tracks-parametria: {track_struct_cols}"
+        )
+
+    def test_tracks_param_adds_structure_columns(self):
+        """Kun tracks-parametri annetaan, track_*-piirresarakkeet lisätään."""
+        runners = _runners(
+            {"race_id": 1, "horse_id": 1, "race_date": "2024-01-01",
+             "finish_position": 2, "driver": "A", "trainer": "B",
+             "start_number": 2, "handicap_meters": 0},
+        )
+        races = _races({"race_id": 1, "track": "Solvalla"})
+        tracks = _tracks({"track_name": "Solvalla", "length_home_stretch": 220})
+        result = build_feature_matrix(runners, races, tracks=tracks)
+
+        assert "track_home_stretch_m" in result.columns
+        assert result.iloc[0]["track_home_stretch_m"] == 220
+
+    def test_feature_cols_track_structure_columns_present(self):
+        """FEATURE_COLS:in track_*-sarakkeet löytyvät tuloksesta kun tracks annetaan."""
+        from src.models.ranker import FEATURE_COLS
+
+        runners = _runners(
+            {"race_id": 1, "horse_id": 1, "race_date": "2024-01-01",
+             "finish_position": 2, "driver": "A", "trainer": "B",
+             "start_number": 2, "handicap_meters": 0},
+        )
+        races = _races({"race_id": 1, "track": "Solvalla"})
+        tracks = _tracks({"track_name": "Solvalla"})
+        result = build_feature_matrix(runners, races, tracks=tracks)
+
+        track_struct_feat_cols = [c for c in FEATURE_COLS if c.startswith("track_length") or
+                                  c.startswith("track_home") or c.startswith("track_open") or
+                                  c.startswith("track_angled") or c.startswith("track_width") or
+                                  c.startswith("track_dosage")]
+        missing = [c for c in track_struct_feat_cols if c not in result.columns]
+        assert not missing, (
+            f"FEATURE_COLS:in track-rakenne-sarakkeet puuttuvat tuloksesta: {missing}"
+        )

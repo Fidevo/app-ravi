@@ -950,21 +950,121 @@ Axevalla|227|0       Boden|200|0        Östersund|218|0
 Årjäng|205|0         [+5 manual stubs: NULL]
 ```
 
-**Auditoijan tarkistus:** _(odottaa — pyydän tarkistamaan:)_
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 10.5.2026 (Opus 4.7)
 
-1. C.1: Hyväksyykö auditoija että galloppiradoille (Bro Park, Göteborg Galopp, Jägersro Galopp) lisättiin tyhjät stub-rivit eikä niitä suodateta pois `races`-taulusta? (Ne ovat siellä vaikka scheduler suodattaa ne → ei join-rikkoutumisia Tehtävä D:ssä)
+Vastaukset kehittäjän neljään kysymykseen:
 
-2. C.2: Hyväksyykö auditoija Tingsryd (1609 m = mailiratarata) ja Kalmar (leveydet 2550/2600) poikkeuksina ilman korjaustoimenpiteitä?
+### 1. Galloppi-rata-stubit — ✅ HYVÄKSY
 
-3. C.3: Solvalla `length_home_stretch=200` eikä ~220 m — onko tämä ongelma vai hyväksytäänkö Travrondenin data arvovaltaisena lähteenä?
+`source="manual"` + NULL-rakenne on **oikein valittu** strategia.
 
-4. Onko Tehtävä D:hen (track_structure_features) lupa edetä?
+Vaihtoehtoja olisi ollut kolme: (a) stub-rivi NULL-rakenteella ← kehittäjän valinta,
+(b) DELETE galoppi-rivit races-taulusta, (c) WHERE-suodatus mallin treeniin.
+
+Stub-rivi voittaa muut:
+- (b) on destruktiivinen — galoppi-lähdöissä voi tulevaisuudessa olla myös trottidataa, ei tuhota historiaa
+- (c) monimutkaistaa pipeline:ä joka kohdassa
+- (a) on **yhden upsert-rivin kustannus**, säilyttää LEFT JOIN -toimivuuden Tehtävä D:ssä, ja LightGBM käsittelee NaN-rakenteen automaattisesti
+
+Galoppi-radat ovat scheduler-tasolla suodatettu jo (`GALLOP_TRACKS` [scheduler.py:82](src/data/scheduler.py:82)) joten näille ei tule uusia trotti-lähtöjä. Vanhat rivit jäävät races-tauluun, eivätkä vaikuta mallin treeniin koska niistä puuttuu trotti-luonteinen data. Hyvä päätös.
+
+### 2. Tingsryd 1609 m + Kalmar 2550/2600 — ✅ HYVÄKSY POIKKEUKSINA
+
+**Tingsryd:** Empiirisesti vahvistettu **track_description**-tekstissä: *"Sveriges enda milebana, den 1609 meter långa travovalen"*. Englantilainen maili = 1609.34 m. **Aito poikkeustapaus**, ei typo. Tämä on hyvä esimerkki siitä että sanity-tarkistuksen rajat olivat **alimitoitetut** alkuperäisessä ehdotuksessa — ei rata-datan ongelma. Älä laajenna rajaa (700–1300 m kattaa 25/26 rataa, viimeisen poikkeuksellisen ei tarvitse läpäistä raja-tarkistusta automaattisesti — manuaalinen tutkinta on sopiva).
+
+**Kalmar 2550/2600:** Marginaalisesti yli 2500 m rajan. Tämä on **mittaustaso-ero**, ei typo. Kalmar on aidosti vähän tavallista leveämpi rata. Travronden on johdonmukainen ⇒ uskotaan dataan. LightGBM oppii suhteelliset kuviot joka tapauksessa.
+
+Kummassakaan tapauksessa **ei korjaustoimenpiteitä tarvita**.
+
+### 3. Solvalla `length_home_stretch=200` vs. odotettu ~220 m — ✅ HYVÄKSY TRAVRONDENIN ARVO
+
+Hyvä että teit spot-checkin ja raportoit eron avoimesti. Tutkitaan tämä huolellisesti:
+
+**Mitkä luvut ovat oikeita?** Eri lähteistä voi löytyä eri lukuja Solvallan loppusuoralle (200 m, 220 m, 230 m). Syyt:
+- **Mittaustapa**: viimeisestä kaarteen huipusta loppumaaliin (lyhyt) vs. loppukurvin alusta (pitkä)
+- **Renovoinnit**: rata on muuttunut vuosien varrella
+- **5–20 m heitto on tyypillistä** eri lähteissä, ei kerro siitä että jokin lähde on "väärässä"
+
+**Olennaisin pointti malliin:** LightGBM oppii **suhteellisia** kuvioita. Vaikka absoluuttinen arvo olisi epätarkka, **järjestys** ratojen välillä on oikea jos kaikki on mitattu samalla tavalla samasta lähteestä. Travrondenin 25 radan listaus on **sisäisesti johdonmukainen** (sama mittausstandardi kaikille). Tämä on tärkeämpää kuin absoluuttinen tarkkuus.
+
+**Solvalla 200 m vs. Färjestad 177 m**: Travrondenin mukaan Solvallassa on 23 m **pidempi** loppusuora kuin Färjestadissa. Tämä on **suunnan osalta** oikein kaikkien lähteiden mukaan. Malli oppii oikean rangin.
+
+⇒ **Travronden hyväksytty arvovaltaisena yksittäisenä lähteenä.**
+
+### 4. Tehtävä D — ✅ LUPA EDETÄ
+
+Kaikki ennakkoehdot Tehtävä D:lle täyttyvät:
+- 30/30 ratoja tracks-taulussa (25 Travronden + 5 manual stub)
+- Kattavuus 100 % `races.track`:lle (C.1 LEFT JOIN tyhjä)
+- Outlier-tarkistus selitetty (C.2)
+- Spot-check tehty (C.3)
+
+### Erityisesti hyvin tehty
+
+- **Avoin raportointi Solvallan erosta** sen sijaan että olisit piilottanut sen tai sovittanut Travrondenin lukua "odotettuun"
+- **Stub-strategia 5 puuttuvalle radalle** — yksinkertaisin ratkaisu joka säilyttää data-eheyden eikä sotke pipeline:ä
+- **Tingsryd-poikkeuksen vahvistus track_description:stä** — käytit dataa itsensä validointiin (cross-reference numerolukema vs. tekstikuvaus), tämä on **oikea data-asioiden tutkintatekniikka**
+- **Prosessin optimointi**: tapettiin early-stop-odotus kun välimuisti oli täynnä ja kaikki uniikit SE-radat löytyivät. Hyvä kärsivällisyys-säästö.
+
+### Pieni huomio Tehtävä D:tä varten
+
+Stub-rivien (Bro Park, Eskilstuna, Göteborg Galopp, Jägersro Galopp, Mantorp) `length_home_stretch` on NULL. Kun nämä mergetään runners:iin Tehtävä D:ssä, **näiden 5 radan runnerit saavat NaN-piirteet**.
+
+- Eskilstuna ja Mantorp: aitoja raviratoja joiden data on saatavissa toiselta lähteeltä (esim. Wikipedia/Eskilstuna eller travrondenspel ei kata niitä). **Valinnaisesti** voit lisätä manuaalisesti tärkeimmät rakennepiirteet näille kahdelle (length_total, length_home_stretch, open_stretch) — vie 5 min/rata. Mutta jos ei ole aikaa, jätä NaN-arvoiksi, LightGBM hoitaa sen.
+- Galoppi-radat: filtteröityvät joka tapauksessa pois mallin treenistä → ei väliä.
+
+**Ei pakollinen ennen Tehtävä D:tä.** Voit jättää Eskilstuna/Mantorp NaN:ksi alkuvaiheessa ja katsoa mitä feature_importance kertoo Vaiheen 3 jälkeen.
 
 ---
 
 ## Tehtävä D · track_structure_features() + FEATURE_COLS
 
-**Status:** ❌ tekemättä
+**Status:** ✅ valmis
+
+### Mitä muutettiin
+
+**`src/features/build_features.py`** — lisätty uusi funktio `track_structure_features()` (rivit ~490–556) sekä päivitetty `build_feature_matrix()`:
+- Uusi parametri `tracks: pd.DataFrame | None = None`
+- Funktio kutsutaan `race_setup_features()`:n jälkeen (jolloin `track`-sarake on jo runners:ssa)
+- LEFT JOIN tracks-tauluun pääavaimella `track_name` → `track`
+- Toleroi puuttuvat sarakkeet tracks-DataFramessa (backward-yhteensopivuus)
+- `open_stretch` ja `angled_wing` muunnetaan `Int64`-tyyppisiksi (nullable int, NaN säilyy)
+- Jos `tracks=None`, funktio ei kutsuta ollenkaan — olemassa olevat kutsut eivät rikkoudu
+
+**`src/models/ranker.py`** — lisätty 7 sarakeentryä `FEATURE_COLS`:iin:
+```
+"track_length_total", "track_home_stretch_m",
+"track_open_stretch", "track_angled_wing",
+"track_width_1", "track_width_2", "track_dosage"
+```
+
+**`tests/test_build_features.py`** — lisätty 11 uutta testiä (2 testiluokkaa):
+- `TestTrackStructureFeatures` (8 testiä): sarakkeiden lisäys, oikeat arvot, tuntematon rata → NaN, rivimäärä ei muutu, puuttuvat sarakkeet toleroidaan, boolean → int, tyhjä tracks-DataFrame, ei tuplauksia
+- `TestBuildFeatureMatrixWithTracks` (3 testiä): `tracks=None` ei lisää sarakkeita, `tracks`-parametri lisää rakenne-sarakkeet, FEATURE_COLS track-sarakkeet löytyvät tuloksesta
+
+### Empiirinen verifiointi
+
+Testit ennen: 220 passing | Testit nyt: **231 passing** (kaikki)
+
+Toimivuus käsin:
+```python
+runners = pd.DataFrame([{"horse_id": 1, "track": "Solvalla", ...}])
+tracks = pd.DataFrame([{"track_name": "Solvalla", "length_home_stretch": 220, ...}])
+result = track_structure_features(runners, tracks)
+result["track_home_stretch_m"]  # → 220 ✓
+```
+
+Tuntematon rata → NaN (LEFT JOIN toimii):
+```python
+runners["track"] = "TuntematonRata"
+result = track_structure_features(runners, tracks)
+result["track_home_stretch_m"].isna().all()  # → True ✓
+```
+
+### Auki olevat kysymykset
+
+- Tehtävä E (smoke-testi) vaatii Hetzner-serverin tuotantodataa — onko se muistettavissa ajoympäristössä vai tarvitaanko SSH?
+- `_resolve_cols`-mekanismi ranker.py:ssä: tarkistiko auditoija että NaN-käsittely LightGBM:ssä on OK uusille track_*-sarakkeille?
 
 **Auditoijan tarkistus:** _(odottaa)_
 
@@ -987,7 +1087,7 @@ Axevalla|227|0       Boden|200|0        Östersund|218|0
 - [x] Tehtävä A ✅ Track-luokka schemaan (commit 95f71d1)
 - [ ] Tehtävä B — scraper + CLI
 - [ ] Tehtävä C — Wikipedia-validointi
-- [ ] Tehtävä D — track_structure_features + FEATURE_COLS
+- [x] Tehtävä D — track_structure_features + FEATURE_COLS ✅
 - [ ] Tehtävä E — smoke-testi (track_length_total notna% ≥ 95)
 
 Auditoijan vahvistus Vaihe 2.5:lle: _(odottaa)_
