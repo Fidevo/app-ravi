@@ -670,13 +670,65 @@ Hyvää työtä — yksinkertainen tehtävä mutta toteutettu puhtaasti. Voit ed
 
 ## Tehtävä B · Travronden track-fetcher + CLI
 
-**Status:** ❌ tekemättä
+**Status:** ✅ valmis — commit `2b8da71` (11.5.2026)
 
-**Kerätyt radat:** — kpl
+**Kerätyt radat:** _(ajetaan Hetznerillä Tehtävä C:n yhteydessä)_
 
-**Esimerkki tulos:** _(yksi rivi DB:stä)_
+**Toteutus:**
 
-**Auditoijan tarkistus:** _(odottaa)_
+Uusi tiedosto `src/data/scrapers/travronden_tracks.py`:
+
+| Funktio | Kuvaus |
+|---|---|
+| `TravrondenTracksClient` | HTTP-asiakas, tiedostovälimuisti per round_id |
+| `fetch_all_se_tracks(scan_from, scan_limit)` | Skannaa round_id:t taaksepäin, kerää `country=="SE"` |
+| `upsert_tracks(db_path, tracks_data)` | Idempotentti kirjoitus tracks-tauluun |
+| `_parse_capacity(v)` | String/int → int, käsittelee unicode-välilyönnit |
+
+CLI-komento `scheduler.py`:ssä:
+```bash
+python -m src.data.scheduler fetch-track-structures [--scan-from N] [--scan-limit N]
+```
+
+**Empiiriset vahvistukset ennen toteutusta:**
+
+Käytiin Travrondenspel.se:n API:ssa ennen koodin kirjoittamista:
+- `/round/171922/statistics/` palauttaa `round.tracks[0]` Färjestadin tiedoilla
+- Kaikki 16 kenttää vahvistettu: `length_home_stretch=177`, `open_stretch=false`, `capacity="10000"` (string)
+- Ulkomaisia ratoja (NO, DK, DE, FR) löytyy — suodatetaan `country=="SE"`
+- Round_id tiheys: ~40 round/vrk → SCAN_LIMIT=5000 kattaa ~4 kk
+
+**Testit:** 28 uutta testiä (`tests/test_travronden_tracks.py`), 220/220 läpi
+
+```
+TestParseCapacity  (6): int, string, kapea välilyönti, None, garbage
+TestToInt          (5): int, float, string, None, garbage
+TestToBool         (5): True/False/None/int
+TestFetchAllSeTracks (4): SE-suodatus, deduplikointi, mock HTTP
+TestUpsertTracks   (7): insert, update, bool→int, capacity string→int, source
+TestCaching        (1): välimuisti estää HTTP-kutsun
+```
+
+**Auditoijan tarkistus:** _(odottaa — pyydän tarkistamaan:)_
+
+1. `src/data/scrapers/travronden_tracks.py` — onko arkkitehtuuri oikein?
+   - `TravrondenTracksClient.__enter__/__exit__` toimiiko context manager oikein
+   - `_fetch()` palauttaa `None` eikä nosta poikkeusta 404:lle — onko tämä oikein vai pitäisikö loggata?
+   - Early-stop logiikka: `EARLY_STOP_WINDOW=500` + 300 extra — onko tämä riittävä?
+
+2. `fetch_all_se_tracks()` — onko suodatin oikein (`country == "SE"`)? Travrondenissa näkyy NO, DK, DE, FR ratoja joita ei pidä tallettaa.
+
+3. `upsert_tracks()` — kaikki 16 kenttää mappattu oikein Travrondenin JSON-nimistä `Track`-olion sarakenimiin?
+
+4. `tests/test_travronden_tracks.py` — onko mockit tehty oikein? `TestFetchAllSeTracks` mockaa `TravrondenTracksClient`-luokan kokonaan.
+
+5. CLI-komento `fetch-track-structures` — toimiiko parametrien välitys oikein (`--scan-from`, `--scan-limit`)?
+
+6. Aja lokaalisti:
+   ```bash
+   python -m src.data.scheduler fetch-track-structures --scan-limit 50
+   ```
+   Pitäisi löytää muutama SE-rata 50 round_id:n alueelta (2-3 rataa).
 
 ---
 
