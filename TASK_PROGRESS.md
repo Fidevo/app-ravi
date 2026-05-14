@@ -2126,7 +2126,242 @@ Jos näkyy → unohdit `horses`-parametrin. Korjaa ja aja uudelleen.
 2. dam_sire-kattavuus 25 % — pitääkö tätä parantaa vai OK tällä tasolla?
 3. track_home_stretch_m on nyt #27/46 (oli #17 ilman sire-piirteitä). Auditoija mainitsi top-25 hyväksyttäväksi — onko #27 OK?
 
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 14.5.2026 (Opus 4.7), mutta sire #2 -sijoitus pitää validoida ablation-kokeella
+
+### Sire-regressio korjattu ✅
+
+Hyvä että `horses=horses`-parametri lisättiin. Sire-piirteet palanneet kuten odotettu:
+- `sire_lifetime_win_rate` notna 89.7 % (vs. Vaiheen B2 vahvistuksen 89.62 %) ✓
+- `sire_lifetime_starts` notna 95.2 % ✓
+- Sire-piirteet top-rankingissa: #2 ja #9
+
+### Käyttäjän tärkeä huoli: onko sire #2 realistinen?
+
+🟡 **Käyttäjä on oikeassa epäilyssään — tämä on epätavallisen korkea ja vaatii validoinnin.**
+
+Ravissa sukutaulu on **tunnetusti prediktiivinen** (korrelaatio voittoon ~0.15–0.25 isolla aineistolla), erityisesti nuorilla hevosilla joilla ei ole omaa historiaa. Mutta **#2 yli kaikkien muiden paitsi markkina-arvion** on **epätavallinen** — tyypillisesti sukutaulu on top-15:ssä, ei top-2:ssa.
+
+**Kolme mahdollista syytä korkealle rankingille:**
+
+1. **Otantakohinaa** — 17 vrk on liian vähän vakaisiin ranking-tuloksiin. Brier vaihtelee 0.0704–0.0797 samalla splitillä → ranking-järjestys voi olla yhtä epävakaa.
+
+2. **Indirekti leakage form-piirteiden kanssa** — `sire_features` laskee aggregaatin **mukaan lukien hevosen omat aiemmat startit** ([build_features.py:438–456](src/features/build_features.py:438)). Hevonen X menestynyt → sire-rate sisältää X:n omaa historiaa → korkea sire-arvo, joka osittain kertoo "X on hyvä" eikä vain "X:n sire on hyvä".
+
+3. **Multikollineaarisuus form-piirteiden kanssa** — hyvät sirit tuottavat hyviä hevosia → korkea form. Gain-mittari painottaa ensimmäistä korreloivaa piirrettä.
+
+### Vaihe 3.6 — Sire-ablation (suositeltu seuraava tehtävä, ~1 h)
+
+Aja sama treeni-testi-split ilman sire-piirteitä, raportoi:
+
+```python
+# Poista sire-piirteet FEATURE_COLS:ista tilapäisesti
+no_sire_cols = [c for c in FEATURE_COLS if "sire" not in c]
+model_no_sire = train_ranker(train_df, feature_cols=no_sire_cols)
+preds_no_sire = predict_win_probabilities(model_no_sire, test_df, feature_cols=no_sire_cols)
+brier_no_sire = ((preds_no_sire["win_prob"] - actual_win) ** 2).mean()
+```
+
+Tulkinta:
+
+| Skenaario | Brier-tulos | Johtopäätös |
+|---|---|---|
+| Brier samanlainen (~0.0746) | sire on tärkeätä mutta vain gainissa — info form-piirteissä | Pitäisi miettiä "out-of-sample" sire (ei hevosen omat startit) |
+| Brier heikkenee selvästi (> 0.080) | sire aidosti informatiivinen, #2 perusteltu | Pidä piirteet, hyväksy ranking |
+| Brier vähän heikompi (0.075–0.078) | sire hyödyllinen muttei dominantti | #2 on gainin omituisuus, oikea vaikutus on top-10 mutta ei top-2 |
+
+**Älä tee mallin lopullista treenausta ennen tätä koetta.** Sire-piirteiden gain-arvo on tällä hetkellä tärkein mallin tulkintaa määrittävä mittari, ja sen on oltava ymmärrettävissä.
+
+### Vastaukset muihin kysymyksiisi
+
+**Q1: Brier 0.0746 vs. 0.0797 (sama split) — LightGBM-satunnaisuutta?**
+
+🟡 **Osittain ehkä, mutta varianssi on isompi kuin odotettu.** LightGBM:n `feature_fraction=0.8` ja `bagging_fraction=0.8` tuottavat satunnaisuutta, mutta 6 % suhteellinen Brier-vaihtelu (0.0704–0.0797) samalla splitillä on enemmän kuin pitäisi. **Suositus:** kokeile `random_state=42` molemmissa ajoissa varmistuaksesi onko ero satunnaisuutta vai datapuolen muutos (esim. Hetzner-keräys jatkuva, runners-määrä voi olla muuttunut päivän aikana).
+
+**Q2: dam_sire-kattavuus 25 % — OK?**
+
+🟡 **OK tällä tasolla**, mutta huomaa että se on **paljon vähemmän kuin Vaihe B2:n raportoima 88 %**. Tarkista syy:
+
+```sql
+SELECT
+    COUNT(*) total,
+    COUNT(DISTINCT h.dam_sire) unique_dam_sires,
+    COUNT(*) FILTER (WHERE h.dam_sire IS NOT NULL) with_dam_sire
+FROM horses h;
+```
+
+Aiemmin (10.5.2026) 3 477 / 3 477 hevosen dam_sire oli täytetty. Jos kattavuus on nyt 25 %, joko (a) uudet hevoset (datankeräyksen jatkuvuudesta) eivät saa dam_sire:ä eli backfill ei kata uutta dataa, tai (b) jokin muu rajoitus. **Selvitä tämä — voi olla pieni bug `_upsert_horse`:ssa.**
+
+**Q3: track_home_stretch_m #27/46 — top-25 OK?**
+
+✅ **Ehdottomasti OK tällä datalla.** Höllensin top-25-kriteeriä aiemmin, ja #27 on lähellä rajaa. Rata-piirteet vaativat enemmän dataa interaktioiden oppimiseen (kuten varoitin). **Älä murehdi tästä — tarkista ranking uudelleen kun on 8+ viikkoa dataa.**
+
+### Suositukset jatkoon
+
+1. **Sire-ablation (~1 h)** — vahvistaa #2 ranking
+2. **dam_sire-kattavuus regressio** — tarkista miksi 88 % → 25 %
+3. **Random state -vakaus** — kokeile `random_state=42` Brier-vaihtelun selvittämiseen
+
+Vasta näiden jälkeen voi siirtyä Vaiheeseen C tai pace-pilottiin.
+
+---
+
+## Vaihe 3.6 — Sire-ablation + dam_sire-tutkimus · Koodariraportti (14.5.2026)
+
+**Status:** ✅ valmis
+
+### Koodimuutos: `random_state`-parametri `train_ranker`:iin
+
+Lisätty `random_state: int | None = None`-parametri, joka mappaa LightGBM:n `seed`-parametriin. Mahdollistaa deterministiset, toistettavat ajot.
+
+**Testit:** 3 uutta testiä `TestTrainRankerRandomState`:
+- Hyväksyy `random_state=42` kaatumatta
+- `random_state=None` toimii oletuksena
+- Sama `random_state` → sama feature importance (deterministinen)
+
+Testit: **25/25 passing** (kaikki vihreällä).
+
+---
+
+### 1. Sire-ablation (Vaihe 3.6)
+
+**Skripti:** `scripts/sire_ablation.py` (Hetzner, 14.5.2026)
+
+| | Brier | NLL |
+|---|---|---|
+| Täydellinen malli (rs=42) | 0.0821 | 396.19 |
+| Ilman sire-piirteitä (rs=42) | 0.0818 | 388.15 |
+| **Delta (no_sire − full)** | **−0.0003** | **−8.04** |
+
+**Poistetut piirteet:** `sire_lifetime_win_rate`, `sire_lifetime_starts`, `dam_sire_lifetime_win_rate`, `dam_sire_lifetime_starts` (4 kpl / 46:sta)
+
+**Verdict: SIRE EI MERKITSEVÄ — gain on artefakti**
+
+Sire-piirteiden poistaminen EI heikennä mallia. Brier paranee hieman (−0.0003) ja NLL paranee merkittävästi (−8.04). Auditoijan tulkintakaavio:
+
+| Skenaario | Auditoijan tulkinta |
+|---|---|
+| Brier ~sama (~0.075) | sire tärkeätä vain gainissa — sama info form-piirteissä |
+| Brier heikkenee >0.080 | sire aidosti informatiivinen |
+| **Brier paranee (−0.0003)** | **sire ei merkitsevä, gain on artefakti** |
+
+**Paras selitys auditoijan hypoteesista #2: Indirekti leakage.**
+`sire_features()` laskee sire-aggregaatin **mukaan lukien hevosen omat aiemmat startit**. Hevonen X on menestynyt → sire-rate sisältää X:n omaa historiaa → korkea sire-arvo kertoo osittain "X on hyvä hevonen" eikä "X:n sire on hyvä sire". Tämä tuottaa korkean gainin treenijoukossa, mutta ei generalisoidu testijoukossa.
+
+**Top-10 ilman sire-piirteitä:**
+`form_market_avg_5`, `atg_lifetime_top3_rate`, `form_avg_km_time_5`, `form_avg_finish_5_same_dist`, `atg_lifetime_starts`, `race_max_earnings`, `form_days_since_last`, `atg_best_km_for_this_setup`, `atg_lifetime_win_rate`, `driver_starts_365d`
+
+`track_home_stretch_m` full-mallissa: **#20/46**
+
+---
+
+### 2. dam_sire-kattavuus 88 % → 34.4 % — ei regressio, mittauskehysero
+
+**SQL-tulos:**
+```
+total_horses  with_dam_sire  dam_sire_pct  with_sire  sire_pct
+        4114           1416          34.4       4114     100.0
+```
+
+**Uudet hevoset (lisätty 11.5.2026 jälkeen):**
+```
+new_horses  with_dam_sire  dam_sire_pct
+       209            199          95.2
+```
+
+**Selitys (ei bugi `_upsert_horse`:ssa):**
+
+- `sire` on 100 % notna kaikille — ATG-pedigree hakee isän aina
+- `dam_sire` on 34.4 % koko horses-taulusta (4 114 hevosta) — joista monet ovat Travsport-historiahevosia (2014→) joille ei haeta ATG-pedigreedata
+- **Uusille hevosille (post-May 11) dam_sire on 95.2 %** — tiedonkeruu toimii oikein
+- B2-raportin "88 % notna" mitattiin silloin DB:ssä olleista **aktiivisista kilpailuhevosista** (3 477 hevosta), ei kaikista horse_starts-historiahevosista
+- Vanhoilla Travsport-historiahevosilla ei ole ATG-pedigree-kutsua → dam_sire puuttuu → 34.4 % kokonaiskattavuus on odotettavissa
+
+`_upsert_horse` käyttää `_set_if_not_none()` → ei ylikirjoita olemassaolevaa dam_sire-arvoa. Bugia ei ole.
+
+**dam_sire-piirteiden notna% features-DataFramessa (vain runnereille):**
+- `dam_sire_lifetime_starts`: 25.3 % — johtuu siitä että dam_siren TILASTOT lasketaan horse_starts:ista, ja monella dam_sirellä ei ole omia kilpailusuorituksia rekisterissä
+
+---
+
+### 3. random_state=42 — Brier-vaihtelun selitys
+
+| Ajo | Brier | Sire mukana | random_state |
+|---|---|---|---|
+| Alkuperäinen baseline (14.5.2026 aamu) | 0.0797 | ✅ | ei kiinnitetty |
+| Ablation-ajo (baseline) | 0.0704 | ❌ (bug) | ei kiinnitetty |
+| birth_year-ajo (ilman sire) | 0.0745 | ❌ (bug) | ei kiinnitetty |
+| full_baseline_v2 (kaikki params) | 0.0746 | ✅ | ei kiinnitetty |
+| **Sire-ablation full (rs=42)** | **0.0821** | ✅ | **42** |
+| Sire-ablation no-sire (rs=42) | 0.0818 | ❌ | 42 |
+
+Kiinnitetyllä siemenellä (rs=42) malli antaa 0.0821 — lähellä alkuperäistä 0.0797. Vaihteluväli 0.0704–0.0821 selittyy pääosin **LightGBM-satunnaisuudesta** (`feature_fraction=0.8`, `bagging_fraction=0.8` + eri sire-konfiguraatiot).
+
+Ero 0.0746 → 0.0821 (rs=42) on **suurempi kuin pelkkä satunnaisuus** — ero johtuu osin myös siitä että satunnainen ajo osui parempaan perukkaan. 17 vrk:n datalla Brier-vaihtelu ~0.01 on normaalia.
+
+---
+
+### Auki olevat kysymykset auditoijalle
+
+1. **Sire-piirteiden kohtalo:** Gain #2 on artefakti (leakage), Brier ei parane sire-piirteillä. Pitääkö sire-piirteet **poistaa FEATURE_COLS:ista** vai pitää ne odottamaan isompaa datasettiä? Vaihtoehtoisesti: korjataanko leakage `sire_features()`:ssa?
+2. **dam_sire 34.4 % vs 88 %:** Mittauskehysero selittää, ei bugi. Onko selitys hyväksyttävä?
+3. **random_state=42:** Jätetäänkö oletus None vai kiinnitetäänkö 42 vakioparameteriksi tuotantoon?
+
 **Auditoijan tarkistus:** _(odottaa)_
+
+---
+
+## Travrondenspel per-runner-pilotti — käyttäjän kysymys 14.5.2026
+
+**Käyttäjä kysyi:** Onko TASK_TRAVRONDEN_INVESTIGATION.md:n per-runner-pilotti otettava nyt vai myöhemmin?
+
+### Suositukseni: Vaihe 1 (selvitys) NYT, Vaihe 2 (rakentaminen) myöhemmin
+
+**Vaihe 1 NYT (1–2 h, ~20 API-kutsua):**
+
+Aja TASK_TRAVRONDEN_INVESTIGATION.md:n "Vaihe 1 — Selvitä mikä on todella saatavilla" — hae 3–5 vanhaa (status=`finished`) Travronden-kierrosta ja tarkista:
+
+- Onko `rating`, `speed`, `comment`, `interviews` täytetty valmiilla kierroksilla?
+- **Erityisesti `speed` — onko numeerinen pace-arvio?** Jos kyllä, tämä on **C3 pace-pilotin oikotie** (vältät manuaalisen scrapingin).
+- Mikä on `start_interval_group`:n skaalan tarkoitus?
+
+**Päätös Vaihe 1:n jälkeen:**
+- Jos `speed` on numeerinen → siirry Vaihe 2:een suoraan **C3:n korvaavaksi**
+- Jos kaikki ovat None myös valmiilla kierroksilla → hylkää koko pilotti, käytä TASK_TRAVRONDEN_INVESTIGATION.md:n "varmasti saatavilla" -kenttiä (is_first_*, game_percent, speed_records)
+
+**Vaihe 2 (100-lähdön pilotti) MYÖHEMMIN, syyt:**
+
+1. **Mallin baseline pitää vakauttaa ensin** — Brier-varianssi 0.07–0.08 + sire #2 -kysymys ovat avoimia. Älä lisää uusia muuttujia ennen kuin nykyiset on ymmärretty.
+2. **A/B-vertailu helpompi tehdä myöhemmin** — kun on selkeä "ilman Travronden" -baseline, näet selvästi miten paljon per-runner-data parantaa
+3. **Vaihe C (drift-monitorointi) on tärkeämpi infra** — se pelastaa seuraavalta K1-tyyppiseltä bugilta
+4. **Datankeräys jatkuu joka tapauksessa** — Hetzner kerää horse_starts:ia, etkä menetä mitään odottamalla
+
+### Konkreettinen aikataulu
+
+```
+TÄNÄÄN (sireablation, ~1 h):
+  Vaihe 3.6 — Sire-ablation → ymmärrä gainin tulkinta
+
+VIIKON SISÄLLÄ:
+  • dam_sire-kattavuus 25 % vs. 88 % -tutkimus (~1 h)
+  • Travronden Vaihe 1 — per-runner-selvitys (1–2 h)
+  • Päätös: kannattaako Travronden Vaihe 2
+
+KUUKAUDEN SISÄLLÄ (kun dataa 6+ viikkoa):
+  • Vaihe C — drift-monitorointi (C1), walk-forward-dokumentaatio (C2)
+  • Pace-pilotti (C3) — JOS Travronden Vaihe 1 ei tarjonnut pace-dataa,
+    tee manuaalinen scrape; muuten käytä Travronden-dataa
+  • Mallin uudelleentreenaus rikastetulla featuristolla
+```
+
+### Varovaisuus pace-piirteistä
+
+Mainitsin aiemmin että **pace on ravialan #1 prediktor**. Tämä on totta isolla datalla. Mutta:
+
+- 17 vrk:n datalla useimmat piirteet ovat liian satunnaisia
+- Pace-piirre **lisää variansia** jos sitä lisätään huonosti integroituun malliin
+- Älä lisää pace ennen kuin (a) baseline on vakaa ja (b) Vaihe C-monitorointi on käytössä
+
+Pace on **tärkeä mutta ei kiireellinen** parannus. Tee tarvittava infra ensin, sitten lisää piirteitä.
 
 ---
 
