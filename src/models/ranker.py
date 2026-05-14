@@ -147,6 +147,7 @@ def train_ranker(
     feature_cols: Sequence[str] = FEATURE_COLS,
     categorical_cols: Sequence[str] = CATEGORICAL_COLS,
     num_boost_round: int = 500,
+    random_state: int | None = None,
 ) -> lgb.Booster:
     """Treenaa LightGBM lambdarank-objectivella.
 
@@ -154,6 +155,9 @@ def train_ranker(
         train_df: pitää sisältää race_id, finish_position, ja feature-sarakkeet.
         feature_cols: numeeriset piirteet (puuttuvat ohitetaan automaattisesti)
         categorical_cols: kategoriset piirteet (puuttuvat ohitetaan automaattisesti)
+        random_state: satunnaissiemen toistettavuuteen (LightGBM `seed`-parametri).
+            Jos None, LightGBM käyttää omaa oletusarvoaan (ei toistettava).
+            Käytä random_state=42 Brier-vaihtelun eristämiseen LightGBM-satunnaisuudesta.
     """
     df = train_df.dropna(subset=["finish_position"]).copy()
 
@@ -193,6 +197,8 @@ def train_ranker(
         "bagging_freq": 5,
         "verbose": -1,
     }
+    if random_state is not None:
+        params["seed"] = random_state
 
     return lgb.train(params, train_set, num_boost_round=num_boost_round)
 

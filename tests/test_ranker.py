@@ -15,6 +15,7 @@ from src.models.ranker import (
     calibrate_isotonic,
     calibrate_temperature,
     compute_nll,
+    train_ranker,
 )
 
 
@@ -340,4 +341,52 @@ class TestComputeNll:
         assert nll_iso < nll_raw, (
             f"Isotonic-kalibrointi ei parantanut NLL:ää: "
             f"raaka={nll_raw:.4f}, iso={nll_iso:.4f}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 3.6 — train_ranker random_state
+# ---------------------------------------------------------------------------
+
+def _make_train_df(n_races: int = 30, horses_per_race: int = 8, rng_seed: int = 0) -> pd.DataFrame:
+    """Synteettinen treenidata train_ranker-testejä varten."""
+    rng = np.random.default_rng(rng_seed)
+    rows = []
+    for i in range(n_races):
+        race_id = f"race_{i:03d}"
+        winner = rng.integers(0, horses_per_race)
+        for j in range(horses_per_race):
+            rows.append({
+                "race_id": race_id,
+                "horse_id": f"h_{i}_{j}",
+                "finish_position": 1 if j == winner else 2,
+                "dummy_feature": float(rng.standard_normal()),
+            })
+    return pd.DataFrame(rows)
+
+
+class TestTrainRankerRandomState:
+    """Testit train_ranker():n random_state-parametrille."""
+
+    def test_accepts_random_state_without_error(self):
+        """train_ranker hyväksyy random_state=42 kaatumatta."""
+        df = _make_train_df()
+        model = train_ranker(df, feature_cols=["dummy_feature"], random_state=42)
+        assert model is not None
+
+    def test_none_random_state_is_default(self):
+        """random_state=None (oletus) ei kaada funktiota."""
+        df = _make_train_df()
+        model = train_ranker(df, feature_cols=["dummy_feature"], random_state=None)
+        assert model is not None
+
+    def test_same_random_state_gives_same_predictions(self):
+        """Sama random_state -> sama feature importance (deterministinen ajo)."""
+        df = _make_train_df(n_races=40)
+        m1 = train_ranker(df, feature_cols=["dummy_feature"], random_state=42)
+        m2 = train_ranker(df, feature_cols=["dummy_feature"], random_state=42)
+        fi1 = m1.feature_importance(importance_type="gain")
+        fi2 = m2.feature_importance(importance_type="gain")
+        np.testing.assert_array_equal(fi1, fi2,
+            err_msg="Sama random_state tuotti eri feature importance -arvot"
         )
