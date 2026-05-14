@@ -1,6 +1,6 @@
 # Ravit Edge — Roadmap
 
-## Nykytila (11.5.2026 — Vaihe 2 valmis + korjaukset, Vaihe 2.5 käynnissä)
+## Nykytila (11.5.2026 — Vaihe 2 valmis + korjaukset, Vaihe 2.5 valmis)
 
 Datankeräys on pyörinyt tuotannossa 4.5.2026 alkaen. Feature engineering
 -pipeline on valmis ja validoitu oikealla datalla. Mallin treenaukselle ei
@@ -83,17 +83,17 @@ Ks. tarkemmin: `docs/TASK_PLAN_FIXES.md` ja `TASK_PROGRESS.md`.
 
 ---
 
-## Vaihe 2.5: Ratarakenne-piirteet 🟡 KÄYNNISSÄ
+## Vaihe 2.5: Ratarakenne-piirteet ✅ VALMIS
 
 Track-piirteet antavat mallin oppia ratafysiikan vaikutukset automaattisesti.
 
 | Tehtävä | Status | Kuvaus |
 |---|---|---|
 | A: `Track`-luokka schemaan | ✅ VALMIS | 19 saraketta, `tracks`-taulu |
-| B: Travronden-scraper | ⬜ | `src/data/scrapers/travronden_tracks.py` |
-| C: Validointi (Wikipedia) | ⬜ | 3–5 rataa vertaillaan |
-| D: `track_structure_features()` | ⬜ | Lisätään `build_features.py` + `FEATURE_COLS` |
-| E: Smoke test | ⬜ | `track_length_total notna% >= 95` |
+| B: Travronden-scraper | ✅ VALMIS| `src/data/scrapers/travronden_tracks.py` |
+| C: Validointi (Wikipedia) | ✅ VALMIS| 3–5 rataa vertaillaan |
+| D: `track_structure_features()` | ✅ VALMIS| Lisätään `build_features.py` + `FEATURE_COLS` |
+| E: Smoke test | ✅ VALMIS | `track_length_total notna% >= 95` |
 
 Ks. tarkemmin: `docs/TASK_TRACK_FEATURES.md` ja `TASK_PROGRESS.md` (VAIHE 2.5).
 
@@ -143,6 +143,14 @@ predictions = predict_win_probabilities(model, test)
 - `track_horse_win_rate` on 97.5 % NaN (vain 14 pv dataa samalta radalta)
 - `driver_win_rate_365d` on 35 % NaN (ATG:n valmis aggregaatti on parempi tässä vaiheessa)
 - Malli paranee automaattisesti kun keräys jatkuu
+
+**⏰ Aikataulutetut muistutukset (lisätty auditoijan suosituksesta 14.5.2026):**
+
+- **rolling_walk_forward ajetaan ~2026-06-08** — vaatii vähintään 42 vrk dataa
+  (28 vrk treeni + 14 vrk testi-ikkuna). Stop/go-päätös vasta 8 viikon
+  yhteistuloksesta (C2-vaatimus).
+- **28+56 train_window_days -ablation ajetaan ~2026-07-01** — vaatii 56 vrk dataa
+  ennen kuin 56-vrk treenijoukkoa voidaan edes muodostaa.
 
 ---
 

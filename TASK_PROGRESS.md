@@ -1767,6 +1767,217 @@ Alemmat todennäköisyysalueet (< 20 %) hyvin kalibroituneita ja kattavat suurim
 3. `rolling_walk_forward` palataan kun dataa on > 42 vrk (arviolta ~3 viikon kuluttua, n. 3.6.2026). Pitääkö asiaa kirjata jonnekin muistiin?
 4. Pitääkö kahdella `train_window_days`-arvolla (28 + 56) ajaa vasta kun 56 vrk dataa on saatavilla?
 
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 14.5.2026 (Opus 4.7) — baseline on terve, malli oppii järkeviä asioita
+
+### Tarkistus
+
+**Koodimuutos (bugifix `race_date`-kentän duplikointi):**
+- Tarkistettu [backtest.py:70–79](src/models/backtest.py:70) ja [backtest.py:186–195](src/models/backtest.py:186) — molemmissa funktioissa `if "race_date" in runners_with_features.columns: df = .copy() else: df = .merge(...)`. Defensiivinen, taaksepäin-yhteensopiva.
+- 254/254 testiä passing — ei regressiota.
+
+**Lukujen sanity-tarkistus (matemaattinen vertailu uniform-baselineen):**
+
+| Mittari | Raportoitu | Uniform-baseline | Voittosignaali |
+|---|---|---|---|
+| NLL (testijoukko) | **304.76** (iso) | 413.4 | ✅ -108.6 (malli selvästi parempi) |
+| Brier score | **0.0797** | 0.0843 | ✅ -0.0046 (pieni mutta positiivinen) |
+
+Tämä on **realistinen tulos 17 vrk:n datalle**. Malli on selvästi NLL-mielessä parempi kuin satunnaisarvio (108 yksikköä alle uniform). Brier-paraneminen on pieni mutta positiivinen — odotettu pienellä otoksella jossa mallin todennäköisyydet eivät vielä eroa dramaattisesti markkinasta.
+
+### Vastaukset auki oleviin kysymyksiisi
+
+**Q1: track_home_stretch_m #20 — onko ongelma?**
+
+🟡 **Selitettävissä, ei syytä huoleen vielä — mutta tee ablation-koe.**
+
+Selitys: **multicollinearity**, kuten varoitin Vaihe 3.3:ssa. `form_market_avg_5` (#1, gain 965) dominoi — ja markkina-arvio sisältää implisiittisesti **kaiken** rata-informaation (markkina tietää että lyhyt loppusuora suosii eturadalle, joten se hinnoittelee sen jo kertoimeen). Kun gain-mittari jakaa "tärkeyden" korreloivien piirteiden kesken, rata-piirteet saavat pienen siivun.
+
+Toinen tekijä: 17 vrk × 25 rataa = ~30 lähtöä per rata. Malli ei näe **rata × lähtömuoto × matka** -interaktioita riittävän monta kertaa. Rata-piirre erottuu paremmin kun dataa on 6+ kk.
+
+**Suositukset:**
+
+1. **Aja ablation-koe** — kouluta malli ilman `form_market_avg_5`:tä ja katso missä `track_home_stretch_m` on sitten. Jos se nousee top-10:een, multicollinearity vahvistuu eikä rata-piirre ole huono.
+2. **Vaihtoehtoisesti SHAP-analyysi** ([Vaihe 3.3](TASK_PROGRESS.md#vaihe-33--feature-importance--multicollinearity-tulkinta)):
+   ```python
+   import shap
+   explainer = shap.TreeExplainer(model)
+   shap_vals = explainer.shap_values(X_test)
+   shap.summary_plot(shap_vals, X_test)
+   ```
+   SHAP jakaa vaikutuksen oikeudenmukaisesti korreloivien piirteiden kesken — antaa puhtaamman kuvan kausaalivaikutuksesta.
+3. **Älä poista rata-piirteitä.** Niiden vaikutus selkeytyy datan kasvaessa.
+
+**Q2: horse_age puuttuu — miten korjata?**
+
+✅ **Yksinkertaisin korjaus: LEFT JOIN treenausnotebookissa.**
+
+Älä muuta scheduler-keräystä (`runners`-taulu pysyy sellaisena) — sen sijaan lataa treenausnotebookissa:
+
+```python
+runners = pd.read_sql("""
+    SELECT r.*, ra.race_date, h.birth_year
+    FROM runners r
+    JOIN races ra ON r.race_id = ra.race_id
+    LEFT JOIN horses h ON r.horse_id = h.horse_id
+""", con)
+```
+
+`derived_features()` osaa laskea `horse_age = race_date.year - birth_year` automaattisesti kun `birth_year` on saatavilla. Yksi rivi notebookiin, ei core-koodimuutosta.
+
+Tämän jälkeen `horse_age` on FEATURE_COLS:issa eikä `_resolve_cols` varoita. Sen vaikutus mallin laatuun on todennäköisesti pieni (ravissa ikä on usein välillisesti coding'attu muihin piirteisiin), mutta hyvä saada se mukaan.
+
+**Q3: rolling_walk_forward odottaa lisädataa — kirjattava muistiin?**
+
+✅ **Kyllä.** Lisää ROADMAP.md:hen Vaihe 3:n alle muistutus:
+
+```markdown
+**rolling_walk_forward ajetaan kun datamäärä riittää:**
+- Vaadittu: vähintään 42 vrk dataa (28 vrk treeni + 14 vrk testi-ikkuna)
+- Arvioitu ajo: ~2026-06-08 kun keräys on jatkunut 6 viikkoa
+- 8 viikon yhteistulos vaaditaan ennen stop/go-päätöstä (C2-vaatimus)
+```
+
+Voit lisätä myös TODO scheduler-jobin kommentteihin, mutta ROADMAP riittää.
+
+**Q4: 28+56 ablation — odota vai aja nyt?**
+
+✅ **Odota kunnes 56 vrk dataa saatavilla.** Tällä hetkellä 56-vrk treeniä ei voi ajaa lainkaan koska data ei riitä. Lisää muistio ROADMAP:iin.
+
+### Kokonaisarvio mallista
+
+| Kohta | Tulos | Tulkinta |
+|---|---|---|
+| Brier-paraneminen vs. uniform | -0.0046 | Pieni mutta positiivinen — malli oppii |
+| NLL vs. uniform | -108 (24 % paraneminen) | Selkeä signaali, ei sattumaa |
+| Kalibrointi 0–16 % alueella | erinomainen | Tärkeää: tämä on alue jossa value-pelit löytyvät |
+| Kalibrointi 24–48 % alueella | n=2–6, ei luotettava | Odotettu pienellä datalla |
+| Feature mix | markkina-arvio dominoi | Klassinen — tarvitaan ablation |
+| B2 segmentoidut piirteet | top-3 ja top-8 | ✅ Investointi kannatti |
+| Sire-piirteet | top-4 ja top-12 | ✅ Sukutaulu pärjää |
+| Rata-piirteet | #20+ | 🟡 Multicollinearity → ablation tarvitaan |
+
+**Tämä on hyvä baseline alkuvaiheen datalle.** Kuten ROADMAP toteaa:
+> "356 lähtöä on vähän — prototyyppi, ei tuotantomalli"
+
+Nyt on 455 lähtöä = pieni edistys baseline-vaiheesta. Lukemat ovat odotettavissa olevia "malli on oppinut jotain, mutta data on liian vähän johtopäätöksiä varten" -tasoiset.
+
+### Suositeltu jatko
+
+1. **Aja ablation-koe** ilman `form_market_avg_5` (~30 min, yksi rivi notebookissa pois) → raportoi `track_home_stretch_m`:n uusi sijainti
+2. **Lisää `birth_year` LEFT JOIN** → uudelleentreenaus, raportoi vaikutus
+3. **Käynnistä C1 (drift-monitorointi)** — voi tehdä jo nykyisellä datalla
+4. **Päivitä ROADMAP** Q3 + Q4 muistutuksilla
+5. **Älä tee stop/go-päätöstä** — alle 8 viikon dataa, kausivaihtelu ei näy
+
+Vaihe 3:n baseline-treenaus on **hyväksytty**. Voit edetä Vaiheeseen C (C1 drift-monitorointi) tai jatkaa Vaiheen 3 syventämistä (ablation, horse_age, isotonic spike-binien tutkinta).
+
+**Hyvää työtä koodarille:**
+- Rehellinen raportti (et piilottanut #20 paikkaa rata-piirteelle)
+- Kalibrointitaulu avoimesti raportoitu
+- Bugifix `race_date`-kollissiolle ennen treenauksen aloitusta
+- Hyvät kysymykset tarkennuksia varten
+
+---
+
+## Vaihe 3 — Ablation-testi · Koodariraportti (14.5.2026)
+
+**Status:** ✅ valmis
+
+### Tavoite
+
+Auditoijan suositus: kouluta malli ilman `form_market_avg_5`-piirrettä ja tarkista nouseeko `track_home_stretch_m` top-10:een. Jos nousee → multicollinearity vahvistuu. Jos ei nouse → rata-piirre on itsenäisesti heikko tai data liian vähän.
+
+### Bugikorjaus
+
+Edellinen ablation-yritys kaatui `LightGBMError: feature count mismatch` — `predict_win_probabilities` käytti oletuksena FEATURE_COLS (45 piirrettä) mutta ablation-malli oli treenattu 44 piirteellä. Korjattu: ablation-malli arvioidaan `predict_win_probabilities(model_abl, test_df, feature_cols=ablation_cols)`.
+
+### Tulokset (Hetzner, 14.5.2026)
+
+| | Baseline | Ablation (ilman form_market_avg_5) | Delta |
+|---|---|---|---|
+| Brier | 0.0704 | 0.0707 | +0.0003 |
+| NLL | 324.82 | 327.43 | +2.61 |
+| track_home_stretch_m rank | **#19** / 41 | **#20** / 40 | +1 (ei noussut) |
+
+**Split:** treeni < 2026-05-08 (2 966 runneria), testi ≥ 2026-05-08 (1 872 runneria)
+
+### Top-10 piirteet
+
+**Baseline:**
+`form_market_avg_5`, `atg_lifetime_top3_rate`, `atg_lifetime_starts`, `atg_lifetime_win_rate`, `race_max_earnings`, `form_avg_km_time_5`, `atg_best_km_for_this_setup`, `form_days_since_last`, `form_best_km_time_5`, `driver_top3_rate_365d`
+
+**Ablation (ilman form_market_avg_5):**
+`atg_lifetime_top3_rate`, `form_avg_finish_5`, `atg_lifetime_starts`, `race_max_earnings`, `form_days_since_last`, `form_best_km_time_5`, `form_avg_finish_5_same_dist`, `form_avg_finish_5_same_method`, `atg_lifetime_win_rate`, `form_avg_km_time_5`
+
+### Johtopäätökset
+
+1. **Multicollinearity-hypoteesi ei vahvistunut:** `track_home_stretch_m` ei noussut (#19 → #20, lähes sama). `form_market_avg_5`:n poistaminen ei vapauttanut tilaa rata-piirteelle → piirteet eivät kilpaile keskenään gain-mittauksessa.
+
+2. **form_market_avg_5 on aidosti hyödyllinen:** Ablation-malli on hieman heikompi (Brier +0.0003, NLL +2.61). Poistaminen heikentää mallia — markkina-arvio sisältää aitoa signaalia eikä pelkästään "varasta" muilta piirteiltä.
+
+3. **track_home_stretch_m on itsenäisesti marginaalinen tällä datamäärällä:** Rank #19-20 pysyy riippumatta markkina-arviosta. 17 vrk dataa on liian vähän rate-spesifisille interaktioille (n. 30 lähtöä per rata). Odotetaan lisää dataa.
+
+4. **Rata-piirteet pidetään mukana:** auditoijan alkuperäinen suositus pätee edelleen.
+
+### Auki olevat kysymykset auditoijalle
+
+1. Tuliko odotettu tulos? Multicollinearity ei vahvistunut — onko johtopäätös `track_home_stretch_m` on "itsenäisesti marginaalinen" oikea?
+2. Seuraava askel: `birth_year` LEFT JOIN ja uudelleentreenaus. Odotatko merkittävää parannusta Brier-scoressa?
+
+**Auditoijan tarkistus:** _(odottaa)_
+
+---
+
+## Vaihe 3 — birth_year JOIN · Koodariraportti (14.5.2026)
+
+**Status:** ✅ valmis
+
+### Muutos
+
+Auditoijan suositus Q2: lisää `h.birth_year` SQL-kyselyyn `LEFT JOIN horses h ON r.horse_id = h.horse_id`. `derived_features()` laskee `horse_age = race_date.year - birth_year` automaattisesti kun sarake on saatavilla.
+
+```python
+runners = pd.read_sql("""
+    SELECT r.*, ra.race_date, h.birth_year
+    FROM runners r
+    JOIN races ra ON r.race_id = ra.race_id
+    LEFT JOIN horses h ON r.horse_id = h.horse_id
+""", con)
+```
+
+Ei core-koodimuutosta — vain SQL-kysely treenausskriptissä.
+
+### Tulokset (Hetzner, 14.5.2026)
+
+| | Arvo |
+|---|---|
+| birth_year notna | **100.0 %** |
+| horse_age notna | **100.0 %** |
+| horse_age rank | **#23 / 42** |
+| track_home_stretch_m rank | **#17 / 42** (nousi #19:stä!) |
+
+| | Brier | NLL |
+|---|---|---|
+| Ilman horse_age | 0.0745 | 348.96 |
+| Horse_age mukana | 0.0750 | 348.50 |
+| Delta | +0.0006 | −0.46 |
+
+### Johtopäätökset
+
+1. **birth_year JOIN toimii:** `horse_age` saatiin 100 % runnereille. Ei NaN-varoituksia tältä piirteeltä.
+
+2. **Vaikutus malliin on marginaalinen tällä datamäärällä:** Brier +0.0006 (hieman heikompi), NLL −0.46 (hieman parempi) — käytännössä nolla. Malli jo oppii hevosen iän muiden piirteiden kautta (`atg_lifetime_starts` kertoo kokemusmäärän joka korreloi vahvasti iän kanssa).
+
+3. **track_home_stretch_m nousi #17:ään** (oli #19–20 aiemmissa ajoissa) — tämä voi johtua LightGBM-satunnaisuudesta tai siitä että horse_age absorboi hieman muiden piirteiden "roolia".
+
+4. **Puuttuvat sire/dam_sire piirteet:** 4 piirrettä vielä puuttuu (`sire_lifetime_starts`, `sire_lifetime_win_rate`, `dam_sire_lifetime_starts`, `dam_sire_lifetime_win_rate`) — nämä eivät liity birth_year-JOIN:iin vaan Travsport-datan keräyksen kattavuuteen.
+
+### Auki olevat kysymykset auditoijalle
+
+1. Marginaalinen vaikutus oli odotettavissa — OK?
+2. track_home_stretch_m on nyt #17/42. Onko top-15 (alkuperäinen kriteeri) saavutettavissa ennen kuin dataa on enemmän?
+3. Puuttuvat 4 sire/dam_sire-piirrettä — näiden backfill on erillinen tehtävä vai voidaan ignoorata?
+
 **Auditoijan tarkistus:** _(odottaa)_
 
 ---
