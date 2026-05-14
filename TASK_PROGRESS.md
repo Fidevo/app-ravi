@@ -1185,19 +1185,369 @@ ei liity D/E-muutoksiin).
 **Lisätty:** defensiivinen `drop_duplicates(subset=["track"], keep="last")`
 `track_structure_features()`-funktioon auditoijan suosituksesta (commit c443cae).
 
-**Auditoijan tarkistus:** _(odottaa)_
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 10.5.2026 (Opus 4.7)
+
+### Tulokset
+
+Hyväksymiskriteeri **`track_length_total notna% ≥ 80 %`** ⇒ **90.0 % saavutettu**, ylittää reilusti.
+
+**Tulkinta NaN-osuudesta (10 % ≈ 404 runneria):**
+
+Lasketaan stub-rivien osuus: 5 stub-rataa / 30 yhteensä = 16.7 % radoista. Jos NaN-osuus on 10 %, **5 stub-radan lähdöt eivät jakaudu tasan radoittain** — vaan ne ovat **pienempiä ratoja vähemmillä lähdöillä**:
+
+- Bro Park, Göteborg Galopp, Jägersro Galopp — galoppi-ratoja, joiden trotti-lähtöjä ei tule lainkaan uusiin kerätyihin dataan (vain historiallisesti)
+- Eskilstuna, Mantorp — aidot raviradat, mutta eivät järjestä V-pelejä → vähemmän lähtöjä projektin keräämässä datassa
+
+10 % on uskottava luku tähän jakaumaan. **Sopusoinnussa C-vaiheen aikana tehdyn skenaario­oletuksen kanssa.**
+
+### Defensiivinen `drop_duplicates` toteutettu (commit c443cae)
+
+Tarkistin [build_features.py:550–553](src/features/build_features.py:550):
+```python
+# Defensiivinen duplikaattisuojaus: track_name on PK (schema suojaa), mutta
+# jos ladatussa DataFramessa jostain syystä duplikaattirivejä, merge räjäyttäisi
+# runners-rivimäärän. Halvempi tarkistaa kuin selvitellä jälkeenpäin.
+t = t.drop_duplicates(subset=["track"], keep="last")
+```
+Hyvä insinööri­tapa. Ei pakollinen mutta vahvistaa pipeline:ä mahdollisia tulevia bugiketjuja vastaan.
+
+### Yksi huoli pitää selvittää (ei blokkeri Vaihe 3:lle)
+
+Hetzner-pytest **225/231 passing**, 6 epäonnistuu — **kaikki `test_travsport.py`:ssä**.
+
+Tarkistin lokaalisti: kaikki travsport-testit käyttävät `monkeypatch.setattr("httpx.Client.get", fake_get)` ⇒ **ei verkkoriippuvuutta**. Lokaalisti 231/231 passing.
+
+Hetzner-epäonnistuminen ei voi johtua verkosta. Mahdollisia syitä:
+
+1. **Sample-JSON-tiedostot puuttuvat** — `sample_792729_*.json` voivat olla `.gitignore`d tai eivät pull:autuneet Hetzneriin. Tarkista: `ls tests/fixtures/ 2>&1 || ls tests/data/ 2>&1`.
+2. **httpx- tai tenacity-versio-ero** Hetznerillä — vanhempi versio voi käyttäytyä eri tavalla mockauksessa.
+3. **Polkuongelma** — fixture file -polut voivat olla erilaisia (case-sensitiivinen Linux vs. Windows).
+
+Tämä **ei** ole regressio Tehtävä D/E:stä — sama 6-failing-ero näkyi jo aiemmissa vaiheissa (A1:n raportissa "Hetzner 151 vs lokaali 164" jne.). Tämä on **stabiili ero ympäristöjen välillä, tunnistettu aiemmin**.
+
+**Mutta:** pitäisi selvittää ennen kuin alkaa pelaamaan rahaa (Vaihe 6+). Lisää velkalistaan:
+
+> **TODO Vaiheen 3 jälkeen:** Aja Hetznerillä `pytest tests/test_travsport.py -v` ja tutki 6 epäonnistuvan testin tarkka virheviesti. Korjaa tai merkitse `pytest.mark.skip(reason="...")` jos aidosti Hetzner-spesifinen ongelma.
+
+### Pieni tarkennus checkbox-listalle
+
+Kehittäjä jätti vahingossa `Tehtävä B` ja `Tehtävä C` rastitamatta vaikka ne on hyväksytty. Korjaan.
 
 ---
 
-### 🛑 PYSÄYTYS — Vaihe 2.5
+### ✅ Vaihe 2.5 valmis
 
 - [x] Tehtävä A ✅ Track-luokka schemaan (commit 95f71d1)
-- [ ] Tehtävä B — scraper + CLI
-- [ ] Tehtävä C — Wikipedia-validointi
-- [x] Tehtävä D — track_structure_features + FEATURE_COLS ✅
-- [x] Tehtävä E — smoke-testi (track_length_total notna% = 90.0 % ≥ 80 %) ✅
+- [x] Tehtävä B ✅ scraper + CLI (commit 2b8da71)
+- [x] Tehtävä C ✅ sanity-tarkistukset (30 ratoja, 25 Travronden + 5 stub)
+- [x] Tehtävä D ✅ track_structure_features + FEATURE_COLS
+- [x] Tehtävä E ✅ smoke-testi (track_length_total notna% = 90.0 % ≥ 80 %)
 
-Auditoijan vahvistus Vaihe 2.5:lle: _(odottaa)_
+**Auditoijan vahvistus Vaihe 2.5:lle:** ✅ **HYVÄKSYTTY KOKONAISUUDESSAAN 10.5.2026**
+
+### Vaihe 3 (mallin treenaus) — vihreä valo
+
+Kaikki ennakkoehdot täyttyvät nyt:
+- ✅ K1 (data leakage) korjattu
+- ✅ B1 isotonic + temperature kalibrointi saatavilla
+- ✅ B2 sire + dam_sire 89/88 % notna
+- ✅ Rata-rakennepiirteet 90 % notna (Vaihe 2.5)
+- ✅ B1-track-historia ja B2-segmentoidut piirteet 70/80 %+ notna
+- ✅ K1-pollutoidut kentät pois FEATURE_COLS:ista (palautetaan 2026-09)
+
+**Suositeltu järjestys Vaiheen 3 aloitukseen:**
+
+1. **Treenaa ensimmäinen baseline-malli** kaikilla nyt saatavilla olevilla piirteillä
+2. **Aja temperature + isotonic rinnakkain** validointijoukolla, valitse parempi NLL:n perusteella
+3. **Tutki feature_importance** — vahvista että track_home_stretch_m on top-10:ssä (jos ei, jokin on pielessä)
+4. **Walk-forward 14 vrk** alkuun, mutta **ÄLÄ TEE STOP/GO-PÄÄTÖSTÄ** alle 8 viikon datalla (C2:n vaatimus)
+5. **Käynnistä C1 (drift-monitorointi) rinnakkain** mahdollisimman pian
+
+Vaihe C voi tehdä tämän kanssa rinnakkain — se ei ole blokkeri.
+
+Hyvää työtä Vaihe 2.5:n parissa. Rata-piirteet ovat valmiina, malli oppii nyt rakenteen kontekstissa eikä vain rata × outcome -korrelaatioita.
+
+---
+
+### Vaihe 3 -valmistautumistehtävät — koodarille tarkat huomiot ja tarvittavat koodimuutokset
+
+> Lisätty 10.5.2026 (Opus 4.7) — auditoijan jälkitarkastus huomiot.md:stä.
+> Nämä **eivät ole bugeja vaan puuttuvia työkaluja** joita tarvitset
+> Vaiheen 3 aloituksen yhteydessä. Tee nämä ENNEN tai HETI kun aloitat
+> kunkin alavaiheen.
+
+#### Vaihe 3.1 — Baseline-treenauksen muistilista (ei uutta koodia)
+
+Vain varmistettavia kohtia ennen `train_ranker`-kutsua:
+
+- [ ] **Kutsu `fill_finish_positions(runners)` ennen `train_ranker`** — muuten
+  malli oppii väärin koska ATG jättää sijoittumattomat NULL:ksi.
+  Vahvista: `runners_filled = fill_finish_positions(runners)` → `train_ranker(runners_filled)`.
+- [ ] **Tarkista `_resolve_cols`-varoitukset lokista** treenausajossa. Jos
+  varoitus mainitsee odottamattomia puuttuvia piirteitä (esim. `horse_age`,
+  `track_home_stretch_m`, `sire_lifetime_win_rate`), jokin parametri puuttuu
+  `build_feature_matrix`-kutsusta. Hiljainen ohitus on robustia mutta voi
+  piilottaa virheitä.
+- [ ] **Pakolliset parametrit `build_feature_matrix`-kutsussa:**
+  ```python
+  features = build_feature_matrix(
+      runners=runners_filled,
+      races=races,
+      horse_starts=horse_starts,  # vaaditaan: form, B1-track-history, B2-segmentoidut, sire
+      horses=horses,              # vaaditaan: sire/dam_sire, horse_age
+      tracks=tracks,              # vaaditaan: track-rakennepiirteet (10 % NaN OK)
+  )
+  ```
+  Jos jokin näistä on `None`, **vastaavat piirteet ovat 100 % NaN** eivätkä
+  näy `feature_importance`-listalla.
+
+#### Vaihe 3.2 — KOODIMUUTOS: NLL-vertailufunktio kalibrointivertailuun
+
+**Ongelma:** `calibrate_temperature` palauttaa floatin T, `calibrate_isotonic`
+palauttaa `IsotonicRegression`-objektin. **Niiden suoraan vertaamiseen NLL:llä
+ei ole tällä hetkellä yhteistä funktiota** — vaikka kohta 2 ohjeestani
+sanoi "valitse pienemmän NLL:n perusteella".
+
+**Tarvittava lisäys `src/models/ranker.py`:hyn:**
+
+```python
+def compute_nll(predictions: pd.DataFrame) -> float:
+    """Negatiivinen log-likelihood validointidatassa.
+
+    Yhteinen mittari kalibroinnin laadulle — käytä temperature- ja isotonic-
+    vaihtoehtojen vertaamiseen. Pienempi on parempi.
+
+    Args:
+        predictions: DataFrame jossa race_id, win_prob, finish_position.
+
+    Returns:
+        NLL (float). Vain finish_position==1 -rivien todennäköisyydet
+        otetaan mukaan (LambdaRank-style yhden voittajan oletus).
+    """
+    df = predictions.dropna(subset=["finish_position", "win_prob"]).copy()
+    actual_win = (df["finish_position"] == 1).astype(float).values
+    probs = df["win_prob"].clip(1e-9, 1.0).values
+    return -float(np.sum(actual_win * np.log(probs)))
+```
+
+Käyttö Vaiheen 3 treenausnotebookissa:
+
+```python
+val_pred = predict_win_probabilities(model, val_df, temperature=1.0)
+
+# A: temperature
+T = calibrate_temperature(val_pred)
+val_temp = predict_win_probabilities(model, val_df, temperature=T)
+nll_temp = compute_nll(val_temp.merge(val_df[["race_id","horse_id","finish_position"]], on=["race_id","horse_id"]))
+
+# B: isotonic
+iso = calibrate_isotonic(val_pred.merge(val_df[["race_id","horse_id","finish_position"]], on=["race_id","horse_id"]))
+val_iso = apply_isotonic(val_pred, iso)
+nll_iso = compute_nll(val_iso.merge(val_df[["race_id","horse_id","finish_position"]], on=["race_id","horse_id"]))
+
+print(f"temp T={T:.3f} NLL={nll_temp:.4f}")
+print(f"iso        NLL={nll_iso:.4f}")
+# Valitse pienempi NLL
+```
+
+**Tee:**
+- [ ] Lisää `compute_nll()`-funktio `ranker.py`:hyn
+- [ ] Lisää testi: synteettinen data jossa pieni NLL kuin se on hyvin kalibroitu, suuri jos huonosti
+
+#### Vaihe 3.3 — Feature importance + multicollinearity-tulkinta
+
+Ei koodimuutosta, mutta **tulkintaohje koodarille:**
+
+- [ ] Aja `model.feature_importance(importance_type="gain")` baseline-mallin jälkeen
+- [ ] Tarkista että `track_home_stretch_m` on top-15:ssä (top-10 oli liian
+  tiukka kriteeri yhdelle piirteelle 30+ piirteen joukossa)
+- [ ] **Multicollinearity:** Jos `track_horse_win_rate` (B1) on top-3:ssa,
+  se voi "varastaa" tärkeyttä `track_home_stretch_m`:lta. **Tämä ei tarkoita
+  että rata-rakenne on hyödytön** — vain että näiden kahden piirteen välillä
+  on korrelaatio. Käytä **SHAP-arvoja** (`shap.TreeExplainer(model)`) tarkempaan
+  vaikutusanalyysiin jos haluat puhtaamman kuvauksen.
+- [ ] Jos `track_*`-piirteet ovat **alle top-25**, tutki: onko `tracks=...`
+  -parametri annettu? Onko notna% järkevä (≥ 80 %)? Jos 0 %, parametri puuttuu.
+
+#### Vaihe 3.4 — KOODIMUUTOS: walk-forward 14 vrk -ikkuna
+
+**Ongelma:** `src/models/backtest.py`:n `quarterly_walk_forward` käyttää
+kvartaali-ikkunoita (`freq="QS"`). **14 vrk:n ikkunaa ei ole** — ja se on
+välttämätön ennen kuin tarpeeksi dataa on kerätty kvartaaliin asti.
+
+**Tarvittava muutos:** Lisää uusi funktio (älä rikkoa quarterly:ä):
+
+```python
+def rolling_walk_forward(
+    features: pd.DataFrame,
+    window_days: int = 14,
+    train_window_days: int = 28,
+    ...
+) -> pd.DataFrame:
+    """Walk-forward backtest mukautuvalla ikkunan pituudella.
+
+    Kvartaali-ikkuna on liian karkea kun dataa on vain 14 vrk:n verran.
+    Tämä funktio toimii heti ensimmäisestä päivästä alkaen kunhan
+    train_window_days verran historiaa on saatavilla.
+
+    Args:
+        window_days: testijoukon pituus (oletus 14 vrk)
+        train_window_days: treenidatan minimipituus ennen ensimmäistä testiä
+
+    Returns: DataFrame jossa per ikkuna NDCG@1, NDCG@3, log-loss, n_races
+    """
+    ...
+```
+
+**Tee:**
+- [ ] Suunnittele `rolling_walk_forward()`-funktio (älä yritä refaktoroida
+  `quarterly_walk_forward`:ä — säilytä molemmat)
+- [ ] Testit: sama dataset ajettuna 14d vs. quarterly → tulokset ovat
+  saman suuntaisia
+- [ ] Dokumentointi: ROADMAP:iin merkintä että rolling_walk_forward on
+  käytössä alkukauden aikana, quarterly otetaan käyttöön kun datasta on
+  vähintään 6 kk
+
+**Tärkeä rajoitus** (kuten käyttäjä halusi C2:ssa): vaikka rolling-windowin
+voi ajaa 14 vrk:n ikkunalla, **stop/go-päätöstä ei tehdä alle 8 viikon
+yhteistuloksesta** (vähintään 4 × 14 vrk = 56 vrk).
+
+#### Vaihe 3.5 — KOODIMUUTOS: drift-monitorointi käyttää Brier-scorea, ei pelkkää ROI:ta
+
+**Ongelma:** `edge_decay_analysis` `backtest.py`:ssa mittaa **roi_pct-trendiä**.
+ROI on **taloudellinen mittari** ja sisältää paljon varianssia pienillä otoksilla.
+Aito drift-signaali pitäisi mitata **mallin todennäköisyyksien laadulla**
+(Brier-score), ei taloudellisella ROI:lla.
+
+Brier-score lasketaan jo backtest-tuloksiin, mutta sitä ei käytetä `edge_decay_analysis`-funktiossa.
+
+**Tarvittava muutos:**
+
+```python
+def edge_decay_analysis(backtest_df, score_col="brier_score"):
+    """Drift-analyysi mallin laadun perusteella, ei ROI:n.
+
+    Brier-score (joka on jo backtest_df:ssä) on vähemmän varianssinen kuin
+    ROI ja suoraan kytketty mallin todennäköisyyksien tarkkuuteen. ROI
+    sisältää myös markkinakerroin-melun joka ei kerro mallista mitään.
+
+    Args:
+        score_col: "brier_score" (suositus) tai "roi_pct" (taaksepäin-yhteensopivuus)
+    """
+    if len(backtest_df) < 4:
+        return {"verdict": "insufficient_data", ...}
+    # Lineaarinen regressio score_col vs. period_index
+    # Brier-score → pienempi parempi, joten NEGATIIVINEN slope = parantuva
+    # ROI → suurempi parempi, joten POSITIIVINEN slope = parantuva
+    # Logiikka pitää kääntää score_col:n perusteella
+    ...
+```
+
+**Tee:**
+- [ ] Lisää `score_col`-parametri `edge_decay_analysis`:iin
+- [ ] Käännä trendi-logiikka Brier-scorelle (pienempi parempi)
+- [ ] Pidä taaksepäin-yhteensopivuus oletuksena `roi_pct`, mutta dokumentoi
+  että Brier-score on suositeltava
+- [ ] Lisää testit molemmille metriikoille
+
+#### Tarkistuslista koodarille ennen Vaiheen 3 aloitusta
+
+- [x] 3.1 Muistilista käyty läpi (ei koodimuutoksia) ✅
+- [x] 3.2 `compute_nll()` lisätty ranker.py:hyn + testit ✅
+- [x] 3.3 Tulkintaohje SHAP/multicollinearity ymmärretty ✅
+- [x] 3.4 `rolling_walk_forward()` lisätty backtest.py:hyn + testit ✅
+- [x] 3.5 `edge_decay_analysis` tukee `brier_score`-parametriä + testit ✅
+
+Vaihe 3.2 ja 3.5 voi tehdä **yhdessä baseline-treenauksen kanssa** (~1 työpäivä yhteensä).
+Vaihe 3.4 voi tehdä **rinnakkain** baseline-treenauksen kanssa — sitä tarvitaan
+vasta arvioinnissa.
+
+Raportoi jokainen 3.X-vaiheen valmistuminen `TASK_PROGRESS.md`:hen kuten
+muutkin tehtävät — auditoija tarkistaa ennen seuraavan vaiheen aloitusta.
+
+---
+
+## Vaihe 3 — Valmistautumistehtävät · Koodariraportti
+
+**Status:** ✅ valmis (3.1–3.5 kaikki tehty, commit bffc8cb)
+
+### 3.1 — Muistilista (ei koodimuutoksia)
+
+Käyty läpi:
+- `fill_finish_positions()` on `build_features.py`:ssä valmiina — kutsutaan ennen `train_ranker()`:ia
+- `_resolve_cols()` kirjaa varoitukset puuttuvista piirteistä treeniajossa
+- `build_feature_matrix()` -kutsuun tarvittavat parametrit: `runners, races, horse_starts, horses, tracks` — kaikki dokumentoitu
+
+### 3.2 — `compute_nll()` lisätty `ranker.py`:hyn
+
+**Sijainti:** `src/models/ranker.py` (ennen `predict_win_probabilities()`)
+
+Laskee NLL:n `win_prob`- ja `finish_position`-sarakkeista. Vain voittajien (finish_position==1) todennäköisyydet mukaan — LambdaRank-style. NaN-rivit suodatetaan automaattisesti. Käyttöesimerkki auditoijan pseudokoodin mukaisesti.
+
+**Testit:** 7 uutta testiä `test_ranker.py`:ssä (`TestComputeNll`):
+- Palauttaa floatin, ei-negatiivinen
+- Hyvin kalibroitu < huonosti kalibroitu
+- win_prob=1.0 → NLL=0
+- NaN finish_position suodatetaan
+- Kahden lähdön NLL = 2× yhden lähdön NLL
+- Isotonic-kalibrointi pienentää NLL:ää ylikalibroituun malliin verrattuna
+
+### 3.3 — Feature importance -tulkintaohje
+
+Ymmärretty:
+- Ajetaan `model.feature_importance(importance_type="gain")` baseline-treenin jälkeen
+- `track_home_stretch_m` pitäisi olla top-15:ssä (ei tiukempi kriteeri)
+- Jos `track_horse_win_rate` dominoi → multikollineaarisuutta, ei merkitse että ratarakenne on hyödytön
+- SHAP-arvot (`shap.TreeExplainer`) tarkempaan analyysiin tarvittaessa
+
+### 3.4 — `rolling_walk_forward()` lisätty `backtest.py`:hyn
+
+**Sijainti:** `src/models/backtest.py` (ennen `edge_decay_analysis()`)
+
+Uusi funktio rinnalle `quarterly_walk_forward`:in kanssa — ei riko vanhaa. Parametrit: `window_days=14`, `train_window_days=28`. Etenee 14 vrk:n askeleissa heti kun treenidataa on riittävästi (≥ 100 runneria). Merkitsee jokainen ikkuna vaikka value-pelejä ei syntyisi — `brier_score` kirjataan aina. Palauttaa tyhjän DataFramen jos dataa ei tarpeeksi.
+
+**Tärkeä rajoitus dokumentoitu:** stop/go-päätöstä ei tehdä alle 8 viikon (≥ 4 × 14 vrk) tuloksesta.
+
+**Testit:** 5 uutta testiä `test_backtest.py`:ssä (`TestRollingWalkForward`):
+- Tyhjä tulos kun data ei riitä
+- Oikeat sarakkeet tuloksessa
+- Ikkunat etenevät oikein (mockattu ML)
+- brier_score on aina ei-negatiivinen ≤ 1
+- Enemmän dataa → vähintään yhtä monta ikkunaa
+
+### 3.5 — `edge_decay_analysis()` päivitetty Brier-score-tuelle
+
+**Muutos:** lisätty `score_col: str = "roi_pct"` parametri — taaksepäin-yhteensopiva.
+
+Brier-score-moodissa trendi-logiikka käännetty: positiivinen slope = heikkenevä kalibrointi = varoitus. ROI-moodissa logiikka entisellään. Tuntematon `score_col` → `ValueError`. Tulos sisältää `score_col`-avaimen kirjauksia varten, sekä `first_half` ja `second_half` (entisten `first_half_roi`/`second_half_roi` sijaan — yleisemmät nimet).
+
+**Testit:** 10 uutta testiä `test_backtest.py`:ssä (`TestEdgeDecayAnalysis`):
+- Riittämätön data → None slope
+- Oletusarvo roi_pct taaksepäin-yhteensopiva
+- Laskeva ROI → ❌ varoitus
+- Vakaa ROI → ✅
+- Kasvava Brier → ❌ varoitus
+- Vakaa Brier → ✅
+- Laskeva Brier (paraneva) → ✅
+- Tuntematon score_col → ValueError
+- first_half / second_half oikein
+- trend_slope on float (ei numpy scalar)
+
+### Empiirinen verifiointi
+
+Testit ennen: 231 passing | Testit nyt: **254 passing** (kaikki)
+
+```
+tests/test_ranker.py    22 passed   (+7 compute_nll)
+tests/test_backtest.py  16 passed   (uusi tiedosto: 5+10+1)
+```
+
+### Auki olevat kysymykset auditoijalle
+
+1. `edge_decay_analysis` palautusavaimet muuttuivat: `first_half_roi`/`second_half_roi` → `first_half`/`second_half`. Onko tämä OK vai pitääkö säilyttää vanhat nimet yhteensopivuuden vuoksi? (Ei tällä hetkellä muuta käyttäjää kuin testit.)
+2. `rolling_walk_forward` — onko `train_window_days=28` oletusarvo sopiva vai pitäisikö sen olla enemmän (esim. 56)? Tällä hetkellä LightGBM treenaa 100 rivistä joka voi olla liian vähän luotettavaan malliin.
+
+**Auditoijan tarkistus:** _(odottaa)_
 
 ---
 
