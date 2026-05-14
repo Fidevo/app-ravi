@@ -1,7 +1,8 @@
-"""Testit sire_features()-funktiolle (B2 Vaihe B).
+"""Testit sire_features()-funktiolle (B2 Vaihe B + Vaihe 3.7 LOO-korjaus).
 
 Kattaa:
-  - Oikea win_rate-laskenta isäoriin jälkeläisille
+  - Oikea LOO (leave-one-out) win_rate-laskenta — hevosen omat startit
+    poistetaan sire-aggregaatista (Vaihe 3.7 -korjaus)
   - Pienen otoksen suodatus (< 30 starts → NaN)
   - Tuntematon sire → NaN
   - Rivisäilyvyys
@@ -85,10 +86,17 @@ def _make_starts(horse_id: str, n: int, wins: int, base_date: str = "2023") -> l
 class TestSireFeatures:
     """Testit sire_features()-funktiolle."""
 
-    def test_sire_win_rate_computed_correctly(self):
-        """sire_lifetime_win_rate lasketaan oikein."""
-        # 3 hevosta samalla isällä, yhteensä 90 starttia: 30+30+30
-        # Voittoja: 10 + 5 + 0 = 15 → win_rate = 15/90 ≈ 0.167
+    def test_sire_win_rate_computed_correctly_loo(self):
+        """sire_lifetime_win_rate lasketaan leave-one-out -periaatteella.
+
+        3 hevosta samalla isällä (Big Sire), yhteensä 90 starttia: 30+30+30.
+        Voittoja: 10 (h10) + 5 (h11) + 0 (h12) = 15 yhteensä.
+
+        Hevonen 10 on runner. LOO poistaa sen omat 30 starttia (10 voittoa):
+          LOO-starts  = 90 - 30 = 60
+          LOO-wins    = 15 - 10 = 5
+          LOO-win_rate = 5 / 60 ≈ 0.0833
+        """
         horses = _horses_df(
             {"horse_id": "10", "sire": "Big Sire", "dam_sire": "X"},
             {"horse_id": "11", "sire": "Big Sire", "dam_sire": "X"},
@@ -107,15 +115,22 @@ class TestSireFeatures:
 
         assert "sire_lifetime_win_rate" in result.columns
         assert "sire_lifetime_starts" in result.columns
-        assert result.iloc[0]["sire_lifetime_starts"] == 90
-        expected_wr = 15 / 90
+        # LOO: hevosen 10 omat 30 starttia vähennetty → 60 jäljellä
+        assert result.iloc[0]["sire_lifetime_starts"] == 60, (
+            f"LOO-starts pitäisi olla 60 (90-30), sain {result.iloc[0]['sire_lifetime_starts']}"
+        )
+        expected_wr = 5 / 60  # 5 voittoa jäljellä (15-10) / 60 starttia
         assert abs(result.iloc[0]["sire_lifetime_win_rate"] - expected_wr) < 0.005, (
             f"sire_lifetime_win_rate = {result.iloc[0]['sire_lifetime_win_rate']:.4f}, "
-            f"odotettiin {expected_wr:.4f}"
+            f"odotettiin LOO-arvoa {expected_wr:.4f}"
         )
 
     def test_small_sample_win_rate_is_nan(self):
-        """Alle 30 starttia → sire_lifetime_win_rate on NaN."""
+        """Alle 30 LOO-starttia → sire_lifetime_win_rate on NaN.
+
+        Hevonen 20 on ainoa sireen "Rare Sire" jälkeläinen. LOO poistaa sen
+        omat 5 starttia → LOO-starts=0 → alle _SIRE_MIN_STARTS → NaN.
+        """
         horses = _horses_df(
             {"horse_id": "20", "sire": "Rare Sire", "dam_sire": "X"},
         )
@@ -124,9 +139,12 @@ class TestSireFeatures:
 
         result = sire_features(runners, horses, hs)
 
-        assert result.iloc[0]["sire_lifetime_starts"] == 5
+        # LOO: ainoa jälkeläinen, kaikki omat startit poistetaan → 0
+        assert result.iloc[0]["sire_lifetime_starts"] == 0, (
+            "LOO ainoa jälkeläinen: oman kontribuution jälkeen 0 starttia jäljellä"
+        )
         assert pd.isna(result.iloc[0]["sire_lifetime_win_rate"]), (
-            "Pienellä otoksella (<30) win_rate pitää olla NaN"
+            "Pienellä LOO-otoksella (<30) win_rate pitää olla NaN"
         )
 
     def test_unknown_sire_gives_nan(self):
@@ -141,13 +159,20 @@ class TestSireFeatures:
         assert pd.isna(result.iloc[0]["sire_lifetime_win_rate"])
 
     def test_dam_sire_computed_separately(self):
-        """dam_sire_lifetime_win_rate lasketaan emänisältä, ei isältä."""
+        """dam_sire_lifetime_win_rate lasketaan emänisältä, ei isältä (LOO).
+
+        Hevoset 40 ja 41 jakavat saman siren ja dam_siren.
+        Runner on hevonen 40 (30 starttia, 5 voittoa).
+
+        LOO sire/dam_sire-rate hevoselle 40:
+          Kokonaistilasto: 60 starttia (40+41), 20 voittoa (5+15)
+          Hevonen 40:n omat: 30 starttia, 5 voittoa
+          LOO: 60-30=30 starttia, 20-5=15 voittoa → rate = 15/30 = 0.500
+        """
         horses = _horses_df(
             {"horse_id": "40", "sire": "Sire A", "dam_sire": "Dam Sire B"},
             {"horse_id": "41", "sire": "Sire A", "dam_sire": "Dam Sire B"},
         )
-        # Sire A: 60 starttia, 5 voittoa
-        # Dam Sire B: sama 60 starttia, 20 voittoa
         hs = pd.DataFrame(
             _make_starts("40", 30, 5) + _make_starts("41", 30, 15)
         )
@@ -158,10 +183,14 @@ class TestSireFeatures:
         sire_wr = result.iloc[0]["sire_lifetime_win_rate"]
         dam_sire_wr = result.iloc[0]["dam_sire_lifetime_win_rate"]
 
-        # Sire: 20 voittoa / 60 startista = 0.333
-        assert abs(sire_wr - 20 / 60) < 0.01
-        # Dam sire: sama data (sama hevosjoukko) → sama luku
-        assert abs(dam_sire_wr - 20 / 60) < 0.01
+        # LOO sire: 15/30 = 0.500 (poistettu hevonen 40:n omat 30/5)
+        assert abs(sire_wr - 15 / 30) < 0.01, (
+            f"LOO sire_wr odotettiin 0.500, saatiin {sire_wr:.4f}"
+        )
+        # LOO dam_sire: sama → 15/30 = 0.500
+        assert abs(dam_sire_wr - 15 / 30) < 0.01, (
+            f"LOO dam_sire_wr odotettiin 0.500, saatiin {dam_sire_wr:.4f}"
+        )
 
     def test_row_count_preserved(self):
         """sire_features ei lisää ylimääräisiä rivejä."""
@@ -180,14 +209,26 @@ class TestSireFeatures:
         result = sire_features(runners, horses, hs)
         assert len(result) == len(runners)
 
-    def test_same_sire_runners_get_same_rate(self):
-        """Saman isäoriin eri jälkeläiset saavat saman sire_lifetime_win_rate."""
+    def test_loo_excludes_own_starts(self):
+        """LOO-invariantti: hevosen omia startteja ei lasketa sen sire-ratessa.
+
+        Hevonen 60 on ainoa hyvä jälkeläinen (30 starttia, 20 voittoa → 66 %).
+        Hevonen 61 on ainoa heikko jälkeläinen (30 starttia, 0 voittoa → 0 %).
+
+        LOO hevoselle 60: poistetaan omat 30/20 → jäljellä vain 61:n data
+          → 30 starttia, 0 voittoa → win_rate = 0.0
+        LOO hevoselle 61: poistetaan omat 30/0 → jäljellä vain 60:n data
+          → 30 starttia, 20 voittoa → win_rate ≈ 0.667
+
+        Tämä EROAA vahvasti pooled-laskennasta (30/60 = 0.333 molemmille).
+        """
         horses = _horses_df(
             {"horse_id": "60", "sire": "Shared", "dam_sire": "X"},
             {"horse_id": "61", "sire": "Shared", "dam_sire": "Y"},
         )
         hs = pd.DataFrame(
-            _make_starts("60", 30, 6) + _make_starts("61", 30, 6)
+            _make_starts("60", 30, 20)   # hyvä hevonen: 20/30 voittoa
+            + _make_starts("61", 30, 0)  # heikko hevonen: 0/30 voittoa
         )
         runners = _runners_df(
             {"horse_id": "60", "start_number": 1},
@@ -195,9 +236,21 @@ class TestSireFeatures:
         )
 
         result = sire_features(runners, horses, hs)
-        rates = result["sire_lifetime_win_rate"].values
-        assert abs(rates[0] - rates[1]) < 1e-9, \
-            f"Saman siren eri jälkeläisillä eri rate: {rates[0]:.4f} vs {rates[1]:.4f}"
+        wr_60 = result.loc[result["horse_id"] == "60", "sire_lifetime_win_rate"].iloc[0]
+        wr_61 = result.loc[result["horse_id"] == "61", "sire_lifetime_win_rate"].iloc[0]
+
+        # LOO hevoselle 60: jäljellä vain h61 (0/30) → rate=0.0
+        assert abs(wr_60 - 0.0) < 0.01, (
+            f"LOO h60: odotettiin 0.000 (vain h61 jäljellä), saatiin {wr_60:.4f}"
+        )
+        # LOO hevoselle 61: jäljellä vain h60 (20/30) → rate≈0.667
+        assert abs(wr_61 - 20 / 30) < 0.01, (
+            f"LOO h61: odotettiin 0.667 (vain h60 jäljellä), saatiin {wr_61:.4f}"
+        )
+        # LOO-rate EI ole sama molemmille (tämä olisi virhe pooled-laskennassa)
+        assert abs(wr_60 - wr_61) > 0.5, (
+            "LOO-raten pitäisi erota merkittävästi hevosten välillä tässä tapauksessa"
+        )
 
     def test_no_horse_starts_data_gives_nan(self):
         """Tyhjä horse_starts DataFrame → kaikki NaN (ei kaadu)."""

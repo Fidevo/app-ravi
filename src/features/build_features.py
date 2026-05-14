@@ -408,23 +408,24 @@ def sire_features(
     horses: pd.DataFrame,
     horse_starts: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Lisää sire/dam_sire-aggregaatit runner-riveille.
+    """Lisää sire/dam_sire-aggregaatit runner-riveille (leave-one-out).
 
     Lasketaan horse_starts-koko-uradata:sta (ei rajoitettu 14 päivään).
-    Aggregaatit lasketaan MUIDEN saman isäoriin jälkeläisten starteista —
-    ei data leakagea nykyisen hevosen omasta startista koska laskenta
-    perustuu populaatiostatistiikkaan, ei hevosen omiin tuloksiin.
+    Käytetään **leave-one-out (LOO)** -laskentaa: hevosen omat startit
+    vähennetään sen isäoriin kokonaisaggregaatista ennen win-rate-laskentaa.
+    Tämä estää "indirektin leakagen" jossa hevosen oma menestys nostaa
+    sen sire-ratea, joka kertoo "tämä hevonen on hyvä" eikä "tämä sire on hyvä".
 
     Piirteet:
-      sire_lifetime_win_rate     : isäoriin jälkeläisten voitto-% (kaikki ajat)
-      sire_lifetime_starts       : montako starttia estimaatin pohjana
-      dam_sire_lifetime_win_rate : emänisän jälkeläisten voitto-%
-      dam_sire_lifetime_starts   : montako starttia estimaatin pohjana
+      sire_lifetime_win_rate     : isäoriin muiden jälkeläisten voitto-% (LOO)
+      sire_lifetime_starts       : muiden jälkeläisten starttimäärä (LOO-pohja)
+      dam_sire_lifetime_win_rate : emänisän muiden jälkeläisten voitto-% (LOO)
+      dam_sire_lifetime_starts   : muiden jälkeläisten starttimäärä (LOO-pohja)
 
     Pienet sample-koot suodatetaan:
-      Jos sire_lifetime_starts < _SIRE_MIN_STARTS (30), asetetaan
-      sire_lifetime_win_rate = NaN (kohina eikä signaali). LightGBM
-      käsittelee NaN:n automaattisesti puuttuvana arvona.
+      Jos LOO-starttimäärä < _SIRE_MIN_STARTS (30), asetetaan
+      win_rate = NaN (kohina eikä signaali). LightGBM käsittelee NaN:t
+      automaattisesti puuttuvana arvona.
 
     Args:
         runners: DataFrame jossa horse_id (lähdöt joita ennustetaan)
@@ -434,55 +435,75 @@ def sire_features(
     Returns:
         runners-DataFrame lisättyinä sire/dam_sire-sarakkeilla
     """
+    pedigree = horses[["horse_id", "sire", "dam_sire"]].drop_duplicates("horse_id")
+
     # --- 1. Liitä sire/dam_sire horse_starts-riveihin horses-taulusta ---
-    starts_with_pedigree = horse_starts.merge(
-        horses[["horse_id", "sire", "dam_sire"]].drop_duplicates("horse_id"),
-        on="horse_id",
-        how="left",
-    )
-    starts_with_pedigree["is_win"] = (
-        starts_with_pedigree["finish_position"] == 1
-    ).astype(float)
+    starts = horse_starts.merge(pedigree, on="horse_id", how="left")
+    starts["is_win"] = (starts["finish_position"] == 1).astype(float)
 
-    # --- 2. Per-sire aggregaatti (isäoriin kaikki jälkeläiset) ---
-    sire_stats = (
-        starts_with_pedigree.dropna(subset=["sire"])
-        .groupby("sire")
-        .agg(
-            sire_lifetime_starts=("is_win", "count"),
-            sire_lifetime_win_rate=("is_win", "mean"),
+    # ------------------------------------------------------------------ #
+    # Apufunktio: laske LOO-aggregaatit yhdelle pedigree-sarakkeelle      #
+    # ------------------------------------------------------------------ #
+    def _loo_stats(
+        starts_df: pd.DataFrame,
+        group_col: str,
+        prefix: str,
+    ) -> pd.DataFrame:
+        """Laske leave-one-out sire/dam_sire-stats per (horse_id, group_col).
+
+        Returns:
+            DataFrame jossa sarakkeet horse_id, group_col,
+            {prefix}_lifetime_starts, {prefix}_lifetime_win_rate.
+        """
+        valid = starts_df.dropna(subset=[group_col]).copy()
+
+        # Per-group kokonaisaggregaatti (kaikkien jälkeläisten startit)
+        group_totals = (
+            valid.groupby(group_col)
+            .agg(total_starts=("is_win", "count"), total_wins=("is_win", "sum"))
+            .reset_index()
         )
-        .reset_index()
-    )
-    # Suodata pois pienet otokset — kohinainen estimaatti on haitallisempi kuin NaN
-    sire_stats.loc[
-        sire_stats["sire_lifetime_starts"] < _SIRE_MIN_STARTS,
-        "sire_lifetime_win_rate",
-    ] = np.nan
 
-    # --- 3. Per-dam_sire aggregaatti (emänisän kaikki jälkeläiset) ---
-    dam_sire_stats = (
-        starts_with_pedigree.dropna(subset=["dam_sire"])
-        .groupby("dam_sire")
-        .agg(
-            dam_sire_lifetime_starts=("is_win", "count"),
-            dam_sire_lifetime_win_rate=("is_win", "mean"),
+        # Per-(horse_id, group) oma kontribuutio
+        own_contrib = (
+            valid.groupby(["horse_id", group_col])
+            .agg(own_starts=("is_win", "count"), own_wins=("is_win", "sum"))
+            .reset_index()
         )
-        .reset_index()
-    )
-    dam_sire_stats.loc[
-        dam_sire_stats["dam_sire_lifetime_starts"] < _SIRE_MIN_STARTS,
-        "dam_sire_lifetime_win_rate",
-    ] = np.nan
 
-    # --- 4. Liitä runnersiin sire- ja dam_sire-tilastot ---
-    df = runners.merge(
-        horses[["horse_id", "sire", "dam_sire"]].drop_duplicates("horse_id"),
-        on="horse_id",
-        how="left",
-    )
-    df = df.merge(sire_stats, on="sire", how="left")
-    df = df.merge(dam_sire_stats, on="dam_sire", how="left")
+        # Yhdistä: group-kokonaisuus + oma kontribuutio per hevonen
+        merged = own_contrib.merge(group_totals, on=group_col, how="left")
+
+        # LOO: vähennetään hevosen omat startit/voitot
+        merged["loo_starts"] = merged["total_starts"] - merged["own_starts"]
+        merged["loo_wins"]   = merged["total_wins"]   - merged["own_wins"]
+
+        # Win-rate: NaN jos alle minimikynnyksen (kohinainen estimaatti)
+        starts_col = f"{prefix}_lifetime_starts"
+        rate_col   = f"{prefix}_lifetime_win_rate"
+        merged[starts_col] = merged["loo_starts"]
+        merged[rate_col] = np.where(
+            merged["loo_starts"] >= _SIRE_MIN_STARTS,
+            merged["loo_wins"] / merged["loo_starts"].replace(0, np.nan),
+            np.nan,
+        )
+
+        return merged[["horse_id", group_col, starts_col, rate_col]]
+
+    # --- 2. Sire-LOO ---
+    sire_loo = _loo_stats(starts, "sire", "sire")
+
+    # --- 3. Dam_sire-LOO ---
+    dam_sire_loo = _loo_stats(starts, "dam_sire", "dam_sire")
+
+    # --- 4. Liitä runners:iin ---
+    df = runners.merge(pedigree, on="horse_id", how="left")
+    df = df.merge(sire_loo[["horse_id", "sire_lifetime_starts",
+                             "sire_lifetime_win_rate"]],
+                  on="horse_id", how="left")
+    df = df.merge(dam_sire_loo[["horse_id", "dam_sire_lifetime_starts",
+                                 "dam_sire_lifetime_win_rate"]],
+                  on="horse_id", how="left")
 
     return df
 
