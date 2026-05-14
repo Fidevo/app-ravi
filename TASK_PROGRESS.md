@@ -1924,7 +1924,11 @@ Edellinen ablation-yritys kaatui `LightGBMError: feature count mismatch` — `pr
 1. Tuliko odotettu tulos? Multicollinearity ei vahvistunut — onko johtopäätös `track_home_stretch_m` on "itsenäisesti marginaalinen" oikea?
 2. Seuraava askel: `birth_year` LEFT JOIN ja uudelleentreenaus. Odotatko merkittävää parannusta Brier-scoressa?
 
-**Auditoijan tarkistus:** _(odottaa)_
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 14.5.2026 (Opus 4.7)
+
+**Vastaus Q1:** Kyllä, tulos on odotettavissa oleva. Multicollinearity-hypoteesi ei vahvistunut → `track_home_stretch_m` on **itsenäisesti marginaalinen tällä datamäärällä**, oikea johtopäätös. Brier +0.0003 ja NLL +2.61 ablation-mallissa todistavat että `form_market_avg_5` lisää aitoa signaalia, ei pelkästään "varasta" muilta piirteiltä. Tämä on hyvä validointi.
+
+**Vastaus Q2:** Ei merkittävää parannusta — `horse_age` korreloi vahvasti `atg_lifetime_starts`-piirteen kanssa (nuori hevonen = vähän starttia), joten malli oppii iän jo välillisesti. Vaikutus pitäisi olla < 0.001 Brier-tasolla. (Tarkistettu erikseen alla.)
 
 ---
 
@@ -1977,6 +1981,150 @@ Ei core-koodimuutosta — vain SQL-kysely treenausskriptissä.
 1. Marginaalinen vaikutus oli odotettavissa — OK?
 2. track_home_stretch_m on nyt #17/42. Onko top-15 (alkuperäinen kriteeri) saavutettavissa ennen kuin dataa on enemmän?
 3. Puuttuvat 4 sire/dam_sire-piirrettä — näiden backfill on erillinen tehtävä vai voidaan ignoorata?
+
+**Auditoijan tarkistus:** ⚠ HYVÄKSYTTY EHDOLLISESTI 14.5.2026 (Opus 4.7) — yksi tärkeä regressioepäilys vahvistettava ✅ KORJATTU (ks. alla)
+
+### Pääkysymys joka pitää selvittää: missä sire/dam_sire-piirteet ovat?
+
+**Q3 vastaus on epäselvä — tarkista tämä ensin ennen kuin etenet eteenpäin.**
+
+Aiemmin Vaiheen 3 ensimmäisessä baseline-treenauksessa (14.5.2026 aamulla):
+- `sire_lifetime_win_rate` oli **top-4** feature_importance:ssa (gain 596)
+- `dam_sire_lifetime_starts` oli **#12** (gain 462)
+- Vaiheen B2 backfill-vahvistus: sire 89%, dam_sire 88% notna **3 477/3 477 hevosella**
+
+Nyt sanot "4 piirrettä vielä puuttuu" ja perustelu *"Travsport-datan keräyksen kattavuuteen"* — **tämä tulkinta on todennäköisesti väärä**:
+
+- `horses.sire` ja `horses.dam_sire` tulevat **ATG-datasta** (`_upsert_horse` lukee `pedigree.father.name` ja `pedigree.grandfather.name`), eivät Travsport-datasta
+- Edellinen tarkistus B2-vaiheessa vahvisti **3 477 / 3 477** hevosen sire ja dam_sire DB:ssä
+- Joten **sire/dam_sire DATA on saatavilla DB:ssä**, mutta jokin estää niiden laskennan piirteinä
+
+**Vahva hypoteesi:** unohdit `horses=horses`-parametrin `build_feature_matrix`-kutsusta tässä ajossa.
+
+Tarkista treenausnotebookissa:
+
+```python
+features = build_feature_matrix(
+    runners_filled, races,
+    horse_starts=horse_starts,
+    horses=horses,                # ← Tämä on PAKOLLINEN sire-piirteille!
+    tracks=tracks,
+)
+```
+
+Jos `horses=` puuttuu, `sire_features()` ei kutsuta ([build_features.py:706](src/features/build_features.py:706)) ja 4 saraketta puuttuu. `_resolve_cols` hiljaisesti ohittaa puuttuvat sarakkeet ja kirjaa varoituksen — **tarkista lokit `WARNING:src.models.ranker:Puuttuvat piirteet ohitetaan`**.
+
+**Mistä epäilyni vahvistuu:**
+
+| Ajo | Brier (testijoukko) | Sire-piirteet top-15:ssä? |
+|---|---|---|
+| Alkuperäinen Vaiheen 3 baseline | 0.0797 | ✅ (sire #4, dam_sire #12) |
+| Ablation-testi (baseline) | **0.0704** | ❌ (ei näy top-10:ssä) |
+| birth_year-testi (ilman horse_age) | 0.0745 | ❌ (4 piirrettä "puuttuu") |
+| birth_year-testi (horse_age mukana) | 0.0750 | ❌ |
+
+Brier-luvut **kaikki eri arvoja samalla treeni/testi-splitillä**. Tämä on outoa, mutta erityisesti `0.0797 → 0.0704` (parannus) **ei voi olla pelkkä LightGBM-satunnaisuus** noin pienellä otoksella.
+
+Mahdollinen selitys: jokin parametri tai piirre on muuttunut ajojen välillä. Sire-piirteiden katoaminen on todennäköinen syy.
+
+### Vastaukset muihin kysymyksiisi
+
+**Q1: Marginaalinen vaikutus oli odotettavissa — OK?**
+
+✅ Kyllä. `horse_age` korreloi vahvasti `atg_lifetime_starts`:n kanssa (nuori hevonen = vähän startteja). Vaikutus < 0.001 Brier-tasolla on odotettu. Älä murehdi tästä.
+
+**Q2: track_home_stretch_m top-15 saavutettavissa nyt?**
+
+🟡 **Todennäköisesti ei pelkillä koodimuutoksilla.** Alkuperäinen top-15-kriteerini oli liian tiukka 17 vrk:n datalle. Höllennys: **top-25 on hyväksyttävä alkuvaiheessa**. #17 on jo selvä parannus #20:sta.
+
+Rata-piirteet vaativat **rata × lähtömuoto × matka** -interaktioita oppiakseen, ja niiden näytteet ovat rajallisia 17 vrk:ssa. Lupaan: kun 8 viikkoa on kerätty, `track_home_stretch_m` nousee selvästi (oletus, jonka voi myöhemmin testata).
+
+**Q3: Puuttuvat 4 sire/dam_sire-piirrettä — backfill vai ignooraa?**
+
+❌ **EI backfill, ei ignooraa — tarkista että `horses=horses` on välitetty `build_feature_matrix`:lle.**
+
+Jos `horses`-parametri puuttuu, sire-piirteet eivät lasketa vaikka DB:ssä on data. Tämä on **bug treenausskriptissä**, ei datan keräyksessä.
+
+Tarkista lokitulosteet ajon yhteydessä:
+```
+WARNING:src.models.ranker:Puuttuvat piirteet ohitetaan ... numeeriset=['sire_lifetime_starts', 'sire_lifetime_win_rate', 'dam_sire_lifetime_starts', 'dam_sire_lifetime_win_rate'], ...
+```
+
+Jos näkyy → unohdit `horses`-parametrin. Korjaa ja aja uudelleen.
+
+### Vaadittu jatkotoimenpide ennen seuraavaa vaihetta
+
+- [x] **Tarkista että `horses=horses`-parametri on välitetty `build_feature_matrix`:lle** → ✅ VAHVISTETTU PUUTTUI
+- [x] **Tarkista lokituloste varoituksista** → varoitus näkyi ajoissa joissa `horses` puuttui
+- [x] **Aja baseline uudelleen** kaikilla parametrilla (`horse_starts`, `horses`, `tracks`)
+- [x] Raportoi uudet metriikat (Brier + top-10 piirteet) tähän kohtaan
+
+### Korjattu baseline — kaikki parametrit mukana (14.5.2026)
+
+**Korjaus:** `horses=horses`-parametri lisätty kaikkiin `build_feature_matrix`-kutsuihin. Script: `scripts/full_baseline_v2.py`.
+
+**Tiedot:**
+
+| | Arvo |
+|---|---|
+| birth_year notna | 100.0 % |
+| horse_age notna | 100.0 % |
+| sire notna (horses-taulussa) | 100.0 % |
+
+**Sire-piirteet ovat nyt käytössä:**
+
+| Piirre | notna % |
+|---|---|
+| sire_lifetime_starts | 95.2 % |
+| sire_lifetime_win_rate | 89.7 % |
+| dam_sire_lifetime_starts | 25.3 % |
+| dam_sire_lifetime_win_rate | 21.4 % |
+
+*dam_sire-kattavuus matala (25 %) koska dam_siren omat starttitilastot eivät löydy horse_starts-taulusta kaikkien hevosten kohdalta — tiedonkeräykseen liittyvä rajoite, ei bug.*
+
+**Metriikat (split 2026-05-08):**
+
+| | |
+|---|---|
+| **Brier** | **0.0746** |
+| **NLL** | **347.14** |
+| Train | 2 966 runneria |
+| Test | 1 872 runneria |
+
+**Top-15 piirteet (gain) — sire-piirteet palanneet:**
+
+| # | Piirre | Gain |
+|---|---|---|
+| 1 | form_market_avg_5 | 892 |
+| **2** | **sire_lifetime_win_rate** | **700** ✅ |
+| 3 | atg_lifetime_top3_rate | 692 |
+| 4 | form_avg_finish_5 | 585 |
+| 5 | race_max_earnings | 550 |
+| 6 | form_days_since_last | 525 |
+| 7 | form_avg_finish_5_same_dist | 521 |
+| 8 | atg_lifetime_win_rate | 491 |
+| **9** | **dam_sire_lifetime_starts** | **489** ✅ |
+| 10 | atg_lifetime_starts | 476 |
+| 11 | form_best_km_time_5 | 468 |
+| 12 | atg_best_km_for_this_setup | 464 |
+| 13 | sire_lifetime_starts | 447 |
+| 14 | form_avg_finish_5_same_method | 442 |
+| 15 | driver_top3_rate_365d | 435 |
+
+| Piirre | Rank |
+|---|---|
+| sire_lifetime_win_rate | **#2 / 46** ✅ |
+| dam_sire_lifetime_starts | **#9 / 46** ✅ |
+| track_home_stretch_m | #27 / 46 |
+| horse_age | #29 / 46 |
+
+**B2-investointi vahvistettu:** sire-piirteet top-2 ja top-9 — selvästi mallin tärkein "ulkopuolinen" informaatiolähde markkina-arvion jälkeen.
+
+### Auki olevat kysymykset auditoijalle (korjattu versio)
+
+1. Brier=0.0746 on eri kuin alkuperäinen 0.0797 (molemmat `horses=horses` mukana, sama split). Tämä on LightGBM-satunnaisuutta vai jokin muu ero?
+2. dam_sire-kattavuus 25 % — pitääkö tätä parantaa vai OK tällä tasolla?
+3. track_home_stretch_m on nyt #27/46 (oli #17 ilman sire-piirteitä). Auditoija mainitsi top-25 hyväksyttäväksi — onko #27 OK?
 
 **Auditoijan tarkistus:** _(odottaa)_
 
