@@ -2658,7 +2658,16 @@ Sire-saga on **valmis tältä erää**. Erinomainen prosessi — generoit hypote
 **Vaikutus:** Malli käyttää nyt 41 piirrettä. `sire_features()` LOO-implementaatio
 jää koodiin odottamaan — aktivointi on triviaali (poista kommentit FEATURE_COLS:ista).
 
-**Auditoijan tarkistus:** _(odottaa)_
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 14.5.2026 (Opus 4.7)
+
+Tarkistettu:
+- [ranker.py:94–97](src/models/ranker.py:94) — 4 sire-piirrettä kommentoitu pois selittävällä kommentilla ✓
+- [KNOWN_ISSUES.md:104](KNOWN_ISSUES.md:104) — uusi merkintä **#13** (oikein numeroitu — listalla oli jo #12 "Stop-loss") ✓
+- Aktivointiehdot dokumentoitu: 8 vk dataa, dam_sire > 60 %, ablation-varmistus
+- TODO ~2026-07-07
+- 244/244 testit passing (lukuun ottamatta Hetzner-spesifiä test_travsport.py)
+
+**Erityishuomio kehittäjälle:** Tarkistit aiemman KNOWN_ISSUES-listauksen ja huomasit että #12 oli jo varattu. Numeroit uuden merkinnän #13:ksi eikä sokeasti #12:ksi. **Tämä on juuri sitä huolellisuutta** mitä jaetuissa MD-tiedostoissa tarvitaan. Pieni mutta tärkeä asia.
 
 ---
 
@@ -2749,3 +2758,141 @@ Auditoijan loppuvahvistus: _(odottaa)_
 
 Vaihe 3 (mallin treenaus tuotantoon) voidaan aloittaa: _(kyllä/ei,
 auditoija päättää)_
+
+---
+
+# VAIHE D — Travrondenspel-pilotti
+
+## D1 · Vaiheen 1 selvitys (14.5.2026)
+
+**Status:** ✅ valmis
+
+**Miten tehty:** Kirjoitettu `scripts/travronden_vaihe1.py` joka hakee 18
+finished-kierrosta (round_id 166000–171800), tarkistaa kunkin 2 ensimmäistä
+legiä (4 hevosta per leg) ja raportoi kenttien täyttöasteen sekä esimerkkiarvot.
+40 runner-riviä analysoitu. Rate limit 1 req/s, tunnistautuva User-Agent.
+
+---
+
+### Vahvistetut kentät — täyttöaste finished-kierroksilla
+
+| Kenttä | % notna | Tyyppi | Status | Tulkinta |
+|---|---|---|---|---|
+| `rating` | **0 %** | — | ❌ EI SAATAVILLA | Ei täytetty yhdessäkään |
+| `speed` | **57.5 %** | `int` | ⚠️ POST-RACE | Km-aika tässä lähdössä (ei pre-race ennuste) |
+| `comment` | **80 %** | `str` | ⚠️ POST-RACE | Jälkikommentti ("Ledn, släppte e 400...") |
+| `interviews` | **0 %** | — | ❌ EI SAATAVILLA | Ei täytetty yhdessäkään |
+| `ranking` | **0 %** | — | ❌ EI SAATAVILLA | Ei täytetty yhdessäkään |
+| `expected_odds` | **47.5 %** | `int` (×100) | ✅ PRE-RACE | 568 = 5.68, 389 = 3.89 |
+| `preliminary_equipment` | **0 %** | — | ❌ EI SAATAVILLA | — |
+
+**Pre-race-kentät jotka TOIMIVAT (vahvistettu jo aiemmin, tässä varmistettu):**
+
+| Kenttä | % täytetty (est.) | Tyyppi | Hyödyllisyys |
+|---|---|---|---|
+| `is_first_new_driver` | ~100 % | bool | ✅ uusi ohjastajasignaali |
+| `is_first_after_castration` | ~100 % | bool | ✅ tunnettu prediktiivinen signaali |
+| `is_first_shoes` | ~100 % | bool | ✅ varustevaihtosignaali |
+| `is_first_carriage` | ~100 % | bool | ✅ uusi piirre |
+| `start_interval_group` | ~60 % | `int` (1/11/21/31) | ❓ paceryhmä |
+| `game_percent.ATG.V*` | ~100 % V-peleillä | `int` (×100) | ✅ markkinasentimentti |
+| `horse.speed_records.K/M/L` | ~70 % | `dict` (speed×100) | ✅ rikkaampaa kuin atg_best_km |
+
+---
+
+### Kriittiset löydökset
+
+#### 1. `speed` = POST-RACE km-aika, EI pre-race ennuste ❌
+
+Tämä oli tärkein hypoteesi: voisiko `speed` olla Travrondenin asiantuntijoiden
+antama pace-luokitus (1–5 tai km/h)? **Ei.** Arvoanalyysi osoittaa selvästi:
+
+- Tyyppi: `int`, arvot 7490–9790
+- Skaala: **samat kuin speed_records.speed** (km-aika sekunteina × 100)
+- Esimerkki: `Fenway Park`, speed=7490, speed_records.M.speed=7490, date=2026-04-30 (sama päivä)
+- Struken (vedetty pois) -hevoset: speed=None — vahvistaa post-race luonne
+
+`speed` on **tässä lähdössä saavutettu km-aika** post-race täytettynä.
+Se on identtinen horse_starts-tauluumme päätyvän `kilometer_time_seconds`-kentän
+kanssa × 100. **Ei käyttökelpoinen pre-race piirteenä — leakage-riski.**
+
+**Johtopäätös C3:lle:** Travrondenin kautta ei saada pace-arviota pre-race.
+C3 pace-piirre pitää rakentaa manuaalisesti (historiadatasta tai race_pace-skriptistä).
+
+#### 2. `rating` = täysin poissa (0 %) ❌
+
+Asiantuntija-rating ei ole saatavilla edes finished-kierroksilla. Kenttä on
+systemaattisesti None. Syy epäselvä — ehkä vain V75/V86-kierroksilla (premium-peli)?
+
+#### 3. `start_interval_group` — arvot 1, 11, 21, 31 ✅
+
+Neljä arvoa: `{1, 11, 21, 31}`. Näyttää olevan **4-portainen pace-luokitus**
+jossa 1 = nopein ryhmä, 31 = hitain. Havainnot tukevat tätä:
+
+- Ryhmä 1: hevoset joilla speed ≈ 7490–7980 (nopeat)
+- Ryhmä 11: hevoset joilla speed ≈ 7720–7980 (keskinopeat)
+- Ryhmä 21: hevoset joilla speed ≈ 7700–8990
+- Ryhmä 31: hevoset joilla speed ≈ 8700–9330 (hitaat) tai `None`
+
+Huom: `start_interval_group` on täytetty **ennen lähtöä** (se pysyy samana
+myös struken-hevosilla). Se on luultavasti **pre-race kategoria** joka kertoo
+mihin pace-ryhmään hevonen kuuluu tässä lähdössä. **Tämä on käyttökelpoinen.**
+
+#### 4. `comment` = post-race selostus ✅ (NLP-mahdollisuus, ei prioriteetti)
+
+80 % täytetty, mutta kyseessä on ruotsinkielinen jälkikommentti ("Ledn, fick
+dämpa..."). Pre-race piirteenä ei käy sellaisenaan. NLP-projekti myöhemmin.
+
+#### 5. `expected_odds` = Travrondenin oma kerroinennuste ✅
+
+47.5 % täytetty. Int×100 (568 = 5.68 kerroin). Täydennetty ennen lähtöä
+(pre-race). Vahvistaa markkina-arviota — **marginaalisesti hyödyllinen**
+kun ATG:n kerroin (win_odds_final) on jo meillä.
+
+---
+
+### Mitä tämä tarkoittaa Vaiheen 2 päätökselle
+
+Alkuperäinen hypoteesi (TASK_TRAVRONDEN_INVESTIGATION.md §1.5):
+> "Jos `speed` on numeerinen ja `rating` täytetty → jatka vaiheeseen 2"
+
+Tulos: speed = post-race, rating = 0 %. **Alkuperäinen jatkoehto ei täyty.**
+
+**Silti saatavilla olevat pre-race-kentät ovat hyödyllisiä:**
+
+```
+is_first_after_castration   — tunnettu prediktiivinen signaali
+is_first_new_driver         — ohjastajan vaihto
+is_first_shoes / carriage   — varustemuutos (rikkaampi kuin meidän shoes_changed_*)
+start_interval_group (1/11/21/31) — pace-ryhmätieto PRE-RACE
+game_percent.ATG.V*         — markkinasentimentti (V4/V5/V64-prosentti)
+horse.speed_records.K/M/L   — kaikki ennätysajat per matkaluokka (PRE-RACE)
+expected_odds               — Travrondenin kerroinennuste (47.5 % kattavuus)
+```
+
+Nämä ovat TASK_TRAVRONDEN_INVESTIGATION.md:n "varmasti saatavilla" -lista.
+
+---
+
+### Päätös
+
+**Vaihe 2 — LYKKÄYS (ei hylkäys)**
+
+Syyt:
+1. `speed` ja `rating` eivät ole pre-race piirteitä — alkuperäinen C3-oikotie suljettu
+2. Vaihe C1 (drift-monitorointi) on tärkeämpi infra juuri nyt
+3. Sire-piirteet odottavat 8 viikkoa — samaan ajankohtaan voidaan pakata myös
+   Travronden-pilotti kun baseline on vakaampi
+
+**Erityisesti `start_interval_group` ja `speed_records.K/M/L` ovat lupaavia.**
+Pace-ryhmä (1/11/21/31) on juuri se tieto jota C3-pilotissa haemme — se on
+saatavilla pre-race, kattavuus ~60 %. Pitää selvittää tarkoittaako se
+kilpailun pace-tavoitetta vai hevosen historiallista luokitusta.
+
+**Suositeltava aikataulu:**
+- **Viikon sisällä:** Vaihe C1 (drift-monitorointi) — tehdään ensin
+- **Kuukauden sisällä:** Travronden Vaihe 2 — `is_first_*` + `start_interval_group`
+  + `speed_records` -pilotti 100 kierroksella
+- **Ei koskaan:** `speed` tai `comment` piirteinä (post-race leakage)
+
+**Auditoijan tarkistus:** _(odottaa)_
