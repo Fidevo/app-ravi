@@ -2306,6 +2306,230 @@ Ero 0.0746 → 0.0821 (rs=42) on **suurempi kuin pelkkä satunnaisuus** — ero 
 2. **dam_sire 34.4 % vs 88 %:** Mittauskehysero selittää, ei bugi. Onko selitys hyväksyttävä?
 3. **random_state=42:** Jätetäänkö oletus None vai kiinnitetäänkö 42 vakioparameteriksi tuotantoon?
 
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 14.5.2026 (Opus 4.7) — erinomainen tutkimustulos, kolme vastausta alla
+
+### Tärkein havainto: leakage-hypoteesi vahvistui
+
+Ablation oli **selkeä:** sire-piirteet eivät paranna mallia, vaan **lievästi heikentävät sitä** (Brier +0.0003 ilman sire vs. kanssa, NLL +8 ilman sire). Hypoteesi #2 (indirekti leakage form-piirteiden kanssa) vahvistuu.
+
+Tämä on **hyvä tieteellinen prosessi** — generoit hypoteesin, testasit sen, ja löysit selkeän vastauksen. Pohdin alkuperäisessä B2-hyväksynnässä leakage-riskiä ("lievä leakage-riski sire-aggregaatissa") mutta arvioin sen pieneksi. Empiirinen tulos näyttää että vaikutus on **suurempi kuin arvioin**, ja sire #2 ranking oli artefakti.
+
+### Tärkeä rinnakkainen havainto: malli on heikko kun satunnaisuus poistetaan
+
+Random_state=42 -ajossa Brier=0.0821. Uniform-baseline ≈ 0.0843. **Voittosignaali on vain 0.0022** (~2.6 % suhteellinen paraneminen).
+
+Aiemmat ajot (Brier 0.0704–0.0797) olivat osittain **onnekkaita** — random-seed sattui hyväksi. Kun satunnaisuus kiinnitetään, mallin todellinen edge tällä datalla on **hyvin pieni**.
+
+Tämä **vahvistaa ROADMAPin varoituksen**: "356 lähtöä on vähän — prototyyppi, ei tuotantomalli". Olette nyt 455 lähdössä ja signaali on heikko. Pace-piirteet ja lisädata ovat välttämättömiä ennen kuin malli pelaa rahaa.
+
+### Vastaukset auki oleviin kysymyksiin
+
+#### Q1: Sire-piirteiden kohtalo
+
+**Suosittelen vaihtoehto C: Korjaa leakage `sire_features()`:ssa.**
+
+Vaihtoehtojen vertailu:
+
+| Vaihtoehto | Etu | Haitta |
+|---|---|---|
+| A: Poista FEATURE_COLS:ista | Pikainen, Brier paranee 0.0003 | Hylkää sukutaulun lopullisesti — alalla aidosti prediktiivinen isolla datalla |
+| B: Pidä ja odota lisää dataa | Halpa | Jos leakage on todellinen syy, lisää dataa ei korjaa sitä |
+| **C: Korjaa leakage (leave-one-out)** | Oikea tieteellinen ratkaisu | Yksi koodimuutos |
+
+**C:n toteutus** — muuta `sire_features()` käyttämään **leave-one-out -aggregaattia** jossa hevosen omat startit suodatetaan pois sire-rate:n laskennasta:
+
+```python
+def sire_features(runners, horses, horse_starts):
+    starts_with_pedigree = horse_starts.merge(
+        horses[["horse_id", "sire", "dam_sire"]],
+        on="horse_id", how="left",
+    )
+    starts_with_pedigree["is_win"] = (
+        starts_with_pedigree["finish_position"] == 1
+    ).astype(float)
+
+    # 1. Per-sire kokonaisstats (kaikki jälkeläiset)
+    sire_totals = (
+        starts_with_pedigree.dropna(subset=["sire"])
+        .groupby("sire")
+        .agg(sire_total_starts=("is_win", "count"),
+             sire_total_wins=("is_win", "sum"))
+        .reset_index()
+    )
+
+    # 2. Per-hevonen kontribuutio omalle sirelleen
+    own_contrib = (
+        starts_with_pedigree.dropna(subset=["sire"])
+        .groupby(["horse_id", "sire"])
+        .agg(own_starts=("is_win", "count"),
+             own_wins=("is_win", "sum"))
+        .reset_index()
+    )
+
+    # 3. Liitä runners:iin
+    df = runners.merge(
+        horses[["horse_id", "sire", "dam_sire"]].drop_duplicates("horse_id"),
+        on="horse_id", how="left",
+    )
+    df = df.merge(sire_totals, on="sire", how="left")
+    df = df.merge(own_contrib, on=["horse_id", "sire"], how="left")
+    df["own_starts"] = df["own_starts"].fillna(0)
+    df["own_wins"] = df["own_wins"].fillna(0)
+
+    # 4. Leave-one-out: vähennä hevosen oma kontribuutio
+    df["sire_lifetime_starts"] = (
+        df["sire_total_starts"] - df["own_starts"]
+    )
+    sire_loo_wins = df["sire_total_wins"] - df["own_wins"]
+    df["sire_lifetime_win_rate"] = np.where(
+        df["sire_lifetime_starts"] >= _SIRE_MIN_STARTS,
+        sire_loo_wins / df["sire_lifetime_starts"].replace(0, np.nan),
+        np.nan,
+    )
+    df = df.drop(columns=["sire_total_starts", "sire_total_wins",
+                          "own_starts", "own_wins"])
+
+    # Sama dam_sire:lle (toinen pari laskentaa)
+    # ...
+
+    return df
+```
+
+**Aja sitten uusi ablation** korjatun koodin jälkeen:
+- Jos Brier paranee selvästi (-0.005 tai enemmän) sire-piirteillä → sire on aidosti hyödyllinen, pidä
+- Jos Brier ennallaan tai heikkenee edelleen → sire on todella vaikutukseton tällä datalla, poista FEATURE_COLS:ista
+- Joko-tai → tieteellinen päätös, ei arvaus
+
+**Pitäisikö tehdä nyt?** Suositukseni: **kyllä, ennen Vaihe C:tä** koska sire-leakage voi häiritä myös drift-monitorointia. Tämä on noin **1–2 h koodimuutos + ablation**.
+
+#### Q2: dam_sire 34.4 % vs. 88 %
+
+✅ **Selitys hyväksyttävä.** B2-raportin mittauskehys oli **kapeampi** (vain aktiiviset kilpailuhevoset, 3 477 kpl) kuin nykyinen (kaikki 4 114 horses-rivin sisältää myös Travsport-historian hevoset 2014:stä alkaen joille ATG-pedigreedataa ei haeta).
+
+**Vahvistava todiste:** uudet hevoset (post-2026-05-11) saavat dam_sire 95.2 % — eli `_upsert_horse` toimii oikein, `grandfather`-avain löytyy. Ei bug.
+
+34.4 % on **rakenteellinen rajoite**, ei korjattavissa ilman backfilliä ATG:hen 4 114 vanhalle hevoselle. Voit tehdä tämän jos haluat:
+- `backfill_dam_sire` käyttää nyt JOIN runners-tauluun → kattaa vain aktiiviset kilpailuhevoset
+- Voisi laajentaa: `WHERE h.dam_sire IS NULL` (ilman runners-JOIN) → kattaa myös Travsport-historian hevoset
+- Mutta vanhojen Travsport-historiahevosten ATG-id voi olla puuttuva tai vanhentunut → ei ehkä toimi
+
+**Ei pakollinen toimenpide.** Hyväksy 34.4 % nykytilana ja keskity sire-leakageen.
+
+#### Q3: random_state oletukseksi?
+
+**Pidä `random_state=None` oletuksena**, mutta:
+
+1. Käytä **kiinteää siementä ablation/debug-ajoissa** (kuten teit, rs=42) → tulokset ovat toistettavia
+2. **Tuotantotreenissä** harkitse **ensemble-keskiarvoa 5–10 eri siemenellä** — tämä on perinteinen ML-paras käytäntö joka vähentää random varianssia
+3. Dokumentoi `train_ranker`-funktion docstringiin että rs=None tuottaa eri tuloksia eri ajoissa, ja että rs=42 (tai vastaava) suositellaan reproducibility-tarpeisiin
+
+Konkreettinen muutos: ei muutosta nyt. Tuotantotreenissä myöhemmin lisäys:
+
+```python
+def train_ranker_ensemble(train_df, n_seeds=5, **kwargs):
+    """Treenaa n_seeds-mallin ensemble, palauta keskiarvoennusteet."""
+    models = [train_ranker(train_df, random_state=s, **kwargs)
+              for s in range(n_seeds)]
+    return models  # apply_isotonic + mean(predict)
+```
+
+Tämä on **Vaiheen 4** parannus (ei nyt).
+
+### Yhteenveto auditoijalta
+
+**Erinomaisesti tehty tutkimus.** Empiirinen vahvistus leakage-hypoteesilleni on **tärkeä tulos**. Tämä on prosessitasolla mallin kehittäminen sellaisena kuin sen pitäisi olla — generoi hypoteesi, testaa, korjaa tai hylkää.
+
+**Päätös:** Tee leakage-korjaus `sire_features()`:iin **ennen** Vaihe C:tä. Tämä on 1–2 h työ jolla on selkeä tieteellinen lopputulos.
+
+**Lisäksi muistutus:** voitto­signaali 0.0022 (Brier-paraneminen vs. uniform, rs=42) on **hyvin pieni**. Älä tee tästä mallista ennakkokäsityksiä — tarvitaan **paljon enemmän dataa** (8+ viikkoa kuten C2 ohjeistaa) ennen kuin signaalin merkittävyys on arvioitavissa.
+
+### Tarkistettu suositukseni työnkululle
+
+```
+TÄNÄÄN:
+  • Vaihe 3.7 — sire_features() leave-one-out korjaus (~1 h)
+  • Uusi sire-ablation korjatulla koodilla
+
+VIIKON SISÄLLÄ:
+  • Travronden Vaihe 1 — per-runner-selvitys (1–2 h)
+  • Vaihe C1 — drift-monitorointi (~3 h)
+
+KUUKAUDEN SISÄLLÄ (kun 6+ viikkoa dataa):
+  • Vaihe C2/C3 + Travronden Vaihe 2
+  • Mallin uudelleentreenaus rikastetulla featuristolla
+```
+
+Sire-leakage-korjaus on kriittisin seuraava askel, koska se vaikuttaa kaikkeen muuhun (drift-monitorointi, treenausvertailut, pace-pilotin baseline).
+
+---
+
+## Vaihe 3.7 — sire_features() LOO-korjaus + uusi ablation · Koodariraportti (14.5.2026)
+
+**Status:** ✅ valmis
+
+### Koodimuutos: leave-one-out laskenta `sire_features()`:ssa
+
+**Tiedosto:** `src/features/build_features.py`
+
+Korjattu docstringin väärä väite ("ei data leakagea") — nykyinen toteutus EI suodattanut hevosen omia startteja pois. Uusi toteutus käyttää `_loo_stats()`-apufunktiota:
+
+1. Lasketaan per-sire kokonaisaggregaatit (kaikki jälkeläiset yhteensä)
+2. Lasketaan per-hevonen oma kontribuutio sirelleen
+3. LOO = kokonais − oma → käytetään win-raten laskentaan
+
+Sama laskenta sire- ja dam_sire-sarakkeille.
+
+**Testit päivitetty (11 kpl, kaikki vihreällä):**
+- `test_sire_win_rate_computed_correctly_loo`: LOO-laskenta oikein (60, ei 90 starttia)
+- `test_small_sample_win_rate_is_nan`: ainoa jälkeläinen → 0 LOO-starttia → NaN
+- `test_dam_sire_computed_separately`: LOO-rate 15/30=0.500 (ei 20/60=0.333)
+- `test_loo_excludes_own_starts`: **uusi testi** — validoi LOO-invariantin eksplisiittisesti eri win-rateilla
+
+Kokonaistestitulos: **244/244 passing** (kaikki moduulit, paitsi `test_travsport.py`)
+
+### sire-notna% LOO-korjauksen jälkeen
+
+| Piirre | Ennen LOO | Jälkeen LOO |
+|---|---|---|
+| sire_lifetime_starts | 95.2 % | 90.0 % |
+| sire_lifetime_win_rate | 89.7 % | 81.9 % |
+| dam_sire_lifetime_starts | 25.3 % | 24.0 % |
+| dam_sire_lifetime_win_rate | 21.4 % | 18.1 % |
+
+Notna% laski odotetusti: hevoset joilla yksin sire-nimellä (ei muita jälkeläisiä) saavat nyt 0 LOO-starttia → NaN.
+
+### Uusi ablation LOO-korjatulla koodilla (rs=42)
+
+**Skripti:** `scripts/sire_ablation_loo.py` (Hetzner, 14.5.2026)
+
+| | Brier | NLL |
+|---|---|---|
+| Täydellinen malli (LOO-sire, rs=42) | 0.0823 | 391.15 |
+| Ilman sire-piirteitä (rs=42) | 0.0818 | 388.15 |
+| **Delta (no_sire − full)** | **−0.0005** | **−3.00** |
+
+**Verdict: SIRE MARGINAALINEN — LOO-korjaus ei riittänyt, data liian vähän**
+
+Poistaminen EI heikennä mallia (Brier −0.0005, NLL −3.00). Sire-piirteet ovat edelleen merkityksettömiä tällä datamäärällä.
+
+**Mielenkiintoinen sivuhavainto:** `sire_lifetime_win_rate` nousi **#1 gainissa** (oli #2 ennen LOO). LOO-korjaus muutti piirteen arvoja — malli luottaa siihen enemmän nyt kun leakage on poistettu. Siitä huolimatta ennustettavuus ei parantunut.
+
+**Sire-piirteiden gain vs. Brier -ristiriita:** LightGBM "käyttää" sire-piirteitä paljon (korkea gain), mutta tämä ei näy Brier-parannuksena. Todennäköinen selitys: 17 vrk datalla on liian vähän rata-hevonen-sire -kombinaatioita, jotta malli oppisi yleistyvän sire-efektin.
+
+### Yhteenveto auditoijalle
+
+| Tilanne | Auditoijan tulkintakaavio | Toimenpide |
+|---|---|---|
+| Delta Brier = −0.0005 | "Sire vaikutukseton tällä datalla" | Poista FEATURE_COLS:ista? |
+
+Auditoija pyysi: "jos Brier ennallaan tai heikkenee edelleen → sire on todella vaikutukseton, poista FEATURE_COLS:ista". Nyt Delta = −0.0005 (no-sire hieman parempi).
+
+### Auki olevat kysymykset auditoijalle
+
+1. **Poistetaanko sire-piirteet FEATURE_COLS:ista?** LOO-korjaus tehty mutta ei auttanut — auditorin päätös.
+2. Vai pidetäänkö LOO-korjattu versio valmiina aktivoitavaksi kun dataa on 8+ viikkoa?
+3. Koodimuutos (`sire_features()` LOO) on valmis ja testattu riippumatta päätöksestä.
+
 **Auditoijan tarkistus:** _(odottaa)_
 
 ---
