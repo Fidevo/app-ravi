@@ -167,7 +167,9 @@ def rolling_walk_forward(
                               + finish_position + win_odds_final
         races: race-master-data (race_date)
         window_days: testijoukon pituus päivissä (oletus 14)
-        train_window_days: treenidatan minimipituus ennen ensimmäistä testiä (oletus 28)
+        train_window_days: treenidatan minimipituus ennen ensimmäistä testiä (oletus 28).
+            Kun historiaa on > 60 vrk, harkitse train_window_days=56 tai 84 luotettavammille
+            tuloksille — pienellä ikkunalla LightGBM voi ylioppia kausivaihtelua.
         edge_threshold: minimi edge value-pelille (5 %)
         flat_stake: tasapanos per peli
 
@@ -321,6 +323,9 @@ def edge_decay_analysis(
 
     if brier_mode:
         # Brier: slope < 0 tarkoittaa paranemista (ei driftiä)
+        # TODO: tarkenna kynnysarvoja kun C1-monitoroinnista on muutaman kuukauden
+        # tuotantodataa joka näyttää luonnollisen viikkovaihtelun. Nykyiset arvot
+        # (0.002, 0.0005) ovat alkuvaiheen heuristiikkoja. (auditoija 10.5.2026)
         if slope > 0.002:
             verdict = "❌ Mallin kalibrointi heikkenee (brier nousee) — retreenaa kuukausittain"
         elif slope > 0.0005:
