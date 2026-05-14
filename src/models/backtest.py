@@ -67,11 +67,16 @@ def quarterly_walk_forward(
         edge_threshold: minimi edge value-pelille (5%)
         flat_stake: tasapanos per peli (yksinkertaistus, vaihda Kellyyn myöhemmin)
     """
-    df = runners_with_features.merge(
-        races[["race_id", "race_date"]],
-        on="race_id",
-        how="left",
-    )
+    # race_date voi jo olla features-DataFramessa (build_feature_matrix lisää sen).
+    # Mergetään vain jos puuttuu — näin vältetään _x/_y-konflikti.
+    if "race_date" in runners_with_features.columns:
+        df = runners_with_features.copy()
+    else:
+        df = runners_with_features.merge(
+            races[["race_id", "race_date"]],
+            on="race_id",
+            how="left",
+        )
     df["race_date"] = pd.to_datetime(df["race_date"])
 
     # Quarterit treenin alkupisteen jälkeen
@@ -178,11 +183,16 @@ def rolling_walk_forward(
         total_staked, total_pnl, roi_pct, avg_edge_pct, win_rate, brier_score.
         Tyhjä DataFrame jos dataa ei ole tarpeeksi.
     """
-    df = runners_with_features.merge(
-        races[["race_id", "race_date"]],
-        on="race_id",
-        how="left",
-    )
+    # race_date voi jo olla features-DataFramessa (build_feature_matrix lisää sen).
+    # Mergetään vain jos puuttuu — näin vältetään _x/_y-konflikti.
+    if "race_date" in runners_with_features.columns:
+        df = runners_with_features.copy()
+    else:
+        df = runners_with_features.merge(
+            races[["race_id", "race_date"]],
+            on="race_id",
+            how="left",
+        )
     df["race_date"] = pd.to_datetime(df["race_date"])
 
     date_min = df["race_date"].min()
