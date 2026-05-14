@@ -2530,6 +2530,134 @@ Auditoija pyysi: "jos Brier ennallaan tai heikkenee edelleen → sire on todella
 2. Vai pidetäänkö LOO-korjattu versio valmiina aktivoitavaksi kun dataa on 8+ viikkoa?
 3. Koodimuutos (`sire_features()` LOO) on valmis ja testattu riippumatta päätöksestä.
 
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 14.5.2026 (Opus 4.7) — selkeä tieteellinen tulos, suositukset alla
+
+### Tarkistus
+
+**LOO-koodi tarkistettu** ([build_features.py:447–491](src/features/build_features.py:447)):
+- `_loo_stats()` apufunktio yleistää sekä sire että dam_sire — siisti rakenne
+- Per-group totals + per-(horse,group) own_contrib → merge → LOO = total − own ✓
+- `_SIRE_MIN_STARTS = 30` -kynnystä sovelletaan **LOO-jälkeen** (`loo_starts >= 30`) — oikein
+- Win-rate käyttää `loo_starts.replace(0, np.nan)` jako-by-nolla-suoja ✓
+- Ei muutoksia API:in, vain implementaatio uudistui
+
+**Testit:**
+- 11/11 `test_sire_features.py` passing, sisältäen uuden `test_loo_excludes_own_starts`-testin joka **eksplisiittisesti validoi LOO-invariantin**
+- 244/244 yhteensä (paitsi `test_travsport.py` joka on tunnettu ympäristöongelma Hetznerillä)
+- notna% laski odotetusti: sire_win_rate 89.7 % → 81.9 % (yksin-jälkeläiset saavat 0 LOO-starttia ja siten NaN — **odotettavissa** ja oikein)
+
+**Empiirinen tulos:** Selkeä — Brier delta −0.0005 ilman sire-piirteitä, NLL delta −3.00. Sire **edelleen ei auta** vaikka leakage on poistettu. Tämä on **vahva tulos** koska kahden riippumattoman lähestymistavan (alkuperäinen sire + LOO-sire) tuottama vastaus on **sama**: sire-piirteet eivät anna lisäarvoa tällä datamäärällä.
+
+**Mielenkiintoinen sivuhavainto raportistasi:** `sire_lifetime_win_rate` nousi gain #1:een LOO-korjauksen jälkeen, mutta Brier ei parantunut. Tämä on klassinen **gain ≠ ennustavuus** -tilanne — vahvistaa että gain-mittarin tulkinta vaatii varovaisuutta multikollineaarisuus-ympäristössä.
+
+### Vastaukset auki oleviin kysymyksiin
+
+**Q1: Poistetaanko sire FEATURE_COLS:ista?**
+
+✅ **KYLLÄ — kommentoi pois TODO-merkinnällä** (sama kaava kuin K1-pollutoiduille kentille Vaihe A:ssa, [ranker.py:56–60](src/models/ranker.py:56)):
+
+```python
+FEATURE_COLS: list[str] = [
+    ...
+    # Sire-piirteet kommentoitu pois 14.5.2026 — empiirinen ablation näytti
+    # että ne eivät paranna mallia (Brier delta +0.0005 niiden kanssa,
+    # NLL delta +3) edes LOO-korjauksen jälkeen. Aktivoi uudelleen kun:
+    #   1. DB:ssä on >= 8 viikkoa puhdasta dataa
+    #   2. dam_sire-kattavuus runners:ssa > 60 % (nyt ~24 %)
+    #   3. Aja uusi sire_ablation_loo.py — Brier paranee selvästi
+    # "sire_lifetime_win_rate",
+    # "sire_lifetime_starts",
+    # "dam_sire_lifetime_win_rate",
+    # "dam_sire_lifetime_starts",
+    ...
+]
+```
+
+**Lisää KNOWN_ISSUES.md:hen** muistutus sirojen palauttamisesta — samalla kaavalla kuin #11 K1-pollutoidut kentät.
+
+**Q2: Pidetäänkö LOO-versio valmiina?**
+
+✅ **KYLLÄ — `sire_features()` LOO-koodi jää paikalleen.** Toisin sanoen:
+- FEATURE_COLS:issa sire-piirteet kommentoituna pois → ei vaikuta nykyiseen treenaukseen
+- `sire_features()` funktio LOO-toteutuksessa → koodi on **valmiina aktivoitavaksi**, ei lisätyötä myöhemmin
+- Uudet hevoset DB:ssä keräävät sire/dam_sire-dataa joka tapauksessa (`_upsert_horse`) → kun palautuspiste tulee, data on saatavilla
+
+**Q3: LOO-koodimuutos valmis päätöksestä riippumatta?**
+
+✅ **Erinomainen.** Tämä on oikea tieteellinen toteutus joka pysyy paikallaan riippumatta siitä käytetäänkö piirteitä nyt. Hyvä insinööri­tapa.
+
+### Tärkein johtopäätös
+
+**Sire-piirteiden poistaminen vapauttaa **puhtaan mallin pelkillä form/markkina/atg-piirteillä**:
+
+| Malli | Brier | NLL | Voittosignaali vs. uniform (0.0843) |
+|---|---|---|---|
+| LOO-sire | 0.0823 | 391.15 | 0.0020 |
+| **Ilman sireä** | **0.0818** | **388.15** | **0.0025** |
+
+Voittosignaali pelkästään **0.0025** — pieni mutta puhtaampi. Tämä on todellinen baseline josta lähdetään parannuksiin (pace, lisää dataa, devigged odds).
+
+### Mitä tämä tulos KERTOO ja MITÄ EI
+
+**Kertoo:**
+- ✅ Tieteellinen prosessi toimii: hypoteesi → testi → vahva johtopäätös
+- ✅ Mallin todellinen edge tällä datalla on hyvin pieni (0.0025)
+- ✅ Sire-piirteet odottavat hiljaisuudessa parempaa hetkeä
+- ✅ Datamäärä on suurin pullonkaula, ei piirre-engineering
+
+**EI kerro:**
+- ❌ Sire-piirteet ovat lopullisesti hyödyttömiä — vain tällä datalla
+- ❌ Malli on valmis tuotantoon — voittosignaali liian pieni
+- ❌ Sukutaulu ei vaikuta raveihin — vaikuttaa, mutta 455 lähtöä ei riitä sen mittaamiseen
+
+### Suositeltu seuraava askel
+
+```
+TÄNÄÄN (15 min):
+  • Kommentoi sire-piirteet pois FEATURE_COLS:ista
+  • Lisää KNOWN_ISSUES.md #12 (palautusehdot 8 vk:n päästä)
+
+VIIKON SISÄLLÄ:
+  • Travronden Vaihe 1 — per-runner-selvitys (1–2 h)
+  • Vaihe C1 — drift-monitorointi (~3 h)
+
+KUUKAUDEN SISÄLLÄ:
+  • Vaihe C2/C3 + Travronden Vaihe 2
+```
+
+Sire-saga on **valmis tältä erää**. Erinomainen prosessi — generoit hypoteesin, korjasit leakagen, ablation antoi selvän vastauksen. Tämä on juuri sellaista työtä joka erottaa **toimivan tuotantomallin** "näyttävältä mutta epäluotettavalta" mallista.
+
+**Pidä mielessä:** voittosignaali 0.0025 on **erittäin pieni**. Älä ylianalysoi tämän datan tuloksia — odota lisää dataa ennen kuin teet oletuksia. **C2-vaatimus (8 vk ennen päätöstä) on edelleen voimassa.**
+
+### Koodariraportti — TÄNÄÄN-tehtävät (14.5.2026)
+
+**Status:** ✅ valmis
+
+**Mitä muutettiin:**
+
+1. `src/models/ranker.py` — Sire-piirteet kommentoitu pois `FEATURE_COLS`:ista:
+   ```python
+   # Sire-piirteet kommentoitu pois 14.5.2026 — empiirinen ablation näytti
+   # että ne eivät paranna mallia (Brier delta +0.0005 niiden kanssa,
+   # NLL delta +3) edes LOO-korjauksen jälkeen. Aktivoi uudelleen kun:
+   #   1. DB:ssä on >= 8 viikkoa puhdasta dataa
+   #   2. dam_sire-kattavuus runners:ssa > 60 % (nyt ~24 %)
+   #   3. Aja uusi sire_ablation_loo.py — Brier paranee selvästi
+   # "sire_lifetime_win_rate",
+   # "sire_lifetime_starts",
+   # "dam_sire_lifetime_win_rate",
+   # "dam_sire_lifetime_starts",
+   ```
+   FEATURE_COLS: 45 → 41 piirrettä (4 sire-piirrettä kommentoitu).
+
+2. `KNOWN_ISSUES.md` — Lisätty uusi osio `#13 · Sire/dam_sire-piirteet kommentoitu pois FEATURE_COLS:ista`:
+   - Aktivointiehdot dokumentoitu (>= 8 vk dataa, dam_sire >60 %, ablation-varmistus)
+   - TODO-merkintä: ~2026-07-07
+   - Päivämäärä päivitetty: 14.5.2026
+
+**Vaikutus:** Malli käyttää nyt 41 piirrettä. `sire_features()` LOO-implementaatio
+jää koodiin odottamaan — aktivointi on triviaali (poista kommentit FEATURE_COLS:ista).
+
 **Auditoijan tarkistus:** _(odottaa)_
 
 ---

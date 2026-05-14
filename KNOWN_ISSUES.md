@@ -1,6 +1,6 @@
 # Ravit Edge — Tunnetut ongelmat
 
-> Päivitetty 10.5.2026.
+> Päivitetty 14.5.2026.
 > Vain avoimet ongelmat — korjatut bugit löytyvät tiedoston lopusta.
 
 ---
@@ -96,6 +96,30 @@ Aktivoidaan takaisin kun >= 600 puhdasta lähtöä kerätty K1-korjauksen jälke
 - `atg_trainer_starts`
 
 **TODO:** Kommentoi irti 2026-09-01 (tai kun DB:ssä on >= 600 lähtöä post-2026-05-10).
+
+---
+
+## Avoimet — sire-piirteet (aktivoidaan ~2026-07)
+
+### #13 · Sire/dam_sire-piirteet kommentoitu pois FEATURE_COLS:ista
+
+Seuraavat piirteet on väliaikaisesti kommentoitu pois `ranker.py`:n `FEATURE_COLS`:ista.
+Empiirinen ablation (Vaihe 3.7, 14.5.2026) osoitti että ne eivät paranna mallia
+edes LOO-korjauksen jälkeen: Brier delta = +0.0005, NLL delta = +3. Syy: liian
+vähän dataa (455 lähtöä / 17 vrk) ja dam_sire-kattavuus runners:ssa on vain ~24 %.
+
+Aktivoidaan takaisin kun kaikki ehdot täyttyvät:
+1. DB:ssä on >= 8 viikkoa puhdasta dataa (n. 2026-07-07)
+2. dam_sire-kattavuus runners:ssa > 60 %
+3. Uusi `sire_ablation_loo.py`-ajo näyttää Brier-parannuksen selvästi
+
+Piirteet:
+- `sire_lifetime_win_rate`
+- `sire_lifetime_starts`
+- `dam_sire_lifetime_win_rate`
+- `dam_sire_lifetime_starts`
+
+**TODO:** Aktivoi ~2026-07-07 — aja ablation ensin ja tarkista ehdot.
 
 ---
 

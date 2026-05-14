@@ -85,10 +85,16 @@ FEATURE_COLS: list[str] = [
     # --- B2: Sukutaulupiirteet (build_features.sire_features) ---
     # Vaatii horses-taulun horses-parametrina build_feature_matrix():lle.
     # NaN jos isä/emänisä tuntematon tai liian pieni otos (< 30 starttia).
-    "sire_lifetime_win_rate",
-    "sire_lifetime_starts",
-    "dam_sire_lifetime_win_rate",
-    "dam_sire_lifetime_starts",
+    # Sire-piirteet kommentoitu pois 14.5.2026 — empiirinen ablation näytti
+    # että ne eivät paranna mallia (Brier delta +0.0005 niiden kanssa,
+    # NLL delta +3) edes LOO-korjauksen jälkeen. Aktivoi uudelleen kun:
+    #   1. DB:ssä on >= 8 viikkoa puhdasta dataa
+    #   2. dam_sire-kattavuus runners:ssa > 60 % (nyt ~24 %)
+    #   3. Aja uusi sire_ablation_loo.py — Brier paranee selvästi
+    # "sire_lifetime_win_rate",
+    # "sire_lifetime_starts",
+    # "dam_sire_lifetime_win_rate",
+    # "dam_sire_lifetime_starts",
     # --- D: Ratarakenne (build_features.track_structure_features) ---
     # Vaatii tracks-taulun tracks-parametrina build_feature_matrix():lle.
     # NaN jos rata puuttuu taulusta (gallop-radat, manuaaliset stub-rivit).
