@@ -139,26 +139,207 @@ def quarterly_walk_forward(
     return pd.DataFrame([r.__dict__ for r in results])
 
 
-def edge_decay_analysis(backtest_df: pd.DataFrame) -> dict:
-    """Onko edge pienenemässä ajan myötä? Jos kyllä → retraining tiheämmin."""
+def rolling_walk_forward(
+    runners_with_features: pd.DataFrame,
+    races: pd.DataFrame,
+    window_days: int = 14,
+    train_window_days: int = 28,
+    edge_threshold: float = 0.05,
+    flat_stake: float = 100.0,
+) -> pd.DataFrame:
+    """Walk-forward backtest mukautuvalla ikkunan pituudella.
+
+    Kvartaali-ikkuna (`quarterly_walk_forward`) on liian karkea kun dataa on
+    vain viikkoja — ensimmäinen kvarttaali-ikkuna voi jäädä kokonaan tyhjäksi.
+    Tämä funktio toimii heti kun `train_window_days` verran historiaa on
+    saatavilla, ja etenee `window_days`:n pituisissa askeleissa.
+
+    Käyttö alkuvaiheessa (< 6 kk dataa):
+        results = rolling_walk_forward(features, races, window_days=14, train_window_days=28)
+    Myöhemmin (≥ 6 kk dataa): vaihda quarterly_walk_forward:iin.
+
+    TÄRKEÄ RAJOITUS: Vaikka tämä tuottaa tuloksia jo 14 vrk:n ikkunalla,
+    stop/go-päätöstä EI tehdä alle 8 viikon (≥ 4 × window_days) tuloksesta
+    (tilastollinen luotettavuusraja, C2-vaatimus).
+
+    Args:
+        runners_with_features: kaikki historian runnerit + feature-sarakkeet
+                              + finish_position + win_odds_final
+        races: race-master-data (race_date)
+        window_days: testijoukon pituus päivissä (oletus 14)
+        train_window_days: treenidatan minimipituus ennen ensimmäistä testiä (oletus 28)
+        edge_threshold: minimi edge value-pelille (5 %)
+        flat_stake: tasapanos per peli
+
+    Returns:
+        DataFrame jossa per ikkuna: period, n_races, n_value_bets,
+        total_staked, total_pnl, roi_pct, avg_edge_pct, win_rate, brier_score.
+        Tyhjä DataFrame jos dataa ei ole tarpeeksi.
+    """
+    df = runners_with_features.merge(
+        races[["race_id", "race_date"]],
+        on="race_id",
+        how="left",
+    )
+    df["race_date"] = pd.to_datetime(df["race_date"])
+
+    date_min = df["race_date"].min()
+    date_max = df["race_date"].max()
+
+    train_start = date_min
+    first_test_start = train_start + pd.Timedelta(days=train_window_days)
+
+    if first_test_start >= date_max:
+        # Ei tarpeeksi dataa edes ensimmäiseen ikkunaan
+        return pd.DataFrame(columns=[
+            "period", "n_races", "n_value_bets", "total_staked",
+            "total_pnl", "roi_pct", "avg_edge_pct", "win_rate", "brier_score",
+        ])
+
+    results: list[BacktestResult] = []
+
+    window_start = first_test_start
+    while window_start < date_max:
+        window_end = window_start + pd.Timedelta(days=window_days - 1)
+
+        train_df = df[df["race_date"] < window_start]
+        test_df = df[
+            (df["race_date"] >= window_start) & (df["race_date"] <= window_end)
+        ]
+
+        # Tarvitaan riittävästi dataa treenaukseen ja testiin
+        if len(train_df) < 100 or len(test_df) < 10:
+            window_start += pd.Timedelta(days=window_days)
+            continue
+
+        # Treenaa uudelleen joka ikkunalle — simuloi live-retraining-sykliä
+        model = train_ranker(train_df)
+
+        preds = predict_win_probabilities(model, test_df)
+        merged = test_df.merge(
+            preds[["race_id", "horse_id", "win_prob"]],
+            on=["race_id", "horse_id"],
+        )
+
+        merged["expected_value"] = merged["win_prob"] * merged["win_odds_final"]
+        merged["edge"] = merged["expected_value"] - 1.0
+        bets = merged[merged["edge"] >= edge_threshold].copy()
+
+        merged["actual_win"] = (merged["finish_position"] == 1).astype(int)
+        brier = float(((merged["win_prob"] - merged["actual_win"]) ** 2).mean())
+
+        if bets.empty:
+            # Merkitään ikkuna vaikka pelejä ei syntynyt — brier on silti hyödyllinen
+            results.append(BacktestResult(
+                period=f"{window_start.date()}–{window_end.date()}",
+                n_races=test_df["race_id"].nunique(),
+                n_value_bets=0,
+                total_staked=0.0,
+                total_pnl=0.0,
+                roi_pct=0.0,
+                avg_edge_pct=0.0,
+                win_rate=0.0,
+                brier_score=brier,
+            ))
+        else:
+            bets["pnl"] = np.where(
+                bets["finish_position"] == 1,
+                flat_stake * (bets["win_odds_final"] - 1),
+                -flat_stake,
+            )
+            total_staked = len(bets) * flat_stake
+            total_pnl = float(bets["pnl"].sum())
+            results.append(BacktestResult(
+                period=f"{window_start.date()}–{window_end.date()}",
+                n_races=test_df["race_id"].nunique(),
+                n_value_bets=len(bets),
+                total_staked=total_staked,
+                total_pnl=total_pnl,
+                roi_pct=100 * total_pnl / total_staked if total_staked else 0.0,
+                avg_edge_pct=float(bets["edge"].mean() * 100),
+                win_rate=float((bets["finish_position"] == 1).mean()),
+                brier_score=brier,
+            ))
+
+        window_start += pd.Timedelta(days=window_days)
+
+    return pd.DataFrame([r.__dict__ for r in results])
+
+
+def edge_decay_analysis(
+    backtest_df: pd.DataFrame,
+    score_col: str = "roi_pct",
+) -> dict:
+    """Onko mallin laatu tai edge pienenemässä ajan myötä?
+
+    Suositeltu mittari: `brier_score` (pienempi = parempi kalibrointi).
+    Brier-score on vähemmän varianssinen kuin ROI ja kuvaa suoraan
+    mallin todennäköisyyksien tarkkuutta — ei markkinakerroin-melua.
+
+    Taaksepäin-yhteensopiva: oletusarvo `roi_pct` säilyttää vanhan käyttäytymisen.
+
+    Args:
+        backtest_df: quarterly_walk_forward() tai rolling_walk_forward():n tulos.
+        score_col: sarake jota analysoidaan. Suositukset:
+            "brier_score" — mallin kalibrointi (pienempi on parempi)
+            "roi_pct"     — taloudellinen tuotto (suurempi on parempi, default)
+
+    Returns:
+        dict jossa:
+            verdict      — tekstimuotoinen tulos
+            trend_slope  — regressiokulmakerroin (None jos dataa ei tarpeeksi)
+            score_col    — käytetty mittari (kirjauksia varten)
+            first_half   — mittarin keskiarvo ensimmäisellä puoliskolla
+            second_half  — mittarin keskiarvo toisella puoliskolla
+    """
     if len(backtest_df) < 4:
-        return {"verdict": "ei tarpeeksi dataa", "trend_slope": None}
+        return {
+            "verdict": "ei tarpeeksi dataa",
+            "trend_slope": None,
+            "score_col": score_col,
+            "first_half": None,
+            "second_half": None,
+        }
 
-    backtest_df = backtest_df.reset_index(drop=True)
-    backtest_df["period_idx"] = range(len(backtest_df))
+    if score_col not in backtest_df.columns:
+        raise ValueError(
+            f"score_col='{score_col}' ei löydy backtest_df:stä. "
+            f"Saatavilla: {list(backtest_df.columns)}"
+        )
 
-    slope = np.polyfit(backtest_df["period_idx"], backtest_df["roi_pct"], 1)[0]
+    df = backtest_df.reset_index(drop=True).copy()
+    df["period_idx"] = range(len(df))
 
-    if slope < -1.0:
-        verdict = "❌ Edge pienenee selvästi - retreenaa kuukausittain"
-    elif slope < -0.3:
-        verdict = "🟡 Lievää edge decayta - retreenaa neljännesvuosittain"
+    slope = float(np.polyfit(df["period_idx"], df[score_col], 1)[0])
+    half = len(df) // 2
+    first_half = float(df[score_col].head(half).mean())
+    second_half = float(df[score_col].tail(half).mean())
+
+    # Suunnan tulkinta: Brier-score → pienempi parempi (negatiivinen slope = paranee)
+    #                  roi_pct      → suurempi parempi (positiivinen slope = paranee)
+    brier_mode = score_col == "brier_score"
+
+    if brier_mode:
+        # Brier: slope < 0 tarkoittaa paranemista (ei driftiä)
+        if slope > 0.002:
+            verdict = "❌ Mallin kalibrointi heikkenee (brier nousee) — retreenaa kuukausittain"
+        elif slope > 0.0005:
+            verdict = "🟡 Lievää kalibraation heikkenemistä — retreenaa neljännesvuosittain"
+        else:
+            verdict = "✅ Kalibrointi stabiili — puolivuosittainen retraining riittää"
     else:
-        verdict = "✅ Edge stabiili - puolivuosittainen retraining riittää"
+        # roi_pct: slope < 0 tarkoittaa heikkenemistä
+        if slope < -1.0:
+            verdict = "❌ Edge pienenee selvästi — retreenaa kuukausittain"
+        elif slope < -0.3:
+            verdict = "🟡 Lievää edge decayta — retreenaa neljännesvuosittain"
+        else:
+            verdict = "✅ Edge stabiili — puolivuosittainen retraining riittää"
 
     return {
         "verdict": verdict,
         "trend_slope": slope,
-        "first_half_roi": backtest_df["roi_pct"].head(len(backtest_df) // 2).mean(),
-        "second_half_roi": backtest_df["roi_pct"].tail(len(backtest_df) // 2).mean(),
+        "score_col": score_col,
+        "first_half": first_half,
+        "second_half": second_half,
     }

@@ -300,6 +300,34 @@ def apply_isotonic(
     return out
 
 
+def compute_nll(predictions: pd.DataFrame) -> float:
+    """Negatiivinen log-likelihood validointidatassa (NLL).
+
+    Yhteinen mittari temperature- ja isotonic-kalibrointivaihtoehtojen
+    vertaamiseen. Pienempi NLL = paremmin kalibroitu malli.
+
+    Käyttö:
+        val_pred_temp = predict_win_probabilities(model, val_df, temperature=T)
+        val_pred_iso  = apply_isotonic(val_pred_raw, iso)
+        nll_temp = compute_nll(val_pred_temp.merge(val_df[["race_id","horse_id","finish_position"]], ...))
+        nll_iso  = compute_nll(val_pred_iso.merge(...))
+        # Valitse pienempi
+
+    Args:
+        predictions: DataFrame jossa sarakkeet race_id, win_prob, finish_position.
+            NaN-arvot (finish_position tai win_prob) suodatetaan automaattisesti.
+
+    Returns:
+        NLL (float, ≥ 0). Lasketaan vain finish_position==1 -rivien
+        todennäköisyyksistä (LambdaRank-style: yksi voittaja per lähtö).
+        Pienempi on parempi.
+    """
+    df = predictions.dropna(subset=["finish_position", "win_prob"]).copy()
+    actual_win = (df["finish_position"] == 1).astype(float).values
+    probs = df["win_prob"].clip(1e-9, 1.0).values
+    return -float(np.sum(actual_win * np.log(probs)))
+
+
 def predict_win_probabilities(
     model: lgb.Booster,
     race_df: pd.DataFrame,
