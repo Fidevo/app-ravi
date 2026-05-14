@@ -2730,7 +2730,41 @@ Pace on **tärkeä mutta ei kiireellinen** parannus. Tee tarvittava infra ensin,
 
 ## C1 · Feature drift -monitorointi
 
-**Status:** ❌ tekemättä
+**Status:** ✅ valmis (14.5.2026)
+
+**Mitä muutettiin:**
+- `src/monitoring/__init__.py` — uusi paketti
+- `src/monitoring/feature_drift.py` — päämoduuli:
+  - `compute_feature_stats()`: per-piirre mean/std/p25/p50/p75/NaN-% kaikille FEATURE_COLS:n numeerisille ja kategorisille piirteille
+  - `detect_anomalies()`: vertaa edelliseen historiaan — NaN-%:n +10pp-nousu tai mean/p50 yli 2σ → hälytys. Alle 3 vk historaa: raw 20% raja.
+  - `log_feature_distributions()`: lataa DB, rakentaa feature-matriisin, tallentaa `data/logs/feature_drift_YYYY-WW.csv`
+  - `print_drift_report()`: ihmisluettava yhteenveto stdoutiin
+- `scripts/run_feature_drift.py` — CLI-ajuri (argparse: `--db`, `--log-dir`, `--week`, `--verbose`)
+- `tests/test_feature_drift.py` — 15 testiä, 100 % passing
+
+**Crontab Hetznerillä (sunnuntai klo 02:00):**
+```
+0 2 * * 0 cd /home/ravi/app-ravi && /home/ravi/app-ravi/.venv/bin/python scripts/run_feature_drift.py >> /home/ravi/app-ravi/data/logs/drift_cron.log 2>&1
+```
+
+**Ensimmäinen ajo — peruslinja 2026-20 (4 838 runneria):**
+
+| Piirre | NaN-% | Huomio |
+|---|---|---|
+| `handicap_meters` | 82.2 % | Voltstart-lähdöt — odotettua |
+| `trainer_*` | 40.1 % | Odotettua |
+| `driver_*` | 29.4 % | Odotettua |
+| `race_max_earnings` | 33.3 % | Odotettua |
+| `atg_lifetime_starts` | 4.4 %, mean=29.5 | **K1-seuranta** — nyt tallessa |
+| `barfota_law_active` | 0 % NaN, mean=0.0 | Normaalia (ei aktiivinen) |
+
+Tallennettu: `/home/ravi/app-ravi/data/logs/feature_drift_2026-20.csv`
+Anomalioita: **ei** — peruslinja kirjattu, vertailu alkaa ensi viikosta.
+
+**K1-detektio vahvistettu testeillä:**
+- `test_k1_style_drift_detected`: vakaa baseline (mean ≈ 100 ± 0.5), +10 hyppy → CRITICAL hälytys (n_sigma >> 2)
+- `test_nan_pct_spike_detected`: NaN-% +20pp → anomalia
+- `test_stable_feature_no_anomaly_with_history`: pienet normaalivaihtelut eivät laukaise hälytystä
 
 **Auditoijan tarkistus:** _(odottaa)_
 
@@ -2895,4 +2929,125 @@ kilpailun pace-tavoitetta vai hevosen historiallista luokitusta.
   + `speed_records` -pilotti 100 kierroksella
 - **Ei koskaan:** `speed` tai `comment` piirteinä (post-race leakage)
 
-**Auditoijan tarkistus:** _(odottaa)_
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 14.5.2026
+
+### start_interval_group -selvitys (14.5.2026)
+
+**Metodi:** `scripts/travronden_interval_group.py` — 10 finished-kierrosta
+(170800–171800), 226 runneria, 29 lähtöä, 3 hevosta >= 2 kierroksella.
+
+**Tulokset:**
+
+| Tarkistus | Tulos |
+|---|---|
+| Vaihtelee saman lähdön sisällä eri hevosten välillä? | **Kyllä** — 28/29 lähdöä (97 %) |
+| Vaihtelee samalla hevosella eri kierroksilla? | **Kyllä** — 2/3 monihevosesta eri arvo |
+| Stabiili (sama arvo joka kierroksella)? | **Vain 1/3 hevosesta** |
+
+**Konkreettinen esimerkki vaihtelusta:**
+- Hevonen `atg_id=764491`: group=**1** (nopein) kierroksella 171600 → group=**31** (hitain) kierroksella 171100
+- Hevonen `atg_id=767447`: group=**11** kierroksella 171600 → group=**1** kierroksella 171100
+
+**Johtopäätös: Tulkinta (c) vahvistunut** — `start_interval_group` on
+Travrondenin asiantuntijoiden **per-hevonen, per-lähtö pace-arvio**, ei
+historiallinen kiinteä luokka. Arvo voi muuttua dramaattisesti lähdöstä
+toiseen — se kuvaa hevosen odotettua roolia juuri tässä kilpailussa
+(nopea vai hidas aloitus, oma tahti vai seuraajarooli).
+
+Tämä vahvistaa että `start_interval_group` on **arvokkain pre-race piirre**
+Travrondenin datasta — lähinnä asiantuntijan pace-arvausta mitä muualta
+ei saa. Priorisoitava Vaihe 2:ssa. (Opus 4.7) — erinomainen tutkimus, päätökset tarkennettu alla
+
+### Tärkeimmät löydökset auditoijan näkökulmasta
+
+1. **`speed` = post-race km-aika** — tämä on **kriittinen löytö**. Olisit voinut helposti lisätä `speed`-kentän malliin pre-race-piirteenä ja saada **vakavan data leakage -bugin** (samanlainen kuin K1). Että huomasit speed = speed_records.M.speed identtisyyden samana päivänä on **erittäin terävä havainto**.
+
+2. **`rating` = 0 %** — alkuperäinen oletukseni oli että rating täyttyy `status=finished`-kierroksilla. Empiirinen tulos kertoo että ei. Mahdollisia syitä: vain V75/V86-kierroksilla (premium), tai vaatii **status=`analysed`** (välivaihe ennen finishedia). Et tarvitse tutkia tätä — pre-race-kenttiä on muutenkin riittävästi.
+
+3. **`start_interval_group {1, 11, 21, 31}` on löydös** — tämä on **lähinnä pace-piirre mitä saamme ilman manuaalista scrapingia**. 4-portainen luokitus, pre-race, ~60 % kattavuus, ei post-race-luonteinen (täytetty struken-hevosillekin).
+
+### Vahvistettu päätös: Vaihe 2 lykätään
+
+Sopusoinnussa suosittelujeni kanssa. Lisään tarkennuksen:
+
+#### Pieni jatkotehtävä ennen Vaihe 2:ta (~30 min, ei kiire)
+
+**Selvitä mitä `start_interval_group` tarkkaan tarkoittaa.** Kolme mahdollista tulkintaa:
+
+| Tulkinta | Mistä tunnistaa | Hyödyllisyys |
+|---|---|---|
+| (a) Hevosen historiallinen pace-luokka | Sama hevonen saa saman arvon eri kierroksilla | OK — osittain päällekkäin form-piirteiden kanssa |
+| (b) Kilpailun pace-asetelma | Sama arvo kaikille saman lähdön hevosille (tai 2–3 ryhmää) | **Erittäin hyödyllinen** — kuvaa lähdön ennakoituja dynamiikkaa |
+| (c) Travrondenin ohjaajien pace-arvio per hevonen | Vaihtelee samalla hevosella eri kierrosten välillä | **Paras** — asiantuntija-arvio |
+
+**Tarkistustapa (1 SQL-tyylin query Travronden-cachesta):**
+
+```python
+# Onko sama hevonen eri kierroksilla?
+# Jos kyllä → mikä on start_interval_group:n vaihtelu?
+groups_per_horse = []
+for race_cache_file in glob('data/raw/travronden_pilot/*.json'):
+    race = json.load(open(race_cache_file))
+    for start in race.get('starts', []):
+        groups_per_horse.append({
+            'horse_id': start.get('horse', {}).get('atg_id'),
+            'race_id': race.get('id'),
+            'group': start.get('start_interval_group'),
+        })
+df = pd.DataFrame(groups_per_horse)
+# Hevoset >= 2 kierroksella:
+multi = df.groupby('horse_id').filter(lambda g: len(g) >= 2)
+print('Eri groups per hevosen:',
+      multi.groupby('horse_id')['group'].nunique().value_counts())
+```
+
+Jos tulos on:
+- "Sama group joka kierroksella" → tulkinta (a): historiallinen pace-luokka
+- "Vaihteleva group" → tulkinta (b) tai (c)
+
+Tämä ei tarvitse uusia API-pyyntöjä, käyttää jo cached datan.
+
+### Suositeltu työnkulku (tarkennettu)
+
+```
+VIIKON SISÄLLÄ (prioriteettijärjestys):
+  1. Vaihe C1 — drift-monitorointi (~3 h)        ← TÄRKEIN
+  2. start_interval_group -selvitys (~30 min)    ← halpa pieni tutkimus
+
+KUUKAUDEN SISÄLLÄ:
+  • Travronden Vaihe 2 (kevyt, vain pre-race-piirteet):
+      - is_first_after_castration (tunnettu signaali)
+      - is_first_new_driver/trainer/shoes/carriage
+      - start_interval_group (pace-ryhmä, kun tulkinta selvillä)
+      - speed_records.{K,M,L} (rikkaampi kuin atg_best_km_for_this_setup)
+      - expected_odds (markkina-arvio toiselta lähteeltä)
+  • Vaihe C2 — walk-forward-dokumentaatio (~30 min)
+
+KUN 8+ VIIKKOA DATAA (~2026-07-07):
+  • Sire-piirteiden palautus FEATURE_COLS:iin (KNOWN_ISSUES #13)
+  • C3 — pace-pilotti JOS start_interval_group ei riitä
+  • Mallin uudelleentreenaus rikastetulla featuristolla
+```
+
+### Erityisesti hyvin tehty
+
+1. **Speed-leakagen tunnistaminen** — vältit täsmälleen samanlaisen bugin kuin K1
+2. **Kenttien hyödyllisyysluokittelu** — ⚠️ POST-RACE / ✅ PRE-RACE / ❌ EI SAATAVILLA -taulukko on selkeä insinöörin esitysmuoto
+3. **Tiedonkeruun rajoittaminen** — 40 runneria 18 kierroksesta riitti johtopäätöksiin, et tuhlannut API-pyyntöjä
+4. **Erottelu "lykkäys" vs. "hylkäys"** — koodi pysyy odottamassa parempaa hetkeä, ei tehdä lopullista hylkäystä
+5. **Konkretisoit speed_records.K/M/L:n hyödyn** suhteessa atg_best_km_for_this_setup -piirteeseen — tämä on **suora upgrade**
+
+### Yksi pohdinta jatkoa varten
+
+Kun teette Vaihe 2:n kuukauden sisällä, harkitse **kevyttä A/B-vertailua**:
+
+- A: nykyinen malli (~41 piirrettä)
+- B: nykyinen + Travronden-pre-race-piirteet
+
+Vertaa Brier-eroa kun on tarpeeksi dataa. Jos Travronden ei paranna mallia merkittävästi (esim. < 0.005 Brier), älä rakenna jatkuvaa keräystä — keräys joka 4 piirteelle voi olla raskaampi kuin niiden hyöty.
+
+### Kokonaisarvio
+
+Tämä on **toinen erinomainen tutkimustulos peräkkäin** (sire-ablation + Travronden Vaihe 1). Päivä on ollut tuottelias mutta tieteellisesti vakuuttava — kaksi hypoteesia testattu, molemmista tullut konkreettinen vastaus.
+
+**Lopeta tänään tähän.** Mahdollinen ylimääräinen työ (start_interval_group -selvitys) on **ei-kiire** ja voi tehdä huomenna tai viikon sisällä. C1 on **prioriteetti #1** seuraavalle työpäivälle.
