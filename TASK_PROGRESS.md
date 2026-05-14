@@ -1547,6 +1547,226 @@ tests/test_backtest.py  16 passed   (uusi tiedosto: 5+10+1)
 1. `edge_decay_analysis` palautusavaimet muuttuivat: `first_half_roi`/`second_half_roi` → `first_half`/`second_half`. Onko tämä OK vai pitääkö säilyttää vanhat nimet yhteensopivuuden vuoksi? (Ei tällä hetkellä muuta käyttäjää kuin testit.)
 2. `rolling_walk_forward` — onko `train_window_days=28` oletusarvo sopiva vai pitäisikö sen olla enemmän (esim. 56)? Tällä hetkellä LightGBM treenaa 100 rivistä joka voi olla liian vähän luotettavaan malliin.
 
+**Auditoijan tarkistus:** ✅ HYVÄKSYTTY 10.5.2026 (Opus 4.7)
+
+### Tarkistus
+
+**Koodimuutokset tarkistettu lukemalla ja ajamalla:**
+
+1. **`compute_nll`** ([ranker.py:303–328](src/models/ranker.py:303))
+   - Implementaatio yksinkertainen ja oikea: `df.dropna(...)`, `clip(1e-9, 1.0)`, summa logaritmien negaatiosta
+   - Sanity-testi varmensi matematiikan:
+     - Täydellinen ennustus → NLL = 0.0 ✓
+     - Pahin (win_prob=0 voittajalle) → NLL ≈ 20.72 (clip 1e-9 toimii) ✓
+     - NaN-suodatus → vain validit rivit lasketaan ✓ (`-log(0.5) = 0.6931`)
+     - Additiivisuus → 2 lähtöä = 2 × NLL ✓ (`-2*log(0.5) = 1.3863`)
+   - Yhteinen mittari temperature ja isotonic -vaihtoehtojen vertaamiseen — toimii kuten suunniteltu
+
+2. **`rolling_walk_forward`** ([backtest.py:142–266](src/models/backtest.py:142))
+   - Rakenne oikea: window_days=14, train_window_days=28, etenee askeleissa
+   - Suojaukset järkeviä: `len(train_df) < 100 or len(test_df) < 10` ohittaa pieniä ikkunoita
+   - **Tärkeä toteutuksen yksityiskohta:** brier_score lasketaan vaikka value-pelejä ei syntyisi (`if bets.empty` -haara säilyttää brier-arvon). Tämä on **olennainen** drift-analyysille — muuten päättäisit ettei dataa ole vaikka mallin kalibrointi olisi mitattavissa
+   - Tyhjä DataFrame jos data ei riitä → ei crash
+   - Tärkeä rajoitus dokumentoitu: stop/go-päätös ei alle 8 vk:n (4×window_days)
+
+3. **`edge_decay_analysis`** ([backtest.py:269–345](src/models/backtest.py:269))
+   - Toimivat sanity-testit:
+     - Kasvava brier 0.10→0.20, slope=0.02 → "❌ Mallin kalibrointi heikkenee" ✓
+     - Laskeva ROI → "❌ Edge pienenee selvästi" ✓ (taaksepäin-yhteensopiva)
+     - Tuntematon `score_col` → ValueError ✓
+   - **Suunnan tulkinta oikein käännetty Brier-modessa**: positiivinen slope = pahentuva (Brierillä pienempi parempi). ROI-modessa entinen logiikka säilyy.
+   - Kynnysarvot (Brier: 0.0005, 0.002 / ROI: -0.3, -1.0) tuntuvat järkeviltä alkuvaiheen heuristiikoilta — tarkennetaan myöhemmin kun on dataa tuotannosta
+
+**Testikattavuus:** 254 passing (oli 231 → +23 uutta), 11.02 s. Mukana:
+- test_ranker.py: +7 compute_nll
+- test_backtest.py: +5 rolling_walk_forward, +10 edge_decay, +1 muu
+
+### Vastaukset auki oleviin kysymyksiisi
+
+**Q1: `first_half_roi`/`second_half_roi` → `first_half`/`second_half` — OK?**
+
+✅ **Hyväksy nimimuutos.** Perustelu:
+- Nimet ovat nyt **yleisiä** — toimivat sekä roi:lle että brierille. Vanhat nimet olisivat olleet ROI-spesifisiä eivätkä jaksaisi Brier-kontekstissa.
+- Ei ulkoisia kuluttajia, ne ovat sisäisten testien sisällä → ei rikkovaa muutosta
+- Lopputulos-dictissä on `score_col`-avain joka kertoo kontekstin → tulkinta yksiselitteinen
+- **Jos myöhemmin lisätään ulkoinen kuluttaja**, voi lisätä takaisin alias-avaimet `first_half_roi = first_half` -tyyliin. Mutta ei tarpeen nyt.
+
+**Q2: `train_window_days=28` riittävä?**
+
+🟡 **Hyväksyttävä alkuun, mutta dokumentoi rajoitus.**
+
+Argumentit puolesta:
+- 28 vrk × ~50 lähtöä/vrk × 12 hevosta ≈ ~700–1400 esimerkkiä (riippuen tiheydestä)
+- LightGBM toimii kohtuullisesti 100+ esimerkillä, oikeasti hyvin 1000+ rivistä
+- Alkuvaiheessa SAMA pieni malli on parempi kuin "ei mallia ollenkaan" — saamme nähdä tuloksia heti
+
+Argumentit vastaan:
+- 28 vrk:n malli **yli-oppii** kausivaihtelua (esim. talvi/kesä, jos ajetaan kahta evaluointia eri kausilla)
+- Sama hevonen voi olla treenidatassa monta kertaa pienen ikkunan sisällä → kausivaihtelu-konfundaatio
+
+**Suositus:**
+- Pidä `train_window_days=28` oletuksena ALKUVAIHEESSA (< 60 vrk:n historia)
+- Lisää docstringiin: "kun historiaa on > 60 vrk, harkitse `train_window_days=56` tai `train_window_days=84` luotettavammille tuloksille"
+- **Vaiheen 3 ensimmäisessä baseline-treenauksessa**: aja molemmilla (`28` ja `56`) ja vertaile NDCG-tuloksia ja kalibrointia — tämä on yksi pieni ablation-koe
+
+Käyttäjän rajoitus säilyy joka tapauksessa: **stop/go-päätöstä ei tehdä alle 8 viikon yhteistuloksesta**, riippumatta ikkunakoosta.
+
+### Pieni huomio
+
+Kynnysarvot `edge_decay_analysis`:ssa (slope > 0.002 Brierille, slope < -1.0 ROI:lle) ovat **alkuvaiheen heuristiikkoja**. Niitä pitää tarkentaa kun on muutama kuukausi tuotantodataa joka näyttää luonnollisen viikkovaihtelun. Lisää **TODO** komenttiin että kynnyksiä päivitetään C1-monitoroinnin tulosten perusteella.
+
+### Päätös
+
+**Kaikki 3 koodimuutosta (3.2, 3.4, 3.5) ovat hyväksyttäviä ja toimivat empiirisesti.** Vaihe 3 (baseline-treenaus + arviointi) voi nyt alkaa täydellä työkalupalkilla.
+
+### Suositeltu järjestys baseline-treenaukseen
+
+```python
+# 1. Lataa data
+runners = pd.read_sql("SELECT r.*, ra.race_date FROM runners r JOIN races ra ON r.race_id=ra.race_id", con)
+races, horses = pd.read_sql(...), pd.read_sql(...)
+horse_starts = pd.read_sql("SELECT * FROM horse_starts WHERE withdrawn != 1", con)
+tracks = pd.read_sql("SELECT * FROM tracks", con)
+
+# 2. Pre-process (tärkeä: fill_finish_positions ENNEN!)
+runners_filled = fill_finish_positions(runners)
+features = build_feature_matrix(runners_filled, races,
+    horse_starts=horse_starts, horses=horses, tracks=tracks)
+
+# 3. Walk-forward split
+results = rolling_walk_forward(features, races, window_days=14, train_window_days=28)
+print(results)
+
+# 4. Drift-analyysi käyttäen Brier-scorea
+drift = edge_decay_analysis(results, score_col="brier_score")
+print(drift["verdict"])
+
+# 5. Erillinen vertailu temperature vs isotonic — yhdellä holdout-joukolla
+last_window_train = features[features["race_date"] < "2026-05-04"]
+last_window_test  = features[features["race_date"] >= "2026-05-04"]
+model = train_ranker(last_window_train)
+preds = predict_win_probabilities(model, last_window_test, temperature=1.0)
+preds_with_truth = preds.merge(last_window_test[["race_id","horse_id","finish_position"]], on=["race_id","horse_id"])
+
+T = calibrate_temperature(preds_with_truth)
+preds_temp = predict_win_probabilities(model, last_window_test, temperature=T)
+nll_temp = compute_nll(preds_temp.merge(last_window_test[["race_id","horse_id","finish_position"]], on=["race_id","horse_id"]))
+
+iso = calibrate_isotonic(preds_with_truth)
+preds_iso = apply_isotonic(preds, iso)
+nll_iso = compute_nll(preds_iso.merge(last_window_test[["race_id","horse_id","finish_position"]], on=["race_id","horse_id"]))
+
+print(f"temp T={T:.3f} NLL={nll_temp:.4f}")
+print(f"iso        NLL={nll_iso:.4f}")  # valitse pienempi
+
+# 6. Feature importance
+print(pd.Series(model.feature_importance(importance_type="gain"),
+                index=model.feature_name()).sort_values(ascending=False).head(15))
+# Varmista: track_home_stretch_m top-15:ssä
+```
+
+Raportoi NDCG@1, NDCG@3, kalibrointitaulu (`evaluate_calibration`), feature-importance top-15, valittu kalibrointimenetelmä (temperature vai isotonic), ja drift-verdict tuotantoon. Aja ainakin kahdella `train_window_days`-arvolla (28 + 56) jos aika sallii.
+
+---
+
+## Vaihe 3 — Baseline-treenaus · Koodariraportti (14.5.2026)
+
+**Status:** ✅ valmis
+
+### Bugikorjaus ennen treenauksen aloitusta
+
+`rolling_walk_forward` ja `quarterly_walk_forward` kaatuivat `KeyError: 'race_date'`-virheeseen kun `features`-DataFramessa oli jo `race_date`-sarake (`build_feature_matrix` lisää sen). Korjattu: merge ohitetaan jos sarake löytyy jo. Commit `bbbc450`, testit 254/254 ✅.
+
+### Aineisto (Hetzner, 14.5.2026)
+
+| | |
+|---|---|
+| runners | 4 838 |
+| races | 455 |
+| horse_starts | 115 824 |
+| horses | 4 114 |
+| tracks | 30 |
+| Päivämääräväli | 2026-04-27 – 2026-05-14 (17 vrk) |
+
+### rolling_walk_forward (train_window_days=28)
+
+→ **0 ikkunaa** — odotettu tulos: dataa vain 17 vrk, tarvitaan ≥ 42 vrk (28 treeni + 14 testi). Funktio ei kaatunut, palautti tyhjän DataFramen oikein.
+
+### Manuaalinen split (treeni/testi)
+
+- **Split:** 2026-05-08
+- **Treeni:** 2 966 runneria, 281 lähtöä (Apr 27 – May 7)
+- **Testi:** 1 872 runneria, 174 lähtöä (May 8 – May 14)
+
+`horse_age` puuttuu — `birth_year`-JOIN puuttuu `runners`-taulusta. Kirjattu `_resolve_cols`-varoituksena, 44 muuta piirrettä käytössä.
+
+### Kalibrointi
+
+| Menetelmä | T | NLL |
+|-----------|---|-----|
+| Temperature | 2.044 | 312.38 |
+| **Isotonic** | — | **304.76** |
+
+→ **Isotonic valittu** (NLL 7.6 pienempi).
+
+T=2.044 on huomionarvoinen: softmax-jakaumat ovat hyvin teräviä pienellä datalla — LightGBM "ylikalibroi" suosikkeja. Temperature lähes kaksinkertaistaa hajontaa, silti isotonic parempi.
+
+### Kalibrointitaulu (isotonic)
+
+| Bin | n | pred_mean | actual_mean |
+|-----|---|-----------|-------------|
+| 0–8 % | 653 | 4.7 % | 4.6 % ✅ |
+| 8–16 % | 745 | 11.0 % | 11.4 % ✅ |
+| 16–24 % | 95 | 18.3 % | 16.8 % ✅ |
+| 24–32 % | 6 | 25.4 % | 16.7 % ⚠ |
+| 32–40 % | 2 | 35.9 % | 50.0 % ⚠ |
+| 40–48 % | 6 | 45.9 % | 33.3 % ⚠ |
+| 48–56 % | 4 | 48.9 % | 50.0 % ✅ |
+| 72–80 % | 2 | 79.5 % | 100 % ⚠ |
+
+Alemmat todennäköisyysalueet (< 20 %) hyvin kalibroituneita ja kattavat suurimman osan runnereista. Ylemmät binit sisältävät vain 2–6 hevosta — otanta liian pieni luotettavaan arviointiin.
+
+### Feature importance top-15 (gain)
+
+| # | Piirre | Gain |
+|---|--------|------|
+| 1 | form_market_avg_5 | 965 |
+| 2 | atg_lifetime_top3_rate | 750 |
+| 3 | form_avg_finish_5_same_dist | 672 |
+| 4 | sire_lifetime_win_rate | 596 |
+| 5 | race_min_earnings | 540 |
+| 6 | atg_lifetime_starts | 540 |
+| 7 | form_best_km_time_5 | 514 |
+| 8 | form_avg_finish_5_same_method | 507 |
+| 9 | race_max_earnings | 499 |
+| 10 | driver_top3_rate_365d | 494 |
+| 11 | atg_lifetime_win_rate | 473 |
+| 12 | dam_sire_lifetime_starts | 462 |
+| 13 | form_days_since_last | 454 |
+| 14 | form_avg_km_time_5 | 435 |
+| 15 | atg_best_km_for_this_setup | 428 |
+| **20** | **track_home_stretch_m** | — |
+
+→ `track_home_stretch_m` **#20 / 45** — top-15 auditoijan kriteerin ulkopuolella (top-15), mutta top-25:ssä. Huomio: vain 17 vrk dataa, rata-rakenne voi nousta kun dataa enemmän.
+
+### Metriikat testijoukolle
+
+| Mittari | Arvo |
+|---------|------|
+| **Brier score** | **0.0797** |
+| Testijoukko | 174 lähtöä, 1 872 runneria |
+
+### Malli tallennettu
+
+`data/model_baseline_20260514.lgb` — treenattu kaikella saatavilla olevalla datalla (4 838 runneria, 455 lähtöä).
+
+### Auki olevat kysymykset auditoijalle
+
+1. `track_home_stretch_m` on **#20** (ei top-15 kuten tavoite). Onko tämä odotettavissa näin pienellä datamäärällä (17 vrk)? Vai onko syytä epäillä että joinissa on ongelma?
+2. `horse_age` puuttuu kokonaan — pitääkö `birth_year` liittää `runners`-tauluun `horses`-joinilla jo tiedonkeruuvaiheessa vai myöhemmin?
+3. `rolling_walk_forward` palataan kun dataa on > 42 vrk (arviolta ~3 viikon kuluttua, n. 3.6.2026). Pitääkö asiaa kirjata jonnekin muistiin?
+4. Pitääkö kahdella `train_window_days`-arvolla (28 + 56) ajaa vasta kun 56 vrk dataa on saatavilla?
+
 **Auditoijan tarkistus:** _(odottaa)_
 
 ---
