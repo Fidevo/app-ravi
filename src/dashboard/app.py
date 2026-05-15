@@ -23,7 +23,7 @@ import pandas as pd
 import streamlit as st
 
 from src.features.build_features import build_feature_matrix, fill_finish_positions
-from src.models.ranker import predict_win_probabilities, FEATURE_COLS
+from src.models.ranker import predict_win_probabilities, FEATURE_COLS, CATEGORICAL_COLS
 from src.paths import DB_PATH
 
 _MODEL_GLOB = "data/model_*.lgb"
@@ -147,18 +147,31 @@ def render_shap_section(model: lgb.Booster, rdf: pd.DataFrame) -> None:
         st.info("SHAP-analyysi ei käytössä (asenna: pip install shap).")
         return
 
-    feat_cols = [c for c in FEATURE_COLS if c in rdf.columns]
-    if not feat_cols:
+    # Käytä täsmälleen niitä sarakkeita joilla malli opetettiin
+    # (sama logiikka kuin ranker.py:n train_ranker / predict_win_probabilities)
+    model_features = model.feature_name()  # 42 piirrettä
+    missing = [c for c in model_features if c not in rdf.columns]
+    if len(missing) == len(model_features):
         st.warning("SHAP: piirresarakkeita ei löydy DataFramesta.")
         return
 
-    X = rdf[feat_cols].fillna(0).values
+    # Rakenna X samalla tavalla kuin predict_win_probabilities:
+    # kategoriset sarakkeet muutetaan category-tyypiksi
+    cat_set = set(CATEGORICAL_COLS)
+    X = rdf.reindex(columns=model_features)
+    for col in model_features:
+        if col in cat_set and col in X.columns:
+            X[col] = X[col].astype("category")
+        elif col not in rdf.columns:
+            X[col] = 0  # puuttuva sarake täytetään nollalla
+
     try:
         explainer = shap.TreeExplainer(model)
         shap_values = explainer.shap_values(X)
         # shap_values shape: (n_runners, n_features)
-        shap_df = pd.DataFrame(shap_values, columns=feat_cols)
-        shap_df.index = rdf["horse_name"].fillna(rdf["horse_id"].astype(str)).values
+        shap_df = pd.DataFrame(shap_values, columns=model_features)
+        horse_labels = rdf["horse_name"].fillna(rdf["horse_id"].astype(str)).values
+        shap_df.index = horse_labels
 
         # Top-10 tärkeimmät piirteet (abs. keskiarvo yli lähdön)
         mean_abs = shap_df.abs().mean().sort_values(ascending=False).head(10)
