@@ -181,9 +181,7 @@ def render_shap_section(model: lgb.Booster, rdf: pd.DataFrame) -> None:
         # Per-hevonen SHAP-taulukko
         with st.expander("Hevoskohtaiset SHAP-arvot"):
             st.dataframe(
-                shap_df[mean_abs.index].style.background_gradient(
-                    cmap="RdYlGn", axis=None
-                ),
+                shap_df[mean_abs.index].round(4),
                 use_container_width=True,
             )
     except Exception as e:
