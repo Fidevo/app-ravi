@@ -998,3 +998,7 @@ säilyy koskemattomana — mitään ei tarvitse rakentaa uudelleen aktivointia v
 
 Kaikki aiemmat 317 testiä + 10 uutta (Vaihe 1) + scheduler-päivitykset
 menevät läpi. Commit: `a3f56f3`, pushattu GitHubiin.
+
+> ⚠️ **Hetzner-deploy tekemättä.** GitHub-push ei deployaa automaattisesti.
+> Ajettava Hetznerillä: `git pull` ennen seuraavaa tuotantoajoa.
+> Kiireellisin: `scheduler.py` (Bugi #4 per-track refresh).
