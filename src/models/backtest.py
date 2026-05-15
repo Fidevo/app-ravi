@@ -34,7 +34,16 @@ from src.models.ranker import (
     CATEGORICAL_COLS,
     train_ranker,
     predict_win_probabilities,
+    calibrate_isotonic,
+    apply_isotonic,
 )
+
+# Bugi #3 -korjaus (15.5.2026): kalibrointijakson pituus päivissä.
+# Viimeiset CALIB_DAYS päivää treeniikkunasta käytetään isotonic-kalibrointiin.
+# Loput (vanhempi data) ovat puhdas treenisetti.
+_CALIB_DAYS = 14
+_CALIB_MIN_ROWS = 50   # minimi kalibrointiriveille (alle → ei kalibrointia)
+_PURE_TRAIN_MIN_ROWS = 100  # minimi puhtaalle treenille (alle → ei kalibrointia)
 
 
 @dataclass
@@ -96,11 +105,28 @@ def quarterly_walk_forward(
         if len(train_df) < 1000 or len(test_df) < 50:
             continue
 
-        # Treenaa
-        model = train_ranker(train_df)
+        # Bugi #3 -korjaus: käytä isotonic-kalibrointia jos riittävästi dataa.
+        # Viimeiset CALIB_DAYS päivää treeniikkunasta = kalibrointisetti.
+        train_df["race_date"] = pd.to_datetime(train_df["race_date"])
+        calib_start = train_df["race_date"].max() - pd.Timedelta(days=_CALIB_DAYS)
+        pure_train_df = train_df[train_df["race_date"] < calib_start]
+        calib_df = train_df[train_df["race_date"] >= calib_start]
 
-        # Ennusta
-        preds = predict_win_probabilities(model, test_df)
+        if len(pure_train_df) < _PURE_TRAIN_MIN_ROWS or len(calib_df) < _CALIB_MIN_ROWS:
+            # Liian vähän dataa kalibrointiin — käytä raaka softmax
+            model = train_ranker(train_df)
+            preds = predict_win_probabilities(model, test_df)
+        else:
+            model = train_ranker(pure_train_df)
+            calib_preds = predict_win_probabilities(model, calib_df)
+            calib_with_truth = calib_preds.merge(
+                calib_df[["race_id", "horse_id", "finish_position"]],
+                on=["race_id", "horse_id"],
+            )
+            iso = calibrate_isotonic(calib_with_truth)
+            preds_raw = predict_win_probabilities(model, test_df)
+            preds = apply_isotonic(preds_raw, iso)
+
         merged = test_df.merge(
             preds[["race_id", "horse_id", "win_prob"]],
             on=["race_id", "horse_id"],
@@ -224,10 +250,27 @@ def rolling_walk_forward(
             window_start += pd.Timedelta(days=window_days)
             continue
 
-        # Treenaa uudelleen joka ikkunalle — simuloi live-retraining-sykliä
-        model = train_ranker(train_df)
+        # Treenaa uudelleen joka ikkunalle — simuloi live-retraining-sykliä.
+        # Bugi #3 -korjaus: käytä isotonic-kalibrointia jos riittävästi dataa.
+        calib_start_dt = window_start - pd.Timedelta(days=_CALIB_DAYS)
+        pure_train_df = train_df[train_df["race_date"] < calib_start_dt]
+        calib_df = train_df[train_df["race_date"] >= calib_start_dt]
 
-        preds = predict_win_probabilities(model, test_df)
+        if len(pure_train_df) < _PURE_TRAIN_MIN_ROWS or len(calib_df) < _CALIB_MIN_ROWS:
+            # Liian vähän dataa kalibrointiin — käytä raaka softmax
+            model = train_ranker(train_df)
+            preds = predict_win_probabilities(model, test_df)
+        else:
+            model = train_ranker(pure_train_df)
+            calib_preds = predict_win_probabilities(model, calib_df)
+            calib_with_truth = calib_preds.merge(
+                calib_df[["race_id", "horse_id", "finish_position"]],
+                on=["race_id", "horse_id"],
+            )
+            iso = calibrate_isotonic(calib_with_truth)
+            preds_raw = predict_win_probabilities(model, test_df)
+            preds = apply_isotonic(preds_raw, iso)
+
         merged = test_df.merge(
             preds[["race_id", "horse_id", "win_prob"]],
             on=["race_id", "horse_id"],

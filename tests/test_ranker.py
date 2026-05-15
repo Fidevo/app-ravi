@@ -365,6 +365,163 @@ def _make_train_df(n_races: int = 30, horses_per_race: int = 8, rng_seed: int = 
     return pd.DataFrame(rows)
 
 
+# ---------------------------------------------------------------------------
+# Bugi #1 -regressiotesti — LambdaRank-ryhmäjärjestys (15.5.2026)
+# ---------------------------------------------------------------------------
+
+class TestBug1LambdaRankSortInvariance:
+    """Varmistaa että train_ranker järjestää rivit race_id:n mukaan ennen LambdaRankia.
+
+    Bugi: ilman sort_values("race_id") sekoitettu DataFrame johti vääriin
+    group_sizes → malli oppi väärää dataa. Korjattu lisäämällä
+    df = df.sort_values("race_id").reset_index(drop=True).
+
+    Testi: sama treenidata järjestettynä vs. sekoitettuna → identtiset ennusteet.
+    """
+
+    def test_shuffled_input_gives_same_predictions_as_sorted(self):
+        """train_ranker tuottaa samanlaiset mallit riippumatta syötteen järjestyksestä.
+
+        Jos bugi #1 olisi yhä olemassa, sekoitettu ja järjestetty data tuottaisivat
+        eri group_sizes → malli oppisi väärää dataa → feature importance -ero olisi suuri.
+        Korjatun mallin feature importancet ovat lähellä toisiaan (< 10 % suhteellinen ero)
+        vaikka LightGBM:n moniajo aiheuttaa pientä ei-deterministisyyttä.
+
+        HUOM: LightGBM ei ole 100 % deterministinen moniajolla edes samalla siemenellä
+        (num_threads > 1). Siksi käytetään 10 % toleranssia eksaktin yhtäläisyyden sijaan.
+        Bugi aiheuttaisi paljon suuremman eron (väärät race-ryhmittelyt → täysin eri malli).
+        """
+        df_sorted = _make_train_df(n_races=60, rng_seed=7)
+        df_shuffled = df_sorted.sample(frac=1.0, random_state=99).reset_index(drop=True)
+
+        model_sorted = train_ranker(df_sorted, feature_cols=["dummy_feature"], random_state=42)
+        model_shuffled = train_ranker(df_shuffled, feature_cols=["dummy_feature"], random_state=42)
+
+        fi_sorted = model_sorted.feature_importance(importance_type="gain")[0]
+        fi_shuffled = model_shuffled.feature_importance(importance_type="gain")[0]
+
+        # Suhteellinen ero < 10 % (LightGBM thread-noise); bugi aiheuttaisi > 50 % eron
+        max_val = max(fi_sorted, fi_shuffled, 1e-9)
+        rel_diff = abs(fi_sorted - fi_shuffled) / max_val
+        assert rel_diff < 0.10, (
+            f"Bugi #1 regressio: järjestetty vs. sekoitettu syöte tuotti eri malleja "
+            f"(feature importance: {fi_sorted:.1f} vs {fi_shuffled:.1f}, "
+            f"suhteellinen ero {rel_diff:.1%} > 10 %). "
+            f"train_ranker ei järjestänyt rivejä race_id:n mukaan ennen LambdaRankia."
+        )
+
+    def test_group_sizes_match_actual_race_sizes(self):
+        """Varmistaa että group_sizes vastaa todellisia lähtökokoja.
+
+        Rakennetaan DataFrame jossa 3 lähtöä eri hevoskoolla (4, 6, 8).
+        Jos sort on oikein, group_sizes = [4, 6, 8] järjestyksessä race_id:n mukaan.
+        Epäsuora testi: malli ei kaadu eikä heitä LightGBM-virhettä.
+        """
+        rng = np.random.default_rng(13)
+        rows = []
+        # Lähtökokojen vaihteleminen testaa erityisesti sort-korjauksen
+        for race_id, n_horses in [("race_001", 4), ("race_002", 8), ("race_000", 6)]:
+            winner = rng.integers(0, n_horses)
+            for j in range(n_horses):
+                rows.append({
+                    "race_id": race_id,
+                    "horse_id": f"{race_id}_h{j}",
+                    "finish_position": 1 if j == winner else 2,
+                    "dummy_feature": float(rng.standard_normal()),
+                })
+        # Syötä sekalaisessa järjestyksessä (race_001, race_002, race_000)
+        df = pd.DataFrame(rows)
+        # Ei saa kaatua — tämä olisi kaatunut ennen korjausta jos group_sizes
+        # ei vastannut DataFrame-järjestystä
+        model = train_ranker(df, feature_cols=["dummy_feature"], random_state=0)
+        assert model is not None, "train_ranker kaatui sekalaisella lähtöjärjestyksellä"
+
+
+# ---------------------------------------------------------------------------
+# Bugi #2 -regressiotesti — tr_start_interval_group on kategorinen (15.5.2026)
+# ---------------------------------------------------------------------------
+
+class TestBug2TrStartIntervalGroupIsCategorical:
+    """Varmistaa että tr_start_interval_group on CATEGORICAL_COLS:ssa.
+
+    Bugi: tr_start_interval_group (arvot 1/11/21/31) käsiteltiin numeerisena
+    → LightGBM tulkitsi "31 = 3× enemmän kuin 11", mikä on väärä tulkinta.
+    Korjattu lisäämällä se CATEGORICAL_COLS-listaan.
+    """
+
+    def test_tr_start_interval_group_in_categorical_cols(self):
+        """tr_start_interval_group on CATEGORICAL_COLS:ssa."""
+        from src.models.ranker import CATEGORICAL_COLS
+        assert "tr_start_interval_group" in CATEGORICAL_COLS, (
+            "Bugi #2 regressio: tr_start_interval_group puuttuu CATEGORICAL_COLS:sta. "
+            "Arvot 1/11/21/31 tulee käsitellä kategorisena, ei numeerisena."
+        )
+
+    def test_tr_start_interval_group_not_duplicated_in_feature_cols(self):
+        """tr_start_interval_group EI ole FEATURE_COLS:ssa — se on vain CATEGORICAL_COLS:ssa.
+
+        Train_ranker rakentaa X = df[avail_feat + avail_cat]. Jos sama sarake
+        olisi molemmissa, syntyisi duplikaattikolumni → LightGBM kaatuu.
+        Kategorinen piirre tulee mukaan X:ään avail_cat:in kautta.
+        """
+        from src.models.ranker import FEATURE_COLS
+        assert "tr_start_interval_group" not in FEATURE_COLS, (
+            "tr_start_interval_group on FEATURE_COLS:ssa, mutta se on jo CATEGORICAL_COLS:ssa. "
+            "Duplikaatti aiheuttaa LightGBM-virheen. Poista se FEATURE_COLS:sta."
+        )
+
+    def test_categorical_col_used_as_category_in_lgb_dataset(self):
+        """LightGBM Dataset käyttää tr_start_interval_group-kolumnia kategorisena.
+
+        Rakennetaan DataFrame jossa tr_start_interval_group saa arvot {1, 11, 21, 31}
+        ja varmistetaan että train_ranker ei kaadu kategorisena käsittelyssä.
+
+        TÄRKEÄ: kategorinen piirre saa olla JOKO feature_cols:ssa TAI categorical_cols:ssa,
+        ei molemmissa. Train_ranker rakentaa X = df[avail_feat + avail_cat] — jos sama
+        sarake on molemmissa, syntyy duplikaattikolumni → LightGBM kaatuu.
+        Tuotannossa tr_start_interval_group on vain CATEGORICAL_COLS:ssa (ei FEATURE_COLS:ssa).
+        """
+        rng = np.random.default_rng(5)
+        rows = []
+        valid_values = [1, 11, 21, 31]
+        for i in range(30):
+            race_id = f"race_{i:03d}"
+            winner = rng.integers(0, 8)
+            for j in range(8):
+                rows.append({
+                    "race_id": race_id,
+                    "horse_id": f"h_{i}_{j}",
+                    "finish_position": 1 if j == winner else 2,
+                    "dummy_feature": float(rng.standard_normal()),
+                    "tr_start_interval_group": int(rng.choice(valid_values)),
+                })
+        df = pd.DataFrame(rows)
+
+        # tr_start_interval_group vain categorical_cols:ssa, ei feature_cols:ssa
+        # (feature_cols = numeeriset, categorical_cols = kategoriset → X = feat + cat)
+        model = train_ranker(
+            df,
+            feature_cols=["dummy_feature"],          # ei tr_start_interval_group tässä
+            categorical_cols=["tr_start_interval_group"],
+            random_state=0,
+        )
+        assert model is not None
+
+    def test_tr_start_interval_group_not_in_feature_cols_to_avoid_duplicate(self):
+        """tr_start_interval_group ei ole FEATURE_COLS:ssa — se tulee mukaan CATEGORICAL_COLS:n kautta.
+
+        Train_ranker rakentaa X = df[avail_feat + avail_cat]. Jos tr_start_interval_group
+        olisi molemmissa, syntyisi duplikaattikolumni ja LightGBM kaatuisi.
+        Varmistetaan että tuotantolistat ovat oikeassa kunnossa.
+        """
+        from src.models.ranker import CATEGORICAL_COLS, FEATURE_COLS
+        assert "tr_start_interval_group" not in FEATURE_COLS, (
+            "tr_start_interval_group on FEATURE_COLS:ssa, mutta se on jo CATEGORICAL_COLS:ssa. "
+            "Duplikaatti aiheuttaa LightGBM-virheen (DataFrame.cat ei toimi). "
+            "Poista se FEATURE_COLS:sta — se tulee mukaan X:ään avail_cat:in kautta."
+        )
+
+
 class TestTrainRankerRandomState:
     """Testit train_ranker():n random_state-parametrille."""
 

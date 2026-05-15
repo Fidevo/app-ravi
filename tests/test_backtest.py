@@ -288,3 +288,90 @@ class TestEdgeDecayAnalysis:
         df = _make_backtest_df(n_periods=6, roi_trend=-2.0)
         result = edge_decay_analysis(df)
         assert isinstance(result["trend_slope"], float)
+
+
+# ---------------------------------------------------------------------------
+# Bugi #3 -regressiotesti — isotonic-kalibrointi (15.5.2026)
+# ---------------------------------------------------------------------------
+
+class TestBug3CalibrationLowersBrier:
+    """Varmistaa että isotonic-kalibrointi parantaa tai säilyttää Brier-scoren.
+
+    Bugi: backtest käytti raakaa softmax-todennäköisyyttä ilman kalibrointia.
+    Korjattu lisäämällä calibrate_isotonic / apply_isotonic rolling_walk_forward:iin
+    ja quarterly_walk_forward:iin (viimeiset _CALIB_DAYS päivää treeniikkunasta
+    = kalibrointisetti).
+    """
+
+    def _make_overcalibrated_preds(self, n_races: int = 80, rng_seed: int = 3) -> pd.DataFrame:
+        """Raaka (ylikalibroitu) ennuste: suosikki saa 0.9, muut jakavat 0.1."""
+        rng = np.random.default_rng(rng_seed)
+        rows = []
+        for race_num in range(n_races):
+            race_id = f"race_{race_num:04d}"
+            n = 8
+            probs = np.full(n, 0.1 / (n - 1))
+            probs[0] = 0.9
+            winner = rng.integers(0, n)
+            for i in range(n):
+                rows.append({
+                    "race_id": race_id,
+                    "horse_id": f"h_{i}",
+                    "win_prob": float(probs[i]),
+                    "finish_position": 1 if i == winner else 2,
+                })
+        return pd.DataFrame(rows)
+
+    def test_calibrated_brier_lte_uncalibrated_brier(self):
+        """Isotonic-kalibrointi parantaa tai säilyttää Brier-scoren ylikalibroituun malliin.
+
+        Brier(kalibroitu) ≤ Brier(raaka) + marginaali (0.01 toleranssi pienelle heilunnalle).
+        Tämä on bugi #3:n ydinvaatimus.
+        """
+        from src.models.ranker import apply_isotonic, calibrate_isotonic
+
+        preds = self._make_overcalibrated_preds(n_races=80)
+
+        # Raaka Brier
+        actual = (preds["finish_position"] == 1).astype(float)
+        brier_raw = float(((preds["win_prob"] - actual) ** 2).mean())
+
+        # Kalibroitu Brier
+        iso = calibrate_isotonic(preds)
+        preds_cal = apply_isotonic(preds, iso)
+        actual_cal = (preds_cal["finish_position"] == 1).astype(float)
+        brier_cal = float(((preds_cal["win_prob"] - actual_cal) ** 2).mean())
+
+        assert brier_cal <= brier_raw + 0.01, (
+            f"Bugi #3 regressio: kalibroitu Brier ({brier_cal:.4f}) ei parantunut "
+            f"raakaan Brieriin ({brier_raw:.4f}) nähden. "
+            f"Isotonic-kalibrointi ei toimi odotetusti."
+        )
+
+    def test_calibrate_isotonic_and_apply_isotonic_importable_from_ranker(self):
+        """calibrate_isotonic ja apply_isotonic ovat importoitavissa ranker.py:stä.
+
+        Backtest.py importoi ne — jos import hajoaa, koko backtest hajoaa.
+        """
+        from src.models.ranker import apply_isotonic, calibrate_isotonic
+        assert callable(calibrate_isotonic)
+        assert callable(apply_isotonic)
+
+    def test_backtest_imports_calibration_functions(self):
+        """src.models.backtest importoi calibrate_isotonic ja apply_isotonic.
+
+        Tarkistaa että bugi #3 -korjaus on backtest.py:ssä aktiivinen
+        (ei pelkästään ranker.py:ssä).
+        """
+        import importlib
+        import inspect
+        import src.models.backtest as bt_module
+
+        # Varmista että moduuli importtasi kalibrointifunktiot
+        source = inspect.getsource(bt_module)
+        assert "calibrate_isotonic" in source, (
+            "backtest.py ei sisällä calibrate_isotonic — bugi #3 -korjaus puuttuu."
+        )
+        assert "apply_isotonic" in source, (
+            "backtest.py ei sisällä apply_isotonic — bugi #3 -korjaus puuttuu."
+        )

@@ -242,6 +242,198 @@ Migraatio ajettu Hetznerillä onnistuneesti.
 Strateginen fokus on V-pelilähdöt → V-pelilähdöissä paranema on +0.009 (yli 0.005-kynnyksen).
 `tr_game_percent_v` on koko mallin tärkein piirre. **Suositus: INTEGROI TUOTANTOON.**
 
+---
+
+#### ⚠️ Auditoijan analyysi 15.5.2026 — KAKSI HUOLTA ENNEN INTEGRAATIOPÄÄTÖSTÄ
+
+**Käyttäjä nosti esiin kaksi tärkeää huolta. Olen samaa mieltä molemmista.**
+Päätös integraatiosta lykätään kunnes ulkopuolinen auditoija on tarkastanut
+tilanteen.
+
+---
+
+##### Huoli 1: `tr_game_percent_v` #1 — Copycat-riski (KÄYTTÄJÄ ON OIKEASSA)
+
+Käyttäjä epäili: *"`tr_game_percent_v` on koko mallin tärkein piirre — eikö
+tämä ole riski? Mallista tulee 'markkinan peili' (Copycat)."*
+
+**Lyhyt vastaus:** kyllä, tämä on aito ja vakava riski. **A/B-tulos on
+todennäköisesti yliarvioitu** koska pilot-data käytti closing-line-arvoja,
+mutta tuotanto pollaisi early-line-arvoja.
+
+###### Mikä `tr_game_percent_v` käytännössä on
+
+Travrondenin `game_percent.providers.ATG.V*.percent` on **kollektiivisen yleisön
+panostusjakauma** V-pelipoolissa. Esim. V64.percent = 24.98 % tarkoittaa että
+24.98 % V64-tikettien yhdistelmistä sisältää tämän hevosen tällä legillä.
+
+Tämä on **kymmenien tuhansien pelaajien yhteinen arvio voittotodennäköisyydestä**.
+Ruotsin V-pelin pelivolyymi tekee siitä **erittäin tehokkaan markkinan**.
+
+###### Miksi tämä on Copycat-riski
+
+LightGBM löysi tämän piirteen tärkeimmäksi koska:
+1. Markkinaprosentti **on jo erittäin tarkka voittotodennäköisyyden arvio**
+2. Muut piirteet (form, sukutaulu, kuski, rata) ovat **redundantteja** — markkina hinnoittelee ne kaikki jo sisään
+3. Yksinkertaisin tapa minimoida Brier-virhettä on **kopioida markkinaa**
+
+**Lopputulos:** jos mallin ennuste = markkinan ennuste, **odotusarvo on −takeout**.
+- Pari-mutuel V-peli: takeout ~22 % → odotusarvo −22 %
+- Single-win Unibet/Betsson: takeout ~5–8 % → odotusarvo −5..−8 %
+
+**Edge syntyy vain niistä lähdöistä joissa malli on eri mieltä kuin markkina.**
+Jos malli on lähes-aina samaa mieltä → ei edgeä.
+
+###### Lisäksi: pilot-data on closing-line, tuotanto olisi early-line
+
+Tämä on **kriittinen tarkennus** koodarin tuloksesta:
+
+| Pilot-data (2023–2026 finished kierrokset) | Tuotanto-pollaus (15:00/17:00) |
+|---|---|
+| `game_percent` = **closing-line proxy** | `game_percent` = **early/mid-day live** |
+| Sisältää sharp-rahan vaikutuksen | Vain harrastajat ja varhaiset panostajat |
+| Vahva markkinasentimentti | Heikko markkinasentimentti |
+| Brier-paranema 0.009 | Brier-paranema **luultavasti pienempi**, ehkä 0.002–0.005 |
+
+**A/B-tulos +0.009 V-pelilähdöissä ei välttämättä toistu tuotannossa.** Pilot
+tehokkaasti käytti "tulevaisuusvuotanutta" closing-line-tietoa.
+
+Käyttäjä huomautti: *"Suurimman hyödyn saisimme esim viimeisen tunnin
+peliprosenteista kun 'viisas raha' astuu peliin."* **Tämä on oikein.** Mutta
+tuotantopollaus klo 15:00/17:00 ei saa tätä.
+
+###### Vaihtoehdot — mitä tehdään?
+
+**A) Hyväksy Copycat-riski, integroi tuotantoon, mittaa empiirisesti.**
+- Risk: malli toimii teoriassa mutta ei tuota edgeä
+- Reward: jos `tr_start_interval_group` (pace-piirre) + muut tarjoavat lisäarvoa
+  markkinan päälle, edge syntyy noiden kautta
+- Vaatii **tiukan paperitestauksen** — älä siirry V6 ennen kuin CLV on positiivinen
+
+**B) Poista `tr_game_percent_v` mallista, säilytä DB:ssä.**
+- Risk: menetetään aito markkinasignaali (sharp-vahvistaminen)
+- Reward: malli ei voi olla Copycat, sen on löydettävä signaalia muualta
+- Tämä on **tieteellisesti puhtaampi** lähestymistapa edgen mittaamiseen
+
+**C) Pollaa game_percent useassa aikapisteessä, käytä myöhäistä.**
+- Lisää pollauksia T-2h, T-1h, T-15min
+- Käytä piirteenä **T-15min** (viisas raha jo paikalla, sharperit)
+- Vaatii: paljon enemmän API-pyyntöjä, scheduler-monimutkaisuus
+- Mutta lähinnä **closing-line-paranemaa** tuotannossa
+
+**D) Pollaa game_percent useassa pisteessä, käytä DELTA.**
+- Piirre: `tr_game_percent_v_delta = late_percent - early_percent`
+- Tämä on **"sharp money signal"** — mihin viisaat panostajat menivät
+- **Tämä on AIDOSTI itsenäinen signaali markkinasta** — kertoo missä info tuli
+- Vaihtoehtoa D on yleisesti käytetty professional sports betting -tutkimuksessa
+
+###### Auditoijan suositus
+
+Suosittelen yhdistelmää **B + valmistautuminen C/D:hen**:
+
+1. **Heti**: jätä `tr_game_percent_v` **pois FEATURE_COLS:ista** alkuintegraation aikana
+   - Tarvitsemme **clean baseline** ilman markkina-peilausta
+   - Jos malli löytää edgeä ilman tr_game_percent_v:tä → siellä on **aitoa
+     mallin omaa edgeä**
+   - Jos ei löydä → tiedämme että koko TR-paranema oli markkina-peilausta
+
+2. **Pollaus tallentaa game_percent silti DB:hen** (sarake `tr_game_percent_v`)
+   - Säilyy historiassa tutkimuskäyttöön
+   - Aktivointi myöhemmin jos saadaan delta-piirre toimimaan
+
+3. **Vaihe D2.5 (myöhempi)**: rakenna multi-snapshot-pollaus
+   - Pollaa esim. T-2h, T-1h, T-15min
+   - Laske delta-piirre `tr_game_percent_v_delta`
+   - Tämä on aidosti uusi signaali (sharp money movement) — ei Copycat
+
+**Tämä on todennäköisesti ulkopuolisen auditoijan päätösalue** — odotetaan
+hänen analyysiään ennen lopullista päätöstä.
+
+---
+
+##### Huoli 2: `tr_start_interval_group` #34 — outo sijoitus
+
+Käyttäjä ihmetteli: *"Lisäksi ihmettelin miksi tr_start_interval_group jäi
+sijalle #34."*
+
+**Lyhyt vastaus:** sijoitus #34 on **pettymys mutta selittyvissä**. Syyt
+voivat olla useita, ja se ei tarkoita että piirre on hyödytön.
+
+###### Miksi #34 on yllättävän alhainen
+
+D1-tutkimus paljasti että `start_interval_group` on:
+- Asiantuntijoiden per-hevonen, per-lähtö pace-arvio
+- 4-portainen luokitus (1/11/21/31)
+- 91.5 % kattavuus pilot-datassa
+
+Odotus oli että tämä olisi **top-10** piirteissä — pace on alalla yksi
+tärkeimmistä yksittäisistä prediktoreista.
+
+###### Mahdolliset syyt #34-sijoitukselle
+
+1. **Kategoriallinen koodaus puuttuu**
+   - Arvot 1/11/21/31 ovat järjestysluokat, **ei lineaarisia**
+   - Jos LightGBM kohtelee niitä numeerisina, "ero 1→11" = 10 ja "ero 11→21" = 10 — mutta tämä ei kuvasta todellista pace-eroa
+   - **Kokeile:** lisää `tr_start_interval_group` `CATEGORICAL_COLS`:iin eikä `FEATURE_COLS`:iin
+   - Vaihtoehtoinen koodaus: 1→4 (nopein), 11→3, 21→2, 31→1 (hitain) tai one-hot
+
+2. **Multikollineaarisuus markkina-arvioiden kanssa**
+   - `tr_game_percent_v` (#1) ja `form_market_avg_5` sisältävät jo pace-tietoa
+   - Markkina hinnoittelee pace-edge:n kertoimiin
+   - Gain-mittari jakaa tärkeyttä korreloivien piirteiden kesken — #34 voi
+     olla *"markkinan jälkeen jäljellä oleva signaali"*
+
+3. **Asiantuntijat eivät osu paremmin kuin malli muutoinkin**
+   - Travrondenin asiantuntijat ovat hyviä mutta eivät täydellisiä
+   - Yhdistettynä kaikkien muiden piirteiden kanssa, marginaalinen lisäarvo
+
+4. **Liian vähän dataa**
+   - 4 838 runneria, joista vain 48.5 % on V-pelilähdössä → ~2 350 tr_*-riviä
+   - 4-portainen kategoriajakauma → ~590 esimerkkiä per pace-luokka
+   - LightGBM tarvitsee enemmän dataa luotettavasti oppiakseen interaktioita
+
+###### Diagnostinen ehdotus ulkopuoliselle auditoijalle
+
+Ennen kuin tuomitsemme `tr_start_interval_group`:n, tehdään **3 koetta**:
+
+a) **Ablation testi** — kouluta malli ilman `tr_game_percent_v` (käyttäjän huoli #1)
+   ja katso miten `tr_start_interval_group` ranking muuttuu
+   - Jos nousee top-10:een → kyseessä multicollinearity markkinan kanssa
+   - Jos pysyy #34 → asiantuntijaarvio ei tuo lisäarvoa
+
+b) **Categorical encoding** — siirrä `tr_start_interval_group` `CATEGORICAL_COLS`:iin
+   - Aja sama A/B-vertailu
+   - Jos ranking ja Brier paranevat → koodaus oli ongelma
+
+c) **SHAP-analyysi** — vaikka gain on #34, SHAP voi paljastaa että piirre
+   vaikuttaa erityisesti **tiettyjen hevosten** ennusteisiin
+   - LightGBM-malli + `shap.TreeExplainer` → top-shap-arvot piirreittäin
+   - Erilainen kuva kuin gain-mittari
+
+---
+
+##### Yhteenveto auditoijalta (15.5.2026)
+
+**Päätös: ÄLÄ INTEGROI TUOTANTOON VIELÄ.** Odota ulkopuolisen auditoijan
+analyysi käyttäjän pyynnön mukaisesti.
+
+**Mitä on selvitettävä ennen tuotantointegraatiota:**
+
+1. Onko `tr_game_percent_v` #1 Copycat-ilmiö?
+   - Aja ablation ilman tr_game_percent_v → tutki Brier-paranema
+   - Jos paranema putoaa 0.009 → 0.002, A/B-tulos oli pääosin markkina-peilausta
+
+2. Onko `tr_start_interval_group` #34 oikea sijoitus?
+   - Aja samalla ablation muutoksilla (categorical encoding)
+   - SHAP-analyysi tarkempaa kuvausta varten
+
+3. Pilot-data closing-line vs. tuotannon early-line
+   - Tämä on **rakenteellinen ongelma** A/B-vertailussa
+   - Korjaus vaatii: multi-snapshot-pollausstrategian (yllä vaihtoehto C/D)
+
+**Älä anna koodarille uusia tehtäviä vielä.** Käyttäjä on pyytänyt ulkopuolisen
+auditoijan tarkistuksen tärkeimpiin tiedostoihin — odotamme sitä ennen jatkoa.
+
 #### ❓ Avoimet vaiheet — auditoijalle (Vaihe 5 päätös + jatko)
 
 **Vaihe 6:** Pollaus-cron `run_forever`:iin

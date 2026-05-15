@@ -98,7 +98,9 @@ FEATURE_COLS: list[str] = [
     # --- D2: Travrondenspel pre-race-piirteet (15.5.2026) ---
     # Saatavilla vain V-pelilähdöistä (is_v_race=True). LightGBM käsittelee NaN:t.
     # Kattavuudet pilottidatasta (4 927 runner-riviä, 85 kierrosta):
-    "tr_start_interval_group",       # 91.5 % — ⭐⭐⭐ pace-arvio (1=nopein, 31=hitain)
+    # HUOM: tr_start_interval_group EI ole tässä listassa — se on CATEGORICAL_COLS:ssa
+    # ja lisätään X:ään avail_cat:in kautta (build: X = df[avail_feat + avail_cat]).
+    # Duplicaatti aiheuttaisi LightGBM-virheen (DataFrame.cat ei toimi).
     "tr_is_first_after_castration",  # 100 % — ⭐⭐ tunnettu prediktiivinen signaali
     "tr_is_first_new_driver",        # 100 % — ⭐⭐ ohjastajan vaihto
     "tr_is_first_new_trainer",       # 100 % — ⭐ valmentajan vaihto
@@ -124,11 +126,16 @@ FEATURE_COLS: list[str] = [
 ]
 
 CATEGORICAL_COLS: list[str] = [
-    "distance_category",   # sprint / middle / long
-    "start_method",        # auto / voltstart
-    "race_age_group",      # 2yo / 3yo / 3yo+ / 4yo+ / 5yo+
-    "track_condition",     # light / heavy (ATG races.condition)
-    "sulky_type",          # VA / AM
+    "distance_category",       # sprint / middle / long
+    "start_method",            # auto / voltstart
+    "race_age_group",          # 2yo / 3yo / 3yo+ / 4yo+ / 5yo+
+    "track_condition",         # light / heavy (ATG races.condition)
+    "sulky_type",              # VA / AM
+    # Bugi #2 -korjaus (15.5.2026): tr_start_interval_group on luokitus (1/11/21/31),
+    # ei jatkuva asteikko. Numeerisena LightGBM tulkitsi "31 = 3× enemmän kuin 11"
+    # mikä on väärä tulkinta. Kategorisena se oppii erilliset säännöt jokaiselle
+    # pace-tilaukselle → todennäköisesti nousee dramaattisesti feature_importance-listalla.
+    "tr_start_interval_group",  # 1/11/21/31 — asiantuntijan pace-arvio per hevonen
 ]
 
 
@@ -182,6 +189,12 @@ def train_ranker(
     """
     df = train_df.dropna(subset=["finish_position"]).copy()
 
+    # Bugi #1 -korjaus (15.5.2026): LightGBM LambdaRank vaatii että rivit ovat
+    # ryhmiteltynä race_id:n mukaan ja group_sizes vastaa peräkkäisten ryhmien
+    # kokoja. Ilman sortausta groupby-järjestys (aakkos) ja DataFrame-järjestys
+    # voivat erota → malli oppii väärää dataa väärille ryhmille.
+    df = df.sort_values("race_id").reset_index(drop=True)
+
     # Suodata saatavilla oleviin sarakkeisiin — valinnaisia piirteitä
     # (esim. horse_age) ei vaadita kaikissa ympäristöissä.
     avail_feat, avail_cat = _resolve_cols(df, feature_cols, categorical_cols)
@@ -190,8 +203,9 @@ def train_ranker(
     max_pos = df.groupby("race_id")["finish_position"].transform("max")
     df["relevance"] = (max_pos - df["finish_position"] + 1).astype(int)
 
-    # Ryhmäkoot per lähtö (lambdarankin vaatimus)
-    group_sizes = df.groupby("race_id").size().values
+    # Ryhmäkoot per lähtö (lambdarankin vaatimus).
+    # sort=False: df on jo sortattu → ei uudelleensortausta, järjestys säilyy.
+    group_sizes = df.groupby("race_id", sort=False).size().values
 
     X = df[avail_feat + avail_cat].copy()
     for col in avail_cat:
