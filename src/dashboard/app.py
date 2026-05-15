@@ -134,7 +134,7 @@ def main() -> None:
 
         rename = {"start_number": "#", "horse_id": "Hevonen", "win_prob": "P(win)", odds_col: "Odds", "edge_pct": "Edge"}
         disp = disp.rename(columns={k: v for k, v in rename.items() if k in disp.columns})
-        st.dataframe(disp, hide_index=True, use_container_width=True)
+        st.dataframe(disp, hide_index=True, width="stretch")
 
 
 if __name__ == "__main__":
