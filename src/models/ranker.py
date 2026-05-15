@@ -95,23 +95,29 @@ FEATURE_COLS: list[str] = [
     # "sire_lifetime_starts",
     # "dam_sire_lifetime_win_rate",
     # "dam_sire_lifetime_starts",
-    # --- D2: Travrondenspel pre-race-piirteet (15.5.2026) ---
+    # --- D2: Travrondenspel pre-race-piirteet (15.5.2026, kommentoitu pois 15.5.2026) ---
+    # KNOWN_ISSUES #14: A/B-vertailu (15.5.2026) ei ylittänyt 0.005-kynnystä.
+    # Aktivoidaan kun kaikki ehdot täyttyvät (~2026-07-07, ks. KNOWN_ISSUES #14):
+    #   1. >= 8 viikkoa puhdasta dataa
+    #   2. Uusi A/B-vertailu ilman tr_game_percent_v osoittaa muiden TR-piirteiden
+    #      todellisen arvon (poistetaan Copycat-riski mittauksesta)
+    #   3. Δ Brier V-pelilähdöissä ≥ 0.005
+    #
     # Saatavilla vain V-pelilähdöistä (is_v_race=True). LightGBM käsittelee NaN:t.
     # Kattavuudet pilottidatasta (4 927 runner-riviä, 85 kierrosta):
-    # HUOM: tr_start_interval_group EI ole tässä listassa — se on CATEGORICAL_COLS:ssa
-    # ja lisätään X:ään avail_cat:in kautta (build: X = df[avail_feat + avail_cat]).
-    # Duplicaatti aiheuttaisi LightGBM-virheen (DataFrame.cat ei toimi).
-    "tr_is_first_after_castration",  # 100 % — ⭐⭐ tunnettu prediktiivinen signaali
-    "tr_is_first_new_driver",        # 100 % — ⭐⭐ ohjastajan vaihto
-    "tr_is_first_new_trainer",       # 100 % — ⭐ valmentajan vaihto
-    "tr_is_first_shoes",             # 100 % — ⭐ kenkämuutos
-    "tr_is_first_carriage",          # 100 % — ⭐ sulkymuutos
-    "tr_speed_record_k",             # 37 % — ⭐⭐ sprint-ennätys (s); NaN = ei K-spesialisti
-    "tr_speed_record_m",             # 73 % — ⭐⭐ middle-ennätys (s)
-    "tr_speed_record_l",             # 35 % — ⭐⭐ long-ennätys (s); NaN = ei L-spesialisti
-    "tr_game_percent_v",             # 81 % — ⭐ V-pelin markkinaprosentti (0–100)
-    # "tr_expected_odds",  # 23.8 % notna — liian harva luotettavalle oppimiselle;
-    #                      # aktivoi jos tuotantopollauksen kattavuus nousee > 40 %
+    # HUOM: tr_start_interval_group ei ole tässä listassa (se on CATEGORICAL_COLS:ssa),
+    # mutta MYÖS se on kommentoitu pois CATEGORICAL_COLS:sta (#14).
+    # "tr_is_first_after_castration",  # 100 % — ⭐⭐ tunnettu prediktiivinen signaali
+    # "tr_is_first_new_driver",        # 100 % — ⭐⭐ ohjastajan vaihto
+    # "tr_is_first_new_trainer",       # 100 % — ⭐ valmentajan vaihto
+    # "tr_is_first_shoes",             # 100 % — ⭐ kenkämuutos
+    # "tr_is_first_carriage",          # 100 % — ⭐ sulkymuutos
+    # "tr_speed_record_k",             # 37 % — ⭐⭐ sprint-ennätys (s); NaN = ei K-spesialisti
+    # "tr_speed_record_m",             # 73 % — ⭐⭐ middle-ennätys (s) — #6 feature A/B:ssä
+    # "tr_speed_record_l",             # 35 % — ⭐⭐ long-ennätys (s); NaN = ei L-spesialisti
+    # "tr_game_percent_v",             # 81 % — ⭐⭐⭐ #1 feature A/B:ssä — COPYCAT-RISKI
+    #                                  # Aktivoi vasta multi-snapshot delta-piirteen kanssa
+    # "tr_expected_odds",              # 23.8 % notna — liian harva; aktivoi jos > 40 %
     # --- D: Ratarakenne (build_features.track_structure_features) ---
     # Vaatii tracks-taulun tracks-parametrina build_feature_matrix():lle.
     # NaN jos rata puuttuu taulusta (gallop-radat, manuaaliset stub-rivit).
@@ -131,11 +137,10 @@ CATEGORICAL_COLS: list[str] = [
     "race_age_group",          # 2yo / 3yo / 3yo+ / 4yo+ / 5yo+
     "track_condition",         # light / heavy (ATG races.condition)
     "sulky_type",              # VA / AM
-    # Bugi #2 -korjaus (15.5.2026): tr_start_interval_group on luokitus (1/11/21/31),
-    # ei jatkuva asteikko. Numeerisena LightGBM tulkitsi "31 = 3× enemmän kuin 11"
-    # mikä on väärä tulkinta. Kategorisena se oppii erilliset säännöt jokaiselle
-    # pace-tilaukselle → todennäköisesti nousee dramaattisesti feature_importance-listalla.
-    "tr_start_interval_group",  # 1/11/21/31 — asiantuntijan pace-arvio per hevonen
+    # tr_start_interval_group (1/11/21/31) lisättiin Bugi #2 -korjauksessa (15.5.2026)
+    # mutta auditoija päätti kommentoida D2-piirteet pois 15.5.2026 (KNOWN_ISSUES #14).
+    # Aktivoidaan samalla kun muut tr_*-piirteet — ks. FEATURE_COLS:n kommentit.
+    # "tr_start_interval_group",  # 1/11/21/31 — pace-arvio; aktivoi D2:n mukana
 ]
 
 

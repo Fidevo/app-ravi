@@ -1,7 +1,8 @@
 # Ravit Edge — Tunnetut ongelmat
 
-> Päivitetty 14.5.2026.
+> Päivitetty 15.5.2026.
 > Vain avoimet ongelmat — korjatut bugit löytyvät tiedoston lopusta.
+> Tämänhetkinen tila ja avoimet tehtävät: [`TASK_PROGRESS.md`](TASK_PROGRESS.md).
 
 ---
 
@@ -108,10 +109,14 @@ Empiirinen ablation (Vaihe 3.7, 14.5.2026) osoitti että ne eivät paranna malli
 edes LOO-korjauksen jälkeen: Brier delta = +0.0005, NLL delta = +3. Syy: liian
 vähän dataa (455 lähtöä / 17 vrk) ja dam_sire-kattavuus runners:ssa on vain ~24 %.
 
-Aktivoidaan takaisin kun kaikki ehdot täyttyvät:
+Aktivoidaan takaisin kun **kaikki** ehdot täyttyvät:
 1. DB:ssä on >= 8 viikkoa puhdasta dataa (n. 2026-07-07)
 2. dam_sire-kattavuus runners:ssa > 60 %
 3. Uusi `sire_ablation_loo.py`-ajo näyttää Brier-parannuksen selvästi
+4. **Point-in-time-laskenta toteutettu** — aggregaatti lasketaan vain
+   `horse_starts WHERE race_date < runner.race_date` per runner-rivi
+   (Auditoija #5, AUDIT_FINDINGS_2026-05-15.md: globaali aggregaatti sisältää
+   tulevaisuuden startteja — ei vaikuta nyt, mutta estää aktivoinnin ilman korjausta)
 
 Piirteet:
 - `sire_lifetime_win_rate`
@@ -119,7 +124,51 @@ Piirteet:
 - `dam_sire_lifetime_win_rate`
 - `dam_sire_lifetime_starts`
 
-**TODO:** Aktivoi ~2026-07-07 — aja ablation ensin ja tarkista ehdot.
+**TODO:** Aktivoi ~2026-07-07 — toteuta point-in-time-laskenta, aja ablation,
+tarkista kaikki 4 ehtoa.
+
+---
+
+## Avoimet — Travronden D2 -piirteet (aktivoidaan ~2026-07)
+
+### #14 · Travronden tr_*-piirteet kommentoitu pois FEATURE_COLS:ista ja CATEGORICAL_COLS:ista
+
+Travronden pre-race -piirteet (scraper + schema + pilot valmis 15.5.2026) kommentoitu
+pois mallista A/B-testin tulosten perusteella.
+
+**Corrected A/B results (15.5.2026, 3 kriittistä bugia korjattu):**
+- Δ Brier kaikki lähdöt: +0.0003 (alle 0.001-kynnyksen → marginaalinen)
+- Δ Brier V-pelilähdöt: +0.0039 (0.001–0.005 välissä → lisätty signaali mutta ei integraatiokynnyksen yli)
+
+**Syyt lykkäykselle:**
+1. `tr_game_percent_v` (#1 feature) on Copycat-riski — kopioi markkinasentimentin
+   joka on jo `form_market_avg_5`:ssä
+2. `tr_start_interval_group` (#40) ei parantunut edes kategorisena koodauksena
+3. Pilot-data käytti closing-line-arvoja, tuotanto pollaisi early-line → reaalinen
+   paranema todennäköisesti pienempi kuin A/B-tulos antaa ymmärtää
+
+**Infrastruktuuri on paikallaan — mitään ei tarvitse rakentaa uudelleen:**
+- Schema-laajennus: `tr_*`-sarakkeet `runners`-taulussa ✅
+- Scraper: `src/data/scrapers/travronden.py` ✅
+- Feature-laskenta: `src/features/travronden_features.py` ✅
+- Pilot-data: DB:ssä ~5 000 runner-riviä (2023–2026) ✅
+
+Aktivoidaan kun **kaikki** ehdot täyttyvät:
+1. DB:ssä on >= 8 viikkoa puhdasta dataa (~2026-07-07)
+2. Uusi A/B-vertailu **ilman `tr_game_percent_v`** osoittaa muiden TR-piirteiden
+   todellisen arvon (poistetaan Copycat-mittaushäiriö)
+3. Δ Brier V-pelilähdöissä ≥ 0.005 uudessa A/B-vertailussa
+
+Piirteet (kommentoitu pois `ranker.py` FEATURE_COLS + CATEGORICAL_COLS):
+- `tr_start_interval_group` (CATEGORICAL_COLS)
+- `tr_is_first_after_castration`, `tr_is_first_new_driver`, `tr_is_first_new_trainer`
+- `tr_is_first_shoes`, `tr_is_first_carriage`
+- `tr_speed_record_k`, `tr_speed_record_m`, `tr_speed_record_l`
+- `tr_game_percent_v` (aktivoi vain multi-snapshot delta-piirteen kanssa)
+- `tr_expected_odds` (odottaa > 40 % kattavuutta)
+
+**TODO:** Aktivoi ~2026-07-07 — aja A/B ilman tr_game_percent_v ensin, tarkista
+kaikki 3 ehtoa.
 
 ---
 
@@ -135,3 +184,6 @@ Piirteet:
 | **M1** | `_upsert_race` + `_upsert_runner` ylikirjoittivat olemassa olevat arvot Nonella | 10.5.2026 |
 | **B1** | `race_setup_features`: Travsport-trackCodeit eivät matchanneet ATG-ratanimiä | 10.5.2026 |
 | **B2** | `form_features`: segmentoidut piirteet olivat 100 % NaN (start_method/distance puuttuivat runners:ista) | 10.5.2026 |
+| **dam_sire** | `_upsert_horse` luki `pedigree.mothersFather` — ATG-avain on `pedigree.grandfather`. Backfill täytti 3 477 hevosta | 10.5.2026 |
+| **sire-leakage** | `sire_features()` sisällytti hevosen omat startit aggregaattiin → leave-one-out -korjaus | 14.5.2026 |
+| **backtest race_date -kollissio** | `rolling_walk_forward` ja `quarterly_walk_forward` kaatuivat KeyError:iin kun race_date oli jo features-DataFramessa | 14.5.2026 |

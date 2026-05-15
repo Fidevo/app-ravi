@@ -1223,15 +1223,25 @@ def test_upsert_runner_writes_shoes_sulky(tmp_path):
 from src.data.scheduler import refresh_day_runners
 
 
-def test_fetch_daily_races_returns_first_race_start_utc(tmp_path):
-    """fetch_daily_races palauttaa stats['first_race_start_utc'] = aikaisin SE-lähtö."""
+def test_fetch_daily_races_returns_track_first_races(tmp_path):
+    """fetch_daily_races palauttaa stats['track_first_races'] = {track_name: datetime}.
+
+    Bugi #4 -korjaus (15.5.2026): per-rata aikaisin lähtö refresh-ankkurina.
+    Aiempi 'first_race_start_utc' (globaali) korvattu 'track_first_races' (dict).
+    SAMPLE_RACE startTime = 2026-04-27T18:00:00 (Stockholm) = 16:00 UTC (CEST).
+    """
     db = str(tmp_path / "test.db")
     migrate(db)
     stats = fetch_daily_races(date(2026, 4, 27), db_path=db, atg=FakeATG())
-    # SAMPLE_RACE startTime = 2026-04-27T18:00:00 (Stockholm) = 16:00 UTC (CEST)
-    assert stats["first_race_start_utc"] is not None
-    assert stats["first_race_start_utc"].tzinfo is timezone.utc
-    assert stats["first_race_start_utc"].hour == 16  # 18:00 CEST → 16:00 UTC
+    track_first = stats.get("track_first_races", {})
+    assert isinstance(track_first, dict), "track_first_races pitäisi olla dict"
+    assert len(track_first) > 0, "track_first_races ei sisällä ratoja"
+    # Kaikki arvot ovat UTC datetime -objekteja
+    for tname, dt in track_first.items():
+        assert dt.tzinfo is timezone.utc, f"track {tname!r}: aikaleima ei ole UTC"
+    # Aikaisin arvo = 16:00 UTC (18:00 CEST)
+    earliest = min(track_first.values())
+    assert earliest.hour == 16, f"Odotettu 16:00 UTC, saatiin {earliest.hour}:xx UTC"
 
 
 def test_setup_for_date_schedules_refresh_job(monkeypatch):
@@ -1240,14 +1250,14 @@ def test_setup_for_date_schedules_refresh_job(monkeypatch):
     captured: list = []
 
     def fake_fetch_daily_races(target, db_path, scheduler, travsport):
-        # Palauta tunnettu first_race_start_utc tulevaisuuteen
+        # Palauta track_first_races dict jossa yksi rata tulevaisuuteen
         future = datetime.now(timezone.utc) + timedelta(hours=4)
         return {
             "races_processed": 5,
             "snapshot_jobs": 20,
             "result_jobs": 5,
             "errors": [],
-            "first_race_start_utc": future,
+            "track_first_races": {"Solvalla": future},
         }
 
     monkeypatch.setattr(scheduler_mod, "fetch_daily_races", fake_fetch_daily_races)
@@ -1267,7 +1277,7 @@ def test_setup_for_date_skips_refresh_when_first_race_in_past(monkeypatch):
         past = datetime.now(timezone.utc) - timedelta(hours=2)
         return {
             "races_processed": 5, "snapshot_jobs": 0, "result_jobs": 0,
-            "errors": [], "first_race_start_utc": past,
+            "errors": [], "track_first_races": {"Solvalla": past},
         }
 
     monkeypatch.setattr(scheduler_mod, "fetch_daily_races", fake_fetch_daily_races)

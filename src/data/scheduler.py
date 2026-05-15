@@ -893,11 +893,14 @@ def fetch_daily_races(
         "runners_inserted": 0,
         "runners_updated": 0,
         "errors": [],
-        "first_race_start_utc": None,  # päivän aikaisin SE-lähtö, refresh-jobin ankkuri
+        # Bugi #4 -korjaus (15.5.2026): per-rata aikaisin lähtö refresh-jobin ankkurina.
+        # Aiemmin: yksi earliest_start_dt koko päivälle → lounas-rata ajasti refreshin
+        # niin aikaisin että iltaratojen (V86/V64) shoes/sulky ei ollut vielä lukittu.
+        "track_first_races": {},  # track_name → datetime (aikaisin lähtö per rata)
     }
     # Kerää uniikki horse_id:t Travsport-hakua varten
     horse_ids_seen: set[str] = set()
-    earliest_start_dt: datetime | None = None
+    track_first_race: dict[str, datetime] = {}
     try:
         cal = client.get_calendar_day(target)
         with Session_() as session:
@@ -926,14 +929,18 @@ def fetch_daily_races(
                         # Snapshot-jobit ajastetaan vain jos scheduler
                         # annettu (run_forever-konteksti). run_once ei
                         # ajasta - sen scope päättyy funktion palatessa.
-                        # Seuraa aikaisinta SE-lähtöä — käytetään refresh-
-                        # jobin ankkurina (1. lähdön - 10min hetkellä shoes/
-                        # sulky/jne. on jo lukittu, fetch_daily_races
-                        # uudelleenajo täyttää lopulliset arvot).
+                        # Bugi #4 -korjaus: seuraa aikaisinta lähtöä PER RATA
+                        # (ei koko päivän globaalia minua). Näin jokainen rata
+                        # saa oman refresh-jobinsa 10min ennen ensimmäistä
+                        # omaa lähtöään — shoes/sulky lukittu juuri sillä hetkellä.
                         race_start_dt = _parse_atg_datetime(race.get("startTime"))
                         if race_start_dt is not None:
-                            if earliest_start_dt is None or race_start_dt < earliest_start_dt:
-                                earliest_start_dt = race_start_dt
+                            tname = _track_name(race)
+                            if tname and (
+                                tname not in track_first_race
+                                or race_start_dt < track_first_race[tname]
+                            ):
+                                track_first_race[tname] = race_start_dt
 
                         if scheduler is not None:
                             start_dt = race_start_dt
@@ -999,8 +1006,8 @@ def fetch_daily_races(
         if own_client:
             client.close()
 
-    if earliest_start_dt is not None:
-        stats["first_race_start_utc"] = earliest_start_dt
+    if track_first_race:
+        stats["track_first_races"] = track_first_race
 
     logger.info(
         "fetch_daily_races: %d races, +%d new, ~%d upd, %d errors",
@@ -1349,32 +1356,46 @@ def _schedule_first_race_refresh(
     target_date: date,
     first_race_start_utc: datetime,
     db_path: str = DB_PATH,
+    track_name: str = "",
 ) -> int:
-    """Ajasta refresh_day_runners päivän 1. lähdön - 10min hetkellä.
+    """Ajasta refresh_day_runners radan 1. lähdön - 10min hetkellä.
+
+    Bugi #4 -korjaus (15.5.2026): track_name tekee job-id:stä uniikin per
+    rata. Näin Åby-lounas (12:10) ja Solvalla-ilta (18:10) saavat kumpikin
+    oman refresh-jobinsa eikä lounas-refresh korvaa ilta-refreshiä.
+
+    Args:
+        track_name: radan nimi (esim. "Åby", "Solvalla") — käytetään
+            job-id:ssä. Tyhjä string = fallback vanhaan käyttäytymiseen.
 
     Returns: 1 jos ajastettiin, 0 jos jo mennyt (esim. iltapäivärestart).
     """
     refresh_at = first_race_start_utc - timedelta(minutes=10)
     if refresh_at < datetime.now(timezone.utc):
         logger.info(
-            "_schedule_first_race_refresh: target=%s, first race - 10min "
+            "_schedule_first_race_refresh: target=%s track=%r, first race - 10min "
             "(%s) is in the past, skipping",
             target_date.isoformat(),
+            track_name,
             refresh_at.isoformat(timespec="minutes"),
         )
         return 0
+    # Job-id uniikki per rata + päivä (Bugi #4)
+    track_slug = track_name.lower().replace(" ", "_") if track_name else "all"
+    job_id = f"refresh_runners_{target_date.isoformat()}_{track_slug}"
     scheduler.add_job(
         refresh_day_runners,
         trigger=DateTrigger(run_date=refresh_at),
         args=[target_date, db_path],
-        id=f"refresh_runners_{target_date.isoformat()}",
+        id=job_id,
         replace_existing=True,
         misfire_grace_time=300,  # 5min - jos hetken viive
     )
     logger.info(
-        "_schedule_first_race_refresh: target=%s, scheduled at %s "
+        "_schedule_first_race_refresh: target=%s track=%r, scheduled at %s "
         "(first race %s - 10min)",
         target_date.isoformat(),
+        track_name,
         refresh_at.isoformat(timespec="minutes"),
         first_race_start_utc.isoformat(timespec="minutes"),
     )
@@ -1500,12 +1521,16 @@ def _setup_for_date(
         stats = fetch_daily_races(
             target, db_path=db_path, scheduler=scheduler, travsport=travsport
         )
-        # Ajasta refresh-jobi 1. lähdön - 10min hetkellä jotta shoes/sulky
-        # ja muut runner-kentät päivittyvät lukitusrajan jälkeen lopulliseksi.
-        first = stats.get("first_race_start_utc")
-        if first is not None:
-            n_refresh = _schedule_first_race_refresh(scheduler, target, first, db_path)
-            stats["refresh_jobs"] = n_refresh
+        # Bugi #4 -korjaus: ajasta refresh-jobi PER RATA 1. lähdön - 10min
+        # hetkellä. Jokainen rata saa oman jobinsa jotta iltaratojen
+        # (V86/V64) shoes/sulky on jo lukittu kun refresh ajetaan.
+        track_first_races = stats.get("track_first_races", {})
+        n_refresh = 0
+        for tname, first_dt in track_first_races.items():
+            n_refresh += _schedule_first_race_refresh(
+                scheduler, target, first_dt, db_path, track_name=tname
+            )
+        stats["refresh_jobs"] = n_refresh
     except Exception as exc:  # noqa: BLE001
         logger.exception("%s: fetch_daily_races failed for %s", label, target)
         return {"error": str(exc), "target": target.isoformat()}

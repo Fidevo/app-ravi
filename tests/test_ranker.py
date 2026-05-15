@@ -449,12 +449,22 @@ class TestBug2TrStartIntervalGroupIsCategorical:
     Korjattu lisäämällä se CATEGORICAL_COLS-listaan.
     """
 
-    def test_tr_start_interval_group_in_categorical_cols(self):
-        """tr_start_interval_group on CATEGORICAL_COLS:ssa."""
+    def test_tr_start_interval_group_categorical_arch_preserved(self):
+        """tr_start_interval_group on kommentoitu pois CATEGORICAL_COLS:sta (KNOWN_ISSUES #14).
+
+        Bugi #2 -korjaus (15.5.2026) lisäsi sen CATEGORICAL_COLS:iin oikeana ratkaisuna.
+        Auditoija päätti 15.5.2026 kommentoida kaikki tr_*-piirteet pois
+        (A/B-paranema +0.0003 < 0.005-kynnys) — testi päivitetty vastaamaan tilannetta.
+
+        Kun KNOWN_ISSUES #14 -ehdot täyttyvät (~2026-07-07), lisätään takaisin
+        ja tämä testi muutetaan takaisin asserting IN.
+        """
         from src.models.ranker import CATEGORICAL_COLS
-        assert "tr_start_interval_group" in CATEGORICAL_COLS, (
-            "Bugi #2 regressio: tr_start_interval_group puuttuu CATEGORICAL_COLS:sta. "
-            "Arvot 1/11/21/31 tulee käsitellä kategorisena, ei numeerisena."
+        # Nyt kommentoitu pois per KNOWN_ISSUES #14 — EI saa olla listassa
+        assert "tr_start_interval_group" not in CATEGORICAL_COLS, (
+            "tr_start_interval_group löytyi CATEGORICAL_COLS:sta, vaikka se pitäisi "
+            "olla kommentoituna pois (KNOWN_ISSUES #14). Poista se kommenteista "
+            "vasta kun A/B-paranema V-pelilähdöissä ≥ 0.005."
         )
 
     def test_tr_start_interval_group_not_duplicated_in_feature_cols(self):

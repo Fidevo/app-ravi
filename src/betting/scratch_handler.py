@@ -51,11 +51,30 @@ def apply_rule_4_deduction(
 ) -> float:
     """Bookkereiden "Rule 4" -vähennys peruttujen aiheuttamaan kertoimeen.
 
+    ⚠️ KÄYTTÖEHTO: Vain **fixed-odds**-vedonvälittäjille (Unibet, Betsson,
+    Bet365, Pinnacle jne.).
+
+    EI SAA KÄYTTÄÄ ATG:n pari-mutuel-kertoimien kanssa. ATG:n poolissa
+    kertoimet lasketaan automaattisesti uudelleen kun hevonen perutaan —
+    scratching poistaa pelatut rahat poolista ja kaikkien muiden kertoimet
+    päivittyvät livenä. Jos tätä funktiota käytetään ATG-kertoimiin, vähennys
+    tehdään kahdesti: ATG tekee sen automaattisesti + tämä funktio tekee sen
+    uudelleen → mallin edge lasketaan liian pieneksi.
+
+    (Auditoija Bugi #6, AUDIT_FINDINGS_2026-05-15.md)
+
     Yksinkertaistettu kaava: jos perutu hevonen oli market-todennäköisyydeltään
     p, vähennetään muiden kertoimista karkeasti suhteessa p:hen.
 
     Tarkka kaava vaihtelee bookkerien välillä - tarkista oman bookkerisi
     Rule 4 -taulukko tarkkoja arvoja varten. Tämä on approksimaatio.
+
+    Args:
+        odds: fixed-odds-kerroin (esim. 5.0)
+        scratched_win_prob: perutun hevosen voittotodennäköisyys (0–1)
+
+    Returns:
+        Vähennetty kerroin. Käytä vain fixed-odds-markkinoille.
     """
     if scratched_win_prob <= 0:
         return odds

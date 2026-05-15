@@ -729,7 +729,111 @@ täysin saatavilla eikä ryhmitysvirhe (Bugi #1) vaikuta yhtä pahasti.
 
 ---
 
-### Auditoijan päätettäväksi — integraatiokysymys
+### ✅ AUDITOIJAN PÄÄTÖS — 15.5.2026 (Opus 4.7)
+
+**🔴 ÄLÄ INTEGROI TRAVRONDEN-PIIRTEITÄ TUOTANTOON VIELÄ. Lykätään ~7.7.2026:een (Vaihtoehto C).**
+
+### Päätöksen perustelut
+
+**1. Numeerinen perustelu:**
+
+| Mittari | Korjattu tulos | Päätöskynnys | Tulos |
+|---|---|---|---|
+| Δ Brier kaikki lähdöt | +0.0003 | ≥ 0.005 | ❌ 16× alle kynnyksen |
+| Δ Brier V-pelilähdöt | +0.0039 | ≥ 0.005 | ❌ 22 % alle kynnyksen |
+
+Molemmat alle päätöskynnyksen. Ei ole insinöörimäisesti perusteltua sitouttaa
+tuotantoa marginaaliseen paranemaan jolla on isot toteutus- ja ylläpitokustannukset
+(pollaus-cron, scheduler-integraatio, schema-monimutkaisuus).
+
+**2. Käyttäjän alkuperäinen Copycat-huoli vahvistui:**
+
+`tr_game_percent_v` on edelleen #1 piirre korjatussa A/B-testissä, mutta sen
+tuoma todellinen paranema on **paljon pienempi kuin alkuperäinen +0.009 antoi
+ymmärtää**. Markkina-peilaus ei tuo aitoa edgeä koska `form_market_avg_5` jo
+hinnoittelee samaa tietoa.
+
+**3. Pace-piirre `tr_start_interval_group` ei toiminut edes kategorisena:**
+
+Koko Travronden-investoinnin **pääperustelu** oli pace-arvio (asiantuntijoiden
+per-hevonen, per-lähtö ennuste). Kategorisena se nousi #34 → #40 — **siirtyi
+väärään suuntaan**. Mahdollisia syitä:
+- 32.5 % testidata-kattavuus liian matala luotettavaan oppimiseen
+- 4-portainen ryhmittely (1/11/21/31) → 590 esimerkkiä/luokka (LightGBM:lle
+  liian vähän interaktioita oppiakseen)
+- Asiantuntijat eivät osu paremmin kuin form/market jo tekevät
+
+**4. Aikataulu on puolellamme — ei menetetä mitään odottamalla:**
+
+- Schema-laajennus (tr_*-sarakkeet) on jo tehty
+- Scraper-koodi (`travronden.py`, `travronden_features.py`) on tehty + testattu
+- Pilot-data on cachessa (~5000 runner-riviä, 2023→2026)
+- **Mitään ei pitäisi rakentaa uudelleen myöhemmin**
+- Pollaus-cron jätetään rakentamatta — säästetään API-rasitus + scheduler-monimutkaisuus
+- Kun 8+ vk dataa kerätty (~2026-07-07), A/B-vertailu voidaan ajaa uudelleen
+
+### Yksi positiivinen löydös
+
+`tr_speed_record_m` nousi **#6** korjatussa rankingissä. Tämä on TR-piirteiden
+**ainoa selkeä voitto** — antaa tarkemman km-aika-ennätyksen kuin
+`atg_best_km_for_this_setup`. Mutta yhden piirteen takia ei kannata rakentaa
+koko pollaus-pollausinfrastruktuuria.
+
+### Mitä tehdään seuraavaksi
+
+#### 🚨 Tärkeintä nyt: Bugi #4 (Lounasravien Ansa)
+
+`refresh_day_runners` ajetaan vain kerran päivässä päivän aikaisimman lähdön
+mukaan. Iltakisojen (V86, V64) shoes/sulky-tiedot jäävät vajaiksi. **Tämä on
+aito tuotantobugi joka vaikuttaa juuri V-pelilähtöjen** mallin laatuun —
+ironista että strateginen fokus on V-peleissä mutta data on niissä huonoin.
+
+Tehtäväajo: ~3–4 h koodimuutos.
+
+#### Bugit #5 + #6 (~10 min)
+
+- **#5** — KNOWN_ISSUES #13: lisää aktivointiehto "**point-in-time-laskenta toteutettu**"
+- **#6** — `apply_rule_4_deduction` docstringiin käyttöehto-varoitus
+
+#### Travronden-osio: pidä koodi paikallaan, lykkää käyttöönotto
+
+- ✅ `travronden.py` ja `travronden_features.py` säilyvät koodissa
+- ✅ Pilot-data säilyy DB:ssä — kasvaa Travrondenin spontaani-ajojen myötä
+- 🔴 **Pollaus-cron ei rakenneta vielä `run_forever`:iin**
+- 🔴 **`tr_*`-piirteet poistetaan `FEATURE_COLS`:ista** (kommentoidaan pois)
+- 🔴 **`tr_start_interval_group` poistetaan `CATEGORICAL_COLS`:ista**
+
+Kommentoi `FEATURE_COLS`:in tr_*-piirteet pois samalla logiikalla kuin
+KNOWN_ISSUES #13 (sire-piirteet) — odottavat aktivointia kun:
+1. >= 8 viikkoa puhdasta dataa (~2026-07-07)
+2. Uusi A/B-vertailu näyttää Brier-paraneman ≥ 0.005 V-pelilähdöissä
+3. Ablation ilman `tr_game_percent_v` osoittaa muiden TR-piirteiden todellisen arvon
+
+Lisää KNOWN_ISSUES.md:hen uusi merkintä #14 tästä.
+
+### Kiitos rehellisyydestä
+
+Koodari peruutti aiemman "INTEGROI"-suosituksen kun korjattu tulos paljastui
+heikoksi. **Tämä on hyvää insinöörikulttuuria** — myönsi että aiempi optimismi
+perustui rikkinäiseen pipeline:iin.
+
+Lisäksi koodari löysi **lisäbugin** (duplicate-kolumni kun sama piirre on
+sekä FEATURE_COLS:issa että CATEGORICAL_COLS:issa) jonka auditoija ei huomannut
+suunnittelussa. Hyvä huomio.
+
+10 uutta regressiotestiä varmistavat että bugit eivät palaa. Tämä on insinöörin
+oikea tapa korjata: bugi → korjaus → regressiotesti.
+
+### Yhteenveto numeroin
+
+- **Korjatut bugit:** 3 kriittistä (#1 + #2 + #3) + 1 lisä (duplicate)
+- **Uudet testit:** 10 (327 yhteensä)
+- **Mallin todellinen voittosignaali:** 0.0023 vs. uniform (oli aiemmin 0.0025)
+- **Travronden-paranema:** +0.0003 kaikki, +0.0039 V-peli
+- **Travronden-päätös:** LYKÄTÄÄN ~7.7.2026:een
+
+Tämä on **realistinen kuva** projektin tilasta. Ei dramaattinen mutta vakaa
+ja luotettava perusta — paljon parempi kuin pelata rahaa väärillä luvuilla.
 
 Auditoijan päätösraja (alkuperäinen):
 - Brier-paranema ≥ 0.005 → INTEGROI TUOTANTOON
