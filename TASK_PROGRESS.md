@@ -24,8 +24,7 @@
 | Vaihe 4 — Backtest + paperitestaus | ⏸ odottaa V3-tuloksia + lisädataa | ~3.6.2026 |
 | Vaihe 5 — Päätöspiste | ⏸ vaatii 8+ viikkoa dataa | ~7.7.2026 |
 
-**Tärkein nyt:** Travronden Vaihe 2 — A/B-testi valmis. `tr_game_percent_v` = #1 piirre,
-V-pelilähdöt Brier +0.009. Vaihe 6–7 (scheduler-integraatio) seuraavana.
+**Tärkein nyt:** Travronden Vaihe 2 — A/B-testi ajettu uudelleen korjatuilla koodeilla (3 kriittistä bugia korjattu 15.5.2026). Korjattu delta: +0.0003 (kaikki lähdöt), +0.0039 (V-pelilähdöt). Odottaa auditoijan integraatiopäätöstä.
 
 ---
 
@@ -216,31 +215,59 @@ Samanlainen rakenne kuin `tests/test_travronden_tracks.py` (28 testiä).
 
 Migraatio ajettu Hetznerillä onnistuneesti.
 
-#### ✅ Vaihe 5: A/B-vertailu valmis (15.5.2026)
+#### ✅ Vaihe 5: A/B-vertailu valmis (15.5.2026, korjattu 15.5.2026)
 
 **Backfill:** 2739 runner-riviä päivitetty Travrondenin dense-skannauksesta
 (97 kierrosta, 2026-04-15 – 2026-05-13, step=10 kattava skannaus).
 
 **TR-data kattavuus:** 2500/5154 = **48.5 %** treenidatasta (ylittää 30 % kynnyksen ✅)
 
-**A/B-tulokset (15.5.2026, rs=42):**
+---
+
+⚠️ **KORJAUS (15.5.2026 ilta):** Alkuperäiset A/B-tulokset olivat virheellisiä.
+AUDIT_FINDINGS_2026-05-15.md tunnisti 3 kriittistä bugia:
+- Bugi #1: LambdaRank-ryhmät eivät järjestetty race_id:n mukaan
+- Bugi #2: `tr_start_interval_group` käsitelty numeerisena, ei kategorisena
+- Bugi #3: isotonic-kalibrointi puuttui backtest.py:stä
+
+Kaikki 3 bugia korjattu commitissa `56823b4` + `3121b12`. A/B-testi ajettu
+uudelleen korjatuilla koodeilla. 327 testiä läpäisee.
+
+---
+
+**A/B-tulokset — ALKUPERÄISET (virheelliset, 3 bugin aiheuttama):**
 
 | Malli | Brier | NLL | Muutos |
 |---|---|---|---|
-| Baseline (37 piirrettä, ei TR) | 0.0846 | 394.58 | — |
-| **TR-malli (47 piirrettä + tr_*)** | **0.0796** | **366.56** | **−0.0050 ✅** |
-| Baseline vain V-pelilähdöt | 0.0824 | 161.50 | — |
-| **TR-malli vain V-pelilähdöt** | **0.0734** | **136.07** | **−0.0090 ✅** |
+| Baseline | 0.0846 | 394.58 | — |
+| TR-malli | 0.0796 | 366.56 | −0.0050 |
+| Baseline (V-peli) | 0.0824 | 161.50 | — |
+| TR-malli (V-peli) | 0.0734 | 136.07 | −0.0090 |
 
-**Huomionarvoista:**
-- `tr_game_percent_v` = **#1 piirre** koko mallin 47 piirteen joukossa ⭐⭐⭐
-- `tr_speed_record_m` = #14 (hyvä sijoitus)
-- `tr_start_interval_group` = #34 (kohtalainen)
-- V-pelilähdöillä paranema **+0.009** — selvästi auditoijan 0.005-kynnyksen yli
+**A/B-tulokset — KORJATUT (15.5.2026 ilta, 3 bugia korjattu):**
 
-**Koodarin päätösehdotus auditoijalle:**
-Strateginen fokus on V-pelilähdöt → V-pelilähdöissä paranema on +0.009 (yli 0.005-kynnyksen).
-`tr_game_percent_v` on koko mallin tärkein piirre. **Suositus: INTEGROI TUOTANTOON.**
+| Malli | Brier | NLL | Muutos |
+|---|---|---|---|
+| Baseline (37 piirrettä, ei TR) | 0.0820 | 387.07 | — |
+| **TR-malli (47 piirrettä + tr_*)** | **0.0818** | **386.29** | **+0.0003** |
+| Baseline vain V-pelilähdöt (72 lähtöä) | 0.0772 | 144.72 | — |
+| **TR-malli vain V-pelilähdöt** | **0.0733** | **134.58** | **+0.0039** |
+
+**Bugi-korjauksen vaikutus:** alkuperäiset tulokset yliarvioivat parannuksen merkittävästi
+(+0.009 → +0.0039 V-pelilähdöissä). Korjattu delta +0.0003 kaikilla lähdöillä on
+auditoijan 🟡 MARGINAALINEN PARANEMA -luokassa (< 0.001 kynnys).
+
+**Korjatut Feature Importance -sijoitukset:**
+- `tr_game_percent_v` = **#1** (säilyy huippuna ⭐⭐⭐)
+- `tr_speed_record_m` = **#6** (nousi 14→6, kategorinen käsittely paransi)
+- `tr_start_interval_group` = **#40** (laski 34→40, kategorisena ei parantunut)
+- `tr_is_first_new_driver` = #37
+- `tr_speed_record_k` = #31, `tr_speed_record_l` = #33
+
+**Koodarin päätösehdotus auditoijalle (korjattu):**
+Kokonaisparanema +0.0003 on marginaalinen. V-pelilähdöissä +0.0039 on auditoijan
+"LISÄTTY SIGNAALI" -alueella (0.001–0.005). Edellinen suositus "INTEGROI" oli
+virhellisten A/B-tulosten perusteella — perutaan. Auditoijan päätettäväksi.
 
 ---
 
