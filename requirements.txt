@@ -12,3 +12,4 @@ apscheduler>=3.10.0
 python-dotenv>=1.0.0
 tenacity>=8.2.0
 pydantic>=2.6.0
+shap>=0.45.0
