@@ -1208,6 +1208,49 @@ class TestTrackStructureFeatures:
         assert len(result) == 2
 
 
+# ---------------------------------------------------------------------------
+# Parannus #7 — Distance bucket -rajat: bins=[0,1999,2599,5000]
+# ---------------------------------------------------------------------------
+
+class TestDistanceBucketsTakamatka:
+    """Testit distance_category-laskennalle uusilla bin-rajoilla.
+
+    Ennen: bins=[0, 1640, 2140, 5000]
+    Jälkeen (parannus #7): bins=[0, 1999, 2599, 5000]
+
+    Muutos tehtiin koska esim. 2140m (takamatkalähdöt) kuuluu edelleen
+    'middle'-luokkaan, ja 2160m ei saa lentää 'long'-luokkaan.
+    """
+
+    def _distance_category(self, distance: int) -> str:
+        """Apumetodi: aja race_setup_features yhden hevosen lähdölle ja
+        palauta distance_category-arvo."""
+        runners = _runners(
+            {"race_id": 1, "horse_id": 1, "race_date": "2024-01-01",
+             "finish_position": 2, "start_number": 2, "handicap_meters": 0},
+        )
+        races = _races({"race_id": 1, "track": "Solvalla",
+                        "distance": distance, "start_method": "auto"})
+        result = race_setup_features(runners, races)
+        return str(result.iloc[0]["distance_category"])
+
+    def test_2140m_normal_is_middle(self):
+        """2140m → 'middle' (raja on 1999 < x ≤ 2599)."""
+        assert self._distance_category(2140) == "middle"
+
+    def test_2160m_takamatka_stays_in_middle(self):
+        """2160m takamatkalähtö → 'middle', EI 'long' (vanha raja 2140 olisi lentänyt)."""
+        assert self._distance_category(2160) == "middle"
+
+    def test_2640m_long_distance_is_long(self):
+        """2640m → 'long' (raja on x > 2599)."""
+        assert self._distance_category(2640) == "long"
+
+    def test_1640m_short_distance_is_sprint(self):
+        """1640m → 'sprint' (raja on x ≤ 1999)."""
+        assert self._distance_category(1640) == "sprint"
+
+
 class TestBuildFeatureMatrixWithTracks:
     """Testit build_feature_matrix():lle tracks-parametrilla (integraatio)."""
 

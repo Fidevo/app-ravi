@@ -363,6 +363,20 @@ def edge_decay_analysis(
         )
 
     df = backtest_df.reset_index(drop=True).copy()
+
+    # Parannus #8: suodata tyhjät viikot ROI-modessa
+    # (Brier lasketaan aina kaikille viikoille, joten suodatus vain ROI-modessa)
+    if score_col == "roi_pct" and "n_value_bets" in df.columns:
+        df = df[df["n_value_bets"] > 0].reset_index(drop=True)
+        if len(df) < 4:
+            return {
+                "verdict": "ei tarpeeksi pelillisiä viikkoja",
+                "trend_slope": None,
+                "score_col": score_col,
+                "first_half": None,
+                "second_half": None,
+            }
+
     df["period_idx"] = range(len(df))
 
     slope = float(np.polyfit(df["period_idx"], df[score_col], 1)[0])

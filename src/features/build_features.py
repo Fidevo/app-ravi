@@ -164,7 +164,7 @@ def form_features(
     if "distance" in combined.columns:
         combined["_dist_bucket"] = pd.cut(
             combined["distance"],
-            bins=[0, 1640, 2140, 5000],
+            bins=[0, 1999, 2599, 5000],
             labels=["sprint", "middle", "long"],
         )
         grouped_dist = combined.groupby(
@@ -291,7 +291,7 @@ def race_setup_features(
 
     df["distance_category"] = pd.cut(
         df["distance"],
-        bins=[0, 1640, 2140, 5000],
+        bins=[0, 1999, 2599, 5000],
         labels=["sprint", "middle", "long"],
     )
 

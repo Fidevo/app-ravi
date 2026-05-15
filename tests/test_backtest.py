@@ -375,3 +375,82 @@ class TestBug3CalibrationLowersBrier:
         assert "apply_isotonic" in source, (
             "backtest.py ei sisällä apply_isotonic — bugi #3 -korjaus puuttuu."
         )
+
+
+# ---------------------------------------------------------------------------
+# Parannus #8 — edge_decay_analysis: tyhjien viikkojen suodatus ROI-modessa
+# ---------------------------------------------------------------------------
+
+class TestParannus8EmptyWeekFilter:
+    """Testit parannus #8:lle: edge_decay_analysis suodattaa tyhjät viikot
+    (n_value_bets=0) kun score_col='roi_pct'. Brier-mode ei suodata.
+    """
+
+    def _make_weeks_df(self, n_weeks: int, empty_indices: list[int]) -> pd.DataFrame:
+        """Rakenna backtest_df jossa osa viikoista on tyhjiä (n_value_bets=0).
+
+        Args:
+            n_weeks: viikkojen kokonaismäärä
+            empty_indices: indeksit (0-pohjainen) jotka asetetaan tyhjiksi
+        """
+        rows = []
+        for i in range(n_weeks):
+            is_empty = i in empty_indices
+            rows.append({
+                "period": f"period_{i}",
+                "n_races": 10,
+                "n_value_bets": 0 if is_empty else 5,
+                "total_staked": 0.0 if is_empty else 500.0,
+                "total_pnl": 0.0 if is_empty else float(i * 10 - 20),
+                "roi_pct": 0.0 if is_empty else float(i * 2 - 4),
+                "avg_edge_pct": 0.0 if is_empty else 5.0,
+                "win_rate": 0.0 if is_empty else 0.2,
+                "brier_score": float(0.2 + i * 0.001),
+            })
+        return pd.DataFrame(rows)
+
+    def test_empty_weeks_filtered_in_roi_mode(self):
+        """8 viikkoa joista 4 tyhjää (n_value_bets=0) → suodatus toimii,
+        4 aktiivista viikkoa riittää analyysiin."""
+        df = self._make_weeks_df(n_weeks=8, empty_indices=[1, 3, 5, 7])
+        result = edge_decay_analysis(df, score_col="roi_pct")
+        # 4 aktiivista viikkoa → analyysi onnistuu (slope ei None)
+        assert result["trend_slope"] is not None, (
+            "Tyhjien viikkojen suodatuksen jälkeen pitäisi olla 4 aktiivista viikkoa "
+            "joten analyysin pitäisi onnistua."
+        )
+        assert result["verdict"] != "ei tarpeeksi pelillisiä viikkoja"
+
+    def test_too_few_active_weeks_returns_insufficient(self):
+        """6 viikkoa joista 4 tyhjää → vain 2 aktiivista viikkoa jää →
+        verdict == 'ei tarpeeksi pelillisiä viikkoja'."""
+        df = self._make_weeks_df(n_weeks=6, empty_indices=[0, 1, 2, 3])
+        result = edge_decay_analysis(df, score_col="roi_pct")
+        assert result["verdict"] == "ei tarpeeksi pelillisiä viikkoja", (
+            f"Odotettiin 'ei tarpeeksi pelillisiä viikkoja', saatiin: {result['verdict']}"
+        )
+        assert result["trend_slope"] is None
+
+    def test_brier_mode_does_not_filter_empty_weeks(self):
+        """score_col='brier_score' → kaikki viikot mukana, tyhjät viikot
+        eivät suodatu (Brier lasketaan kaikille viikoille)."""
+        # 8 viikkoa joista 5 tyhjiä — brier-modessa kaikki 8 mukana
+        df = self._make_weeks_df(n_weeks=8, empty_indices=[0, 2, 4, 6, 7])
+        result = edge_decay_analysis(df, score_col="brier_score")
+        # Brier-modessa pitää onnistua (8 viikkoa ≥ 4)
+        assert result["trend_slope"] is not None, (
+            "Brier-mode: kaikki 8 viikkoa mukana → analyysin pitää onnistua."
+        )
+        assert result["verdict"] != "ei tarpeeksi pelillisiä viikkoja"
+
+    def test_empty_n_value_bets_column_no_filter(self):
+        """DataFrame ilman n_value_bets-saraketta → ei suodatusta,
+        analyysi toimii normaalisti (ei KeyError)."""
+        # Käytä _make_backtest_df:ää jossa n_value_bets ON — poistetaan se
+        df = _make_backtest_df(n_periods=6, roi_trend=0.0)
+        df = df.drop(columns=["n_value_bets"])
+        # Ei pitäisi kaatua — ilman n_value_bets-saraketta ei suodateta
+        result = edge_decay_analysis(df, score_col="roi_pct")
+        assert result["trend_slope"] is not None, (
+            "Ilman n_value_bets-saraketta analyysin pitää silti toimia (ei suodatusta)."
+        )

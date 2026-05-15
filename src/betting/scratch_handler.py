@@ -27,7 +27,22 @@ def renormalize_after_scratch(
     predictions: pd.DataFrame,
     scratched_horse_ids: list[str],
 ) -> pd.DataFrame:
-    """Yksinkertainen pro rata -renormalisointi.
+    """Pro-rata-jako jäljellejääville hevosille kun joku perutaan.
+
+    Tämä funktio toimii **raakojen softmax**-todennäköisyyksien kanssa.
+
+    ⚠️ TODO Vaihe 6 (auditoija parannus #9, AUDIT_FINDINGS_2026-05-15.md):
+
+    Kun isotonic-kalibrointi (apply_isotonic) on käytössä tuotannossa,
+    pro-rata-jako voi siirtää arvoja alueille jossa kalibrointikäyrä
+    käyttäytyy eri tavalla. Parempi lähestymistapa on:
+
+        1. Poista peruttu hevonen race_df:stä
+        2. Aja predict_win_probabilities(model, race_df_without_scratched)
+        3. Sovella apply_isotonic uudelleen jäljellejääviin
+
+    Tämä antaa matemaattisesti puhtaan jakauman ilman pro-rata-vääristymää.
+    Implementoi Vaihe 6:n yhteyteen kun pelialerttijärjestelmä rakennetaan.
 
     Args:
         predictions: sis. race_id, horse_id, win_prob
