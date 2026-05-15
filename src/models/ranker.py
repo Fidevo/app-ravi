@@ -207,7 +207,14 @@ def train_ranker(
     # sort=False: df on jo sortattu → ei uudelleensortausta, järjestys säilyy.
     group_sizes = df.groupby("race_id", sort=False).size().values
 
-    X = df[avail_feat + avail_cat].copy()
+    # Duplikaattisuodatus: jos feature_cols ja categorical_cols sisältävät saman sarakkeen
+    # (esim. tr_start_interval_group), avail_feat + avail_cat luo duplikaattikolumnin
+    # → X[col] palauttaa DataFramen eikä Seriestä → LightGBM kaatuu .cat-kutsulla.
+    # Ratkaisu: kategoriset sarakkeet tulevat mukaan X:ään vain avail_cat:in kautta.
+    _avail_cat_set = set(avail_cat)
+    avail_feat_only = [c for c in avail_feat if c not in _avail_cat_set]
+
+    X = df[avail_feat_only + avail_cat].copy()
     for col in avail_cat:
         X[col] = X[col].astype("category")
 
@@ -391,7 +398,10 @@ def predict_win_probabilities(
     avail_feat, avail_cat = _resolve_cols(
         race_df, feature_cols, categorical_cols, log_missing=False
     )
-    X = race_df[avail_feat + avail_cat].copy()
+    # Sama duplikaattisuodatus kuin train_ranker:ssa (ks. kommentti siellä).
+    _avail_cat_set = set(avail_cat)
+    avail_feat_only = [c for c in avail_feat if c not in _avail_cat_set]
+    X = race_df[avail_feat_only + avail_cat].copy()
     for col in avail_cat:
         X[col] = X[col].astype("category")
 
