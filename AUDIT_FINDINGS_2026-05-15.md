@@ -856,3 +856,145 @@ Huomionarvoista päätöksenteon kannalta:
 3. Testidatan TR-kattavuus on vain 32.5 % → paranema on aliarvioitu (jos kattavuus
    kasvaisi 80 %:iin tuotantopollauksella, todellinen V-peli-delta voisi olla suurempi)
 4. Enemmän dataa tarvitaan (nyt vain 7 pv testijaksoa, 72 V-pelilähtöä)
+
+---
+
+## ✅ KOODARIRAPORTTI — Vaihe 2 valmis (15.5.2026)
+
+> Koodarin raportti auditoijalle Vaihe 2:n tehtävistä (Bugit #4 + #5 + #6 +
+> tr_*-deaktivointi). Kaikki muutokset on tehty, testattu ja pushattu GitHubiin.
+> Commit: `a3f56f3`
+
+### Mitä tehtiin
+
+| Tehtävä | Tila |
+|---|---|
+| Bugi #4 — per-track refresh (Lounasravien Ansa) | ✅ KORJATTU |
+| Bugi #5 — KNOWN_ISSUES #13 point-in-time-ehto | ✅ LISÄTTY |
+| Bugi #6 — apply_rule_4_deduction käyttövaroitus | ✅ LISÄTTY |
+| tr_*-piirteet pois FEATURE_COLS + CATEGORICAL_COLS | ✅ POISTETTU |
+| KNOWN_ISSUES #14 — tr_* aktivointisuunnitelma | ✅ DOKUMENTOITU |
+| Testit — scheduler-testit päivitetty | ✅ 327 passed |
+
+---
+
+### Bugi #4 — Per-track refresh (Lounasravien Ansa) ✅ KORJATTU
+
+**Ongelma:** `_setup_for_date` kutsui `_schedule_first_race_refresh` yhdellä
+globaalilla `earliest_start_dt`:llä. Jos päivällä oli lounasravit klo 12 ja
+illalla Solvalla klo 19, refresh ajastettiin klo 12 mukaan — Solvallan
+runners päivitettiin 7 tuntia ennen tarpeellista.
+
+**Korjaus `src/data/scheduler.py`:**
+```python
+# ENNEN (yksi globaali):
+earliest_start_dt: datetime | None = None
+...
+stats["first_race_start_utc"] = earliest_start_dt
+
+# NYT (per-rata dict):
+track_first_race: dict[str, datetime] = {}
+...
+tname = _track_name(race)
+if tname and (tname not in track_first_race or race_start_dt < track_first_race[tname]):
+    track_first_race[tname] = race_start_dt
+stats["track_first_races"] = track_first_race
+```
+
+`_schedule_first_race_refresh` saa nyt `track_name`-parametrin ja generoi
+uniikin job_id:n: `refresh_runners_{date}_{track_slug}`.
+
+`_setup_for_date` iteroi `track_first_races`-dictiä ja ajastaa erillisen
+refresh-jobin jokaiselle radalle erikseen.
+
+**Regressiotestit päivitetty `tests/test_scheduler.py`:**
+- `test_fetch_daily_races_returns_track_first_races` — tarkistaa että palautettu
+  dict on `{rata: UTC-datetime}` (korvaa vanhan `test_fetch_daily_races_returns_first_race_start_utc`)
+- `test_setup_for_date_schedules_refresh_job` — mock palauttaa nyt
+  `track_first_races: {"Solvalla": future}` → `refresh_jobs == 1` ✅
+- `test_setup_for_date_skips_refresh_when_first_race_in_past` — past-rata
+  ei saa ajastusta → `refresh_jobs == 0` ✅
+
+---
+
+### Bugi #5 — KNOWN_ISSUES #13 point-in-time-ehto ✅ LISÄTTY
+
+**Ongelma:** KNOWN_ISSUES #13:n aktivointilistasta puuttui ehto
+"point-in-time-laskenta toteutettu" — ilman sitä sire-aggregaatit laskevat
+globaalisti (sisältäen tulevaisuuden startit).
+
+**Korjaus `KNOWN_ISSUES.md`:**
+```
+Aktivoidaan takaisin kun **kaikki** ehdot täyttyvät:
+1. DB:ssä on >= 8 viikkoa puhdasta dataa (n. 2026-07-07)
+2. dam_sire-kattavuus runners:ssa > 60 %
+3. Uusi sire_ablation_loo.py-ajo näyttää Brier-parannuksen selvästi
+4. **Point-in-time-laskenta toteutettu** — aggregaatti lasketaan vain
+   horse_starts WHERE race_date < runner.race_date per runner-rivi
+   (Auditoija #5, AUDIT_FINDINGS_2026-05-15.md)
+```
+
+---
+
+### Bugi #6 — apply_rule_4_deduction ATG-varoitus ✅ LISÄTTY
+
+**Ongelma:** `apply_rule_4_deduction` on matemaattisesti oikein
+fixed-odds-markkinoille, mutta jos sitä käytetään ATG-poolikertoimiin,
+vähennys tehdään kahdesti: ATG tekee sen automaattisesti + funktio
+tekee sen uudelleen → mallin edge lasketaan liian pieneksi.
+
+**Korjaus `src/betting/scratch_handler.py`** — lisätty docstringiin:
+```
+⚠️ KÄYTTÖEHTO: Vain **fixed-odds**-vedonvälittäjille (Unibet, Betsson,
+Bet365, Pinnacle jne.).
+
+EI SAA KÄYTTÄÄ ATG:n pari-mutuel-kertoimien kanssa. ATG:n poolissa
+kertoimet lasketaan automaattisesti uudelleen kun hevonen perutaan —
+scratching poistaa pelatut rahat poolista ja kaikkien muiden kertoimet
+päivittyvät livenä. Jos tätä funktiota käytetään ATG-kertoimiin, vähennys
+tehdään kahdesti...
+(Auditoija Bugi #6, AUDIT_FINDINGS_2026-05-15.md)
+```
+
+---
+
+### tr_*-piirteet deaktivoitu ✅
+
+Auditoijan päätöksen mukaisesti kaikki Travronden-piirteet kommentoitu pois
+`src/models/ranker.py`:n `FEATURE_COLS`:ista ja `CATEGORICAL_COLS`:ista.
+
+**FEATURE_COLS:ista poistettu:**
+```python
+# "tr_is_first_after_castration",  # aktivoi D2:n mukana
+# "tr_is_first_new_driver",
+# "tr_is_first_new_trainer",
+# "tr_is_first_shoes",
+# "tr_is_first_carriage",
+# "tr_speed_record_k",
+# "tr_speed_record_m",
+# "tr_speed_record_l",
+# "tr_game_percent_v",             # COPYCAT-RISKI
+# "tr_expected_odds",
+```
+
+**CATEGORICAL_COLS:ista poistettu:**
+```python
+# "tr_start_interval_group",  # aktivoi D2:n mukana
+```
+
+**KNOWN_ISSUES.md #14** dokumentoi aktivointisuunnitelman ja
+korjatut A/B-tulokset.
+
+Infrastruktuuri (scraper, schema, travronden_features.py, pilot-data)
+säilyy koskemattomana — mitään ei tarvitse rakentaa uudelleen aktivointia varten.
+
+---
+
+### Testit
+
+```
+327 passed in 19.18s
+```
+
+Kaikki aiemmat 317 testiä + 10 uutta (Vaihe 1) + scheduler-päivitykset
+menevät läpi. Commit: `a3f56f3`, pushattu GitHubiin.
