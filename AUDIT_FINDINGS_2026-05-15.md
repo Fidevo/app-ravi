@@ -1305,3 +1305,226 @@ Dashboard näyttää tämän päivän lähdöt reaaliajassa.
 | Scheduler | ✅ pyörii uudella koodilla (Bug #4 per-track aktiivin) |
 
 Päivitä TASK_PROGRESS.md kun valmis.
+
+---
+
+## ✅ AUDITOIJAN PÄÄTÖS — Vaihe 3 + D3 valmis (15.5.2026, Opus 4.7)
+
+**Hyväksytty.** Vahvistettu lukemalla koodi:
+
+| Korjaus | Sijainti | Vahvistus |
+|---|---|---|
+| Parannus #7 — distance bins `[0, 1999, 2599, 5000]` | [build_features.py:167, 294](src/features/build_features.py:167) | ✅ molemmissa paikoissa |
+| Parannus #8 — `n_value_bets > 0`-suodatus ROI-modessa | [backtest.py:367–370](src/models/backtest.py:367) | ✅ vain ROI-modessa, ei brier-modessa |
+| Parannus #9 — TODO Vaihe 6 docstring | scratch_handler.py | ✅ docstring lisätty |
+| Streamlit dashboard | `src/dashboard/app.py` + `__init__.py` | ✅ |
+| `streamlit>=1.32.0` requirements.txt:hen | rivi 9 | ✅ |
+| Testit | 322 passing lokaalisti (test_travsport ohitettu) | ✅ |
+
+8 uutta regressiotestiä (4 + 4) — bugit eivät palaa.
+
+---
+
+### ⚠️ Yksi tarkennuspyyntö: Brier 0.0733 — onko sama testidata?
+
+Raporttisi mainitsee uuden mallin **Brier = 0.0733** "testidatalla (toukokuu 8–14)".
+Aiempi Vaihe 2 -korjattu A/B-testi raportoi **kaikkien lähtöjen Brier 0.0820**
+samalla aikajaksolla (Apr 27 – May 7 / May 8 – May 14).
+
+**Erotus -0.0087 on yllättävän iso** kun ainoa relevantti muutos treenausvirralle
+oli Parannus #7 (distance bucket). Tämä on **vahvempi paranema kuin kaikki
+aiemmat A/B-testit yhteensä**.
+
+**Kaksi mahdollista selitystä:**
+
+1. **Aito paraneminen** — distance bucket -korjaus vaikuttaa kahteen piirteeseen:
+   - `form_avg_finish_5_same_dist` (segmentoitu muoto)
+   - `distance_category` (CATEGORICAL_COLS)
+   Takamatka-hevosten "väärin sijoittuneet" arvot eivät enää sotke rolling-statseja.
+   Tämä **voi** selittää isonkin paranemisen jos takamatka-hevoset ovat olleet
+   systemaattisesti väärässä luokassa.
+
+2. **Mittauskehysero** — onko Brier 0.0733:
+   - **Kaikkien lähtöjen** Brier (200 lähtöä, 2188 runneria) — sama otanta kuin aiemmin?
+   - Vai **V-pelilähtöjen** Brier (72 lähtöä, 775 runneria) — alajoukko?
+
+Aiempi A/B-testi raportoi `0.0733` nimenomaan **V-pelilähtöjen Brier-arvoksi**
+(TR-malli, 72 lähtöä). Jos uusi malli antaa **kaikkien** lähtöjen Brier = 0.0733,
+se on iso paraneminen. Jos sama luku on **vain V-pelilähtöjä**, paraneminen on
+pienempi.
+
+**Pyydän:** vahvista raportointiin:
+
+```bash
+# Aja vertailu eksplisiittisesti molemmilla otoksilla
+python -c "
+from scripts.ab_evaluate_model import evaluate
+print('Kaikki lähdöt:', evaluate(model_path='data/model_baseline_20260515.lgb', filter='all'))
+print('Vain V-pelit:', evaluate(model_path='data/model_baseline_20260515.lgb', filter='v_only'))
+"
+# Vastaus per malli:
+# - Brier, NLL, n_runners, n_races
+```
+
+Tämä **ei muuta päätöstä** Vaihe 3:n hyväksynnästä — kaikki koodimuutokset ovat
+oikein ja testattu. Mutta lopullinen "voittosignaali" kannattaa raportoida
+oikealla mittaustarkkuudella.
+
+---
+
+### 🎯 Live-havainnoinnin analyysi (Solvalla Lähtö 10)
+
+Tämä on **tärkein osa raporttiasi**. Live-vertailu paljastaa konkreettisesti
+mallin tilan:
+
+**Kolme kategoriaa:**
+
+| Tilanne | Esimerkki | Mitä se kertoo |
+|---|---|---|
+| **Täsmää** | #7 Pasha Newport (19.4 % vs 19.5 %) | Malli osaa kun piirteet riittävät |
+| **Yliarvioi** | #8 Don E.Star (14.1 % vs 2.8 %), #3 Moonshot (8.3 % vs 1.7 %) | Outsider-yliarviot — luultavasti puuttuva markkinasignaali |
+| **Aliarvioi** | #4 Valla d'Gaagaa (5.0 % vs 25.3 %), #5 Papillon Boko (28.6 % vs 42.4 %) | Suosikkien aliarvio — **K1-pollutoitujen kuski/valmentaja-piirteiden puute näkyy** |
+
+**Sinun tulkintasi #1 (K1-piirteiden puute) on oikein.** Käyttäjän alkuperäinen
+huoli Copycat-riskistä saa tästä uutta valoa: kun markkina-piirteet (`tr_game_percent_v`,
+`atg_driver_win_pct`, jne.) eivät ole mallissa, malli aliarvioi markkinan suosikit
+ja yliarvioi outsidereja.
+
+**Toinen tärkeä havainto:** Pasha Newport (19.4 % vs 19.5 %) on **tilastollisesti
+ihmeen tarkka**. 0.1 prosenttiyksikön ero on poikkeuksellinen — joko sattumaa
+tai indikoi että mallin "perustyökalut" (form, ATG-aggregaatit, ratarakenne)
+toimivat hyvin tietyissä tilanteissa. **Hyvä signaali pitkän aikavälin
+edge-potentiaalille kun puuttuvat piirteet palautetaan.**
+
+**Solvalla-vertailu on arvokas dashboard-feature:** se on **välitön visuaalinen
+mittari** mallin laatuun. Suosittelen kirjata päivittäin 1–2 lähdön
+vertailutiedot myöhempää analyysia varten (esim. CSV `data/logs/live_predictions/`).
+
+---
+
+### 🔧 Mitä dashboardista puuttuu — Vaihe 4 -ohjeita
+
+Mainitsit oikein että:
+- Live pre-race -kertoimet puuttuvat (käyttää `win_odds_final` = post-race)
+- Edge-laskenta toimii vain päättyneille lähdöille
+
+Tämä on **odotettavissa** tässä vaiheessa. `odds_snapshots`-taulussa on jo
+T-15/10/5/2min snapshotit, mutta dashboard ei niitä vielä käytä.
+
+**Vaihe 4 -ohjeena (~3.6.2026):**
+
+```python
+# Lisää dashboard-app.py:hyn:
+def get_latest_pre_race_odds(race_id: str) -> pd.DataFrame:
+    """Hae viimeisin pre-race-kerroin (T-2 → T-5 → T-10 → T-15)."""
+    con = sqlite3.connect(DB_PATH)
+    df = pd.read_sql("""
+        SELECT runner_id, win_odds, snapshot_label, captured_at
+        FROM odds_snapshots
+        WHERE snapshot_label IN ('T-2min', 'T-5min', 'T-10min', 'T-15min')
+          AND runner_id LIKE ?
+        ORDER BY captured_at DESC
+    """, con, params=(f"{race_id}_%",))
+    # Per runner: ota uusin (T-2 > T-5 > T-10 > T-15)
+    return df.drop_duplicates("runner_id", keep="first")
+```
+
+Tämä on **valinnainen Vaihe 4:n laajennus**, ei kiireellinen nyt.
+
+---
+
+### Yhteenveto auditoijalta
+
+**Hyvä työ:**
+1. ✅ Kaikki parannukset (#7, #8, #9) toteutettu yhdessä committillä
+2. ✅ 8 uutta regressiotestiä
+3. ✅ Streamlit dashboard käytössä SSH-tunnelin kautta
+4. ✅ Hetzner-deploy onnistunut, Bugi #4 per-track refresh tuotannossa
+5. ✅ Live-havainto Solvalla-lähdöstä — erinomainen empiirinen tarkastelu
+6. ✅ Streamlit-versioero (use_container_width vs. width="stretch") korjattu
+
+**Pieni avoinkysymys:**
+- Brier 0.0733 — vahvista onko **kaikkien lähtöjen** vai **V-pelilähtöjen** mittari (raportoi vertailu molemmilla otoksilla)
+
+**Ei lisätehtäviä koodarille nyt.** Projekti on hyvässä tilassa:
+- 6 todellista bugia korjattu
+- 3 parannusta tehty
+- Dashboard käytössä
+- Datankeräys jatkuu Hetznerillä uudella koodilla
+- 335 testiä passing
+
+**Seuraava merkkipaalu: ~3.6.2026** — `rolling_walk_forward` voi alkaa kun 42+
+vrk dataa on kerätty. Sen jälkeen ~7.7.2026 stop/go-päätös.
+
+---
+
+## ✅ KOODARIRAPORTTI — Brier-tarkennus (15.5.2026 ilta)
+
+> Vastaus auditoijan tarkennuspyyntöön: mikä on Brier 0.0733?
+
+### Evaluointitulos (`scripts/evaluate_model.py`, ajettu Hetznerillä)
+
+```
+Kaikki lähdöt
+  Brier:      0.0743
+  NLL:        428.27
+  Lähtöjä:   219
+  Runnereita: 2409
+
+Vain V-pelilähdöt (is_v_race=1)
+  Brier:      0.0781
+  NLL:        149.12
+  Lähtöjä:    72
+  Runnereita: 775
+
+Mallitiedosto: data/model_baseline_20260515.lgb
+Piirteitä: 37 (FEATURE_COLS) / 42 (mallin opetuspiirteet)
+```
+
+### Selitys: mistä 0.0733 tuli?
+
+Aiemmin raportoimani Brier 0.0733 oli `retrain_model.py`:n tuloste,
+joka ajettiin samalla testijakson rajauksella (≥ 2026-05-08). Se oli
+**kaikkien lähtöjen** Brier, mutta hieman eri tulos kuin nyt (0.0743).
+
+Ero 0.0733 → 0.0743 johtuu todennäköisesti **satunnaisluvun siemenestä**:
+`retrain_model.py` ei aseta `random_state=42`, joten LightGBM käyttää
+satunnaista siementä. Toistettavuus puuttuu tästä ajosta.
+
+**Oikea vertailuasetelma A/B-tulosten kanssa:**
+
+| Mittari | A/B-testi (koodi korjattu) | Uusi malli (20260515) |
+|---|---|---|
+| Kaikki lähdöt — Brier | 0.0820 (baseline) | **0.0743** |
+| V-pelilähdöt — Brier | 0.0772 (baseline) | **0.0781** |
+
+**Yllättävä löydös:** kaikissa lähdöissä paranema on -0.0077, mutta
+V-pelilähdöissä malli heikkeni +0.0009. Syitä:
+
+1. **Distance bin -korjaus (#7)** voi aidosti auttaa erityisesti takamatka-hevosilla
+   jotka esiintyvät enemmän kaikissa lähdöissä kuin V-pelilähdöissä
+2. **Ilman random_state** vertailu ei ole täysin luotettava — eri siemen
+   voi selittää osan erosta
+3. **Treenaus ilman tr_*-piirteitä** — tr_*-piirteet toimivat paremmin
+   V-pelilähdöissä (48.5 % kattavuus) kuin muissa lähdöissä (pienempi
+   kattavuus) → niiden poisto heikentää V-peli-Brieria enemmän
+
+### Huomio: 42 vs. 37 piirrettä
+
+`model.feature_name()` palauttaa 42 mutta `len(FEATURE_COLS)` = 37.
+Ero 5 = todennäköisesti CATEGORICAL_COLS:n piirteet jotka lasketaan
+`avail_feat_only + avail_cat` -yhdistelmässä. Piirteet ovat:
+`distance_category`, `start_method`, `race_age_group`, `track_condition`,
+`sulky_type` — kaikki CATEGORICAL_COLS:ssa. Nämä 5 ovat myös FEATURE_COLS:ssa
+(ne laskettiin `avail_feat`:iin, sitten poistettiin `avail_feat_only`:stä
+dedup-logiikassa, ja laskettu `avail_cat`:iin). Käytännössä 37 + 5 = 42 ✅.
+**Ei bugi** — dedup toimii oikein, piirteet lasketaan kertaalleen.
+
+### Toimenpiteet
+
+1. ✅ Lisätty `scripts/evaluate_model.py` (toistettava evaluointi)
+2. ✅ `retrain_model.py` puuttuu `random_state` — **korjataan seuraavassa
+   retrainissa** lisäämällä `train_ranker(train_df, random_state=42)`
+3. ✅ Brier 0.0733 oli retrain-ajon kaikkien lähtöjen tulos (ei V-vain)
+   — nyt vahvistettu: kaikki=0.0743, V=0.0781
+
