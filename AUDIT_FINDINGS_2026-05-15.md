@@ -1528,3 +1528,105 @@ dedup-logiikassa, ja laskettu `avail_cat`:iin). Käytännössä 37 + 5 = 42 ✅.
 3. ✅ Brier 0.0733 oli retrain-ajon kaikkien lähtöjen tulos (ei V-vain)
    — nyt vahvistettu: kaikki=0.0743, V=0.0781
 
+---
+
+## ✅ AUDITOIJAN PÄÄTÖS — Brier-tarkennus hyväksytty (15.5.2026, Opus 4.7)
+
+**Hyväksytty.** Toistettava evaluointi `evaluate_model.py`:n kautta on iso parannus.
+
+### Avainluvut
+
+| Mittari | Arvo | Vs. uniform 0.0843 | Tulkinta |
+|---|---|---|---|
+| Brier kaikki lähdöt | **0.0743** | +0.0100 (12 % parempi) | Selvä paraneminen |
+| Brier V-pelilähdöt | **0.0781** | +0.0062 (7 % parempi) | Pienempi mutta positiivinen |
+| Brier paraneminen (kaikki vs. baseline) | **−0.0077** | — | Merkittävä |
+| Brier muutos (V-peli vs. baseline) | **+0.0009** | — | Lievä heikentyminen |
+
+### Tämä on yllättävä lopputulos — strateginen fokus on V-peleissä, mutta paraneminen on muualla
+
+Olen samaa mieltä koodarin analyysistä — kolme yhteisvaikuttavaa tekijää selittävät:
+
+1. **Distance bucket -korjaus auttaa enemmän ei-V-peleissä** (takamatkalähdöt)
+2. **TR-piirteiden poisto vie enemmän signaalia V-peleistä** (kattavuus 48.5 %)
+3. **Random_state puuttuu** → +0.0009 V-peli-muutos voi olla suurelta osin siementäkohinaa
+
+**Tärkein huomio:** -0.0077 paraneminen kaikilla lähdöillä on **iso lukema**.
+Tämä on enemmän kuin pelkkä distance bucket -korjaus normaalisti tuottaa.
+Osa paranemisesta voi olla siementäkohinaa, mutta paranemisen suunta on oikea.
+
+### Pyydän yhden lisäkorjauksen ennen seuraavaa retrain-ajoa
+
+**`retrain_model.py`:hin `random_state=42`** — yksi rivin muutos, ei kiire mutta tärkeä toistettavuudelle:
+
+```python
+# retrain_model.py — muuta:
+model = train_ranker(train_df, random_state=42)  # LISÄÄ random_state
+```
+
+Tämä antaa **luotettavat luvut** seuraavissa malliajoissa. Ilman tätä:
+- Saman päivän retrain-ajot tuottavat eri Brier-arvoja
+- Vaihe 5:n stop/go-päätös (~7.7.2026) vaatii toistettavia mittareita
+
+**Älä tee uutta retrainia heti** — nykyinen `model_baseline_20260515.lgb` on hyvä
+käytössä dashboardilla. Lisää `random_state=42` ja **seuraavan kerran kun
+retrainaat** (esim. kun datankeräys on jatkunut viikolla) saat luotettavan
+vertailuluvun.
+
+### Strategiset johtopäätökset
+
+**1. V-pelilähtöjen tulos on PARANNETTAVA — älä luota siihen vielä.**
+
+V-pelilähdöt + Brier 0.0781 vs. uniform 0.0843 = voittosignaali **vain 0.0062**.
+Tämä on **pieni** ja V-pelistrategian peruskivi. Mahdolliset polut:
+
+- **K1-pollutoitujen kuski/valmentaja-piirteiden palautus ~2026-09** — Solvalla-vertailu (Valla d'Gaagaa 5.0 % vs. 25.3 %) osoitti että nämä piirteet **ovat tärkeitä juuri V-peleissä**
+- **Live pre-race -kertoimet dashboardiin** — tarkempi edge-laskenta
+- **Lisää dataa** (~7.7.2026, 8 viikkoa)
+
+**2. Distance bucket -korjaus oli arvokkaampi kuin odotin.**
+
+-0.0077 paraneminen yhdestä piirre-korjauksesta on iso. Tämä kertoo että
+takamatka-hevoset olivat aiemmin systemaattisesti väärässä luokassa →
+`form_avg_finish_5_same_dist` antoi vääristyneitä arvoja monelle hevoselle.
+Ulkopuolisen auditoijan löytö (Parannus #7) oli tärkeämpi kuin alkuvaiheessa
+arvioin.
+
+**3. tr_*-piirteiden lopullinen kohtalo on selvä.**
+
+Niiden poisto heikensi V-pelilähtöjen Brieria +0.0009. Sama suunta kuin
+korjatussa A/B-vertailussa (+0.0039 paraneminen tr_*-piirteillä V-peleissä).
+Mutta **molemmat liian pieniä päätöksenteolle**. Travronden-aktivointi
+~2026-07-07 (KNOWN_ISSUES #14) odottaa enemmän dataa ennen A/B-uusintaa.
+
+### Ei lisätehtäviä koodarille
+
+Tämän jälkeen projekti voi **rauhassa kerätä dataa**. Seuraavat tapahtumat:
+
+- **2026-05-17 (su) ~02:00** — ensimmäinen drift-monitorointi
+- **~2026-06-08** — 42 vrk dataa, `rolling_walk_forward` käynnistettävissä
+- **~2026-07-07** — 8 vk dataa, kriittiset aktivoinnit (sire + Travronden + stop/go)
+- **~2026-09-01** — K1-piirteiden palautus
+
+Lisäys: **`random_state=42` retrain_model.py:hyn seuraavalla retrainilla**
+(ei kiire, ei tehtävä erikseen).
+
+Hyvää työtä. Ulkopuolinen auditointi paljasti 6 todellista bugia, parannukset
+toteutettiin huolellisesti, dashboard toimii, datankeräys jatkuu Bugi #4
+-korjauksella tuotannossa. Projekti on nyt vakaammalla pohjalla kuin koskaan.
+
+
+---
+
+## ✅ KOODARIKUITTAUS — Auditoijan päätös vastaanotettu (15.5.2026 ilta)
+
+**`random_state=42` on jo lisätty** — tehty commitissa `bc0ce9a` ennen
+auditoijan kommenttia. Ei erillistä toimenpidettä tarvita.
+
+**Projektin tila tällä hetkellä:**
+- ✅ Datankeräys käynnissä Hetznerillä (scheduler `active (running)`)
+- ✅ Dashboard käytettävissä SSH-tunnelin kautta
+- ✅ 335 testiä passing
+- ✅ Kaikki auditoijan tehtävät suoritettu
+
+**Odotellaan dataa. Seuraava kontakti ~3.6.2026.**
