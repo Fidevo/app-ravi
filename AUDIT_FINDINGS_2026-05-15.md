@@ -529,3 +529,226 @@ agentti ei aina tarkistanut nykyisen kontekstin ennen väitettä.
 A/B-uusinta voi antaa **paljon parempia tai paljon huonompia** tuloksia kuin
 aiemmin raportoitu. Molemmissa tapauksissa **rehellinen mittaus on lähtökohta
 oikealle päätöksenteolle**.
+
+---
+
+## ✅ KOODARIRAPORTTI — Vaihe 1 valmis (15.5.2026 ilta)
+
+> Tämä osio on koodarin kirjoittama raportti auditoijalle. Kaikki alla kuvatut
+> muutokset on tehty, testattu (327 testiä läpäisevät) ja pushattu GitHubiin.
+> A/B-testi on ajettu uudelleen Hetznerillä korjatuilla koodeilla.
+
+### Mitä tehtiin — commitit
+
+| Commit | Sisältö |
+|---|---|
+| `56823b4` | Bugit #1 + #2 + #3 yhdessä commitissa + regressiotestit |
+| `3121b12` | Lisäbugi: duplikaattikolumni-suodatus (ks. alla) |
+| `aa034ae` | Dokumentaatiopäivitys: korjatut A/B-tulokset TASK_PROGRESS.md:ään |
+
+---
+
+### Bugi #1 — LambdaRank-sort ✅ KORJATTU
+
+**Korjaus `src/models/ranker.py` (train_ranker):**
+```python
+df = df.sort_values("race_id").reset_index(drop=True)  # LISÄTTY
+group_sizes = df.groupby("race_id", sort=False).size().values
+```
+
+**Regressiotestit lisätty `tests/test_ranker.py`:**
+- `TestBug1LambdaRankSortInvariance::test_shuffled_input_gives_same_predictions_as_sorted`
+  — shuffled vs sorted syöte → feature importance -ero < 10 % (threading noise);
+  bugi aiheuttaisi > 50 % eron (väärät ryhmittelyt)
+- `TestBug1LambdaRankSortInvariance::test_group_sizes_match_actual_race_sizes`
+  — sekalaisesti järjestetty DataFrame eri lähtökoilla → ei kaadu
+
+---
+
+### Bugi #2 — `tr_start_interval_group` kategorisena ✅ KORJATTU (osittain poikkeus auditoijan ohjeesta)
+
+**Korjaus `src/models/ranker.py`:**
+- ✅ Lisätty `CATEGORICAL_COLS`:iin
+
+```python
+CATEGORICAL_COLS = [
+    "distance_category", "start_method", "race_age_group",
+    "track_condition", "sulky_type",
+    "tr_start_interval_group",  # LISÄTTY — 1/11/21/31, ei jatkuva
+]
+```
+
+**⚠️ POIKKEUS AUDITOIJAN OHJEESTA — tärkeää luettavaa:**
+
+Auditoija kirjoitti: *"Pidä piirre myös FEATURE_COLS:issa — `_resolve_cols` ja
+`astype("category")` hoitavat loput."*
+
+**Tämä ei toiminut.** `train_ranker` rakentaa:
+```python
+X = df[avail_feat + avail_cat].copy()
+```
+Jos `tr_start_interval_group` on sekä `avail_feat`:ssa (FEATURE_COLS:sta) että
+`avail_cat`:ssa (CATEGORICAL_COLS:sta), `X`:ssä on **duplikaattikolumni**.
+Tällöin `X["tr_start_interval_group"]` palauttaa DataFramen eikä Seriestä, ja
+LightGBM kaatuu:
+```
+AttributeError: 'DataFrame' object has no attribute 'cat'
+```
+
+**Kaksi korjausta tehty:**
+
+1. **`tr_start_interval_group` poistettu `FEATURE_COLS`:sta** — se tulee mukaan
+   `X`:ään `avail_cat`:in kautta (sama käytäntö kuin `distance_category` jne.)
+
+2. **Duplikaattisuodatus lisätty sekä `train_ranker`:iin että
+   `predict_win_probabilities`:iin** (`src/models/ranker.py`):
+   ```python
+   _avail_cat_set = set(avail_cat)
+   avail_feat_only = [c for c in avail_feat if c not in _avail_cat_set]
+   X = df[avail_feat_only + avail_cat].copy()
+   ```
+   Tämä mahdollistaa sen, että kutsuja (esim. `travronden_ab_test.py`) voi
+   vapaasti sisällyttää kategorisen piirteen myös `feature_cols`-listaan —
+   suodatus hoitaa duplikaatin automaattisesti.
+
+**Vaikutus A/B-testiskriptiin:** `_TR_MODEL_COLS` sisältää `tr_start_interval_group`
+(TRAVRONDEN_FEATURE_COLS:sta). Ilman duplikaattisuodatusta TR-malli kaatui
+välittömästi. Nyt toimii.
+
+**Regressiotestit lisätty `tests/test_ranker.py`:**
+- `TestBug2TrStartIntervalGroupIsCategorical::test_tr_start_interval_group_in_categorical_cols`
+- `TestBug2TrStartIntervalGroupIsCategorical::test_tr_start_interval_group_not_duplicated_in_feature_cols`
+- `TestBug2TrStartIntervalGroupIsCategorical::test_categorical_col_used_as_category_in_lgb_dataset`
+- `TestBug2TrStartIntervalGroupIsCategorical::test_tr_start_interval_group_not_in_feature_cols_to_avoid_duplicate`
+
+---
+
+### Bugi #3 — Backtest-kalibrointi ✅ KORJATTU
+
+**Korjaus `src/models/backtest.py`** — sekä `rolling_walk_forward` että
+`quarterly_walk_forward`:
+
+```python
+# Bugi #3 -korjaus: isotonic-kalibrointi kun dataa tarpeeksi
+calib_start_dt = window_start - pd.Timedelta(days=_CALIB_DAYS)  # 14 pv
+pure_train_df = train_df[train_df["race_date"] < calib_start_dt]
+calib_df = train_df[train_df["race_date"] >= calib_start_dt]
+
+if len(pure_train_df) < _PURE_TRAIN_MIN_ROWS or len(calib_df) < _CALIB_MIN_ROWS:
+    model = train_ranker(train_df)
+    preds = predict_win_probabilities(model, test_df)
+else:
+    model = train_ranker(pure_train_df)
+    calib_preds = predict_win_probabilities(model, calib_df)
+    calib_with_truth = calib_preds.merge(
+        calib_df[["race_id", "horse_id", "finish_position"]], on=["race_id", "horse_id"]
+    )
+    iso = calibrate_isotonic(calib_with_truth)
+    preds_raw = predict_win_probabilities(model, test_df)
+    preds = apply_isotonic(preds_raw, iso)
+```
+
+Kynnykset: `_CALIB_DAYS = 14`, `_CALIB_MIN_ROWS = 50`, `_PURE_TRAIN_MIN_ROWS = 100`.
+
+**Regressiotestit lisätty `tests/test_backtest.py`:**
+- `TestBug3CalibrationLowersBrier::test_calibrated_brier_lte_uncalibrated_brier`
+  — ylikalibroitu malli: isotonic parantaa/säilyttää Brier-scoren (toleranssi +0.01)
+- `TestBug3CalibrationLowersBrier::test_calibrate_isotonic_and_apply_isotonic_importable_from_ranker`
+- `TestBug3CalibrationLowersBrier::test_backtest_imports_calibration_functions`
+
+---
+
+### Testiyhteenveto
+
+```
+327 testiä, kaikki läpäisevät (20.9 s)
+Uudet testit: +10 (TestBug1: 2, TestBug2: 4, TestBug3: 3 + dup-testi: 1)
+```
+
+---
+
+### A/B-testin korjatut tulokset (Hetzner, 15.5.2026 ilta)
+
+A/B-testi ajettu uudelleen Hetznerillä korjatuilla koodeilla
+(`python scripts/travronden_ab_test.py --split-date 2026-05-08 --rs 42`):
+
+**Treeni/testi-split:**
+- Train: 2 966 runneria, 281 lähtöä (< 2026-05-08)
+- Testi: 2 188 runneria, 200 lähtöä (≥ 2026-05-08)
+- TR-data kattavuus treenissä: 48.5 %
+- TR-data kattavuus testissä: 32.5 %
+
+**Tulokset — KAIKKI LÄHDÖT:**
+
+| Malli | Piirteitä | Brier | NLL |
+|---|---|---|---|
+| Baseline (ei TR) | 37 | 0.0820 | 387.07 |
+| TR-malli | 47 | 0.0818 | 386.29 |
+| **Δ (paranema)** | | **+0.0003** | **+0.78** |
+
+**Tulokset — VAIN V-PELILÄHDÖT (72 lähtöä, 775 runneria):**
+
+| Malli | Brier | NLL |
+|---|---|---|
+| Baseline | 0.0772 | 144.72 |
+| TR-malli | 0.0733 | 134.58 |
+| **Δ (paranema)** | **+0.0039** | **+10.14** |
+
+**Feature Importance — TR-mallin top-piirteet:**
+- `tr_game_percent_v` = **#1** (säilyy ⭐⭐⭐)
+- `atg_lifetime_top3_rate` = #2
+- `atg_lifetime_win_rate` = #3
+- `form_market_avg_5` = #4
+- `tr_speed_record_m` = **#6** (nousi merkittävästi)
+- `tr_is_first_new_driver` = #37
+- `tr_start_interval_group` = **#40** (kategorisena silti matala — ks. huomio alla)
+- `tr_speed_record_k` = #31, `tr_speed_record_l` = #33
+
+**Huomio `tr_start_interval_group` sijoituksesta:** kategorisena koodauksena (#40)
+ei parantunut merkittävästi aiemmasta (#34). Tämä viittaa siihen että pace-arvio
+ei tässä testidatassa (32.5 % TR-kattavuus testissä) erotu selvästi — tai
+32.5 % kattavuus on liian matala luotettavaan oppimiseen.
+
+---
+
+### Vertailu aiempiin (virheellisiin) tuloksiin
+
+| Mittari | Aiempi (virheellinen) | Korjattu | Muutos |
+|---|---|---|---|
+| Baseline Brier (kaikki) | 0.0846 | 0.0820 | Baseline parani |
+| TR-malli Brier (kaikki) | 0.0796 | 0.0818 | TR-malli heikkeni |
+| Δ kaikki lähdöt | **+0.0050** | **+0.0003** | −94 % |
+| Baseline Brier (V-peli) | 0.0824 | 0.0772 | Baseline parani |
+| TR-malli Brier (V-peli) | 0.0734 | 0.0733 | Lähes sama |
+| Δ V-pelilähdöt | **+0.0090** | **+0.0039** | −57 % |
+
+Bugit #1 + #2 yhdessä aiheuttivat massiivisen ylioptimismin erityisesti
+kokonaisparannuksessa (+0.0050 → +0.0003). V-pelilähdöissä bugikorjauksen
+vaikutus oli pienempi (+0.009 → +0.0039) koska V-pelilähdöissä TR-data on
+täysin saatavilla eikä ryhmitysvirhe (Bugi #1) vaikuta yhtä pahasti.
+
+---
+
+### Auditoijan päätettäväksi — integraatiokysymys
+
+Auditoijan päätösraja (alkuperäinen):
+- Brier-paranema ≥ 0.005 → INTEGROI TUOTANTOON
+- Brier-paranema ≥ 0.001 → LISÄTTY SIGNAALI (dokumentoi)
+- Brier-paranema < 0.001 → MARGINAALINEN PARANEMA
+
+**Korjattujen tulosten perusteella:**
+- Kaikki lähdöt: +0.0003 → 🟡 **MARGINAALINEN PARANEMA** (alle 0.001-kynnyksen)
+- V-pelilähdöt: +0.0039 → 🟡 **LISÄTTY SIGNAALI** (0.001–0.005 välissä)
+
+**Koodarin arvio:** edellinen suositus "INTEGROI TUOTANTOON" oli virheellisten
+tulosten perusteella — **perutaan**. Korjattu tulos on selvästi heikompi.
+Integrointipäätös on nyt auditoijalla.
+
+Huomionarvoista päätöksenteon kannalta:
+1. `tr_game_percent_v` on edelleen #1 piirre — Copycat-riski säilyy (auditoijan
+   aiemmin tunnistama ongelma)
+2. V-pelilähdöillä (+0.0039) on eniten käytännön merkitystä koska strategia
+   kohdistuu niihin
+3. Testidatan TR-kattavuus on vain 32.5 % → paranema on aliarvioitu (jos kattavuus
+   kasvaisi 80 %:iin tuotantopollauksella, todellinen V-peli-delta voisi olla suurempi)
+4. Enemmän dataa tarvitaan (nyt vain 7 pv testijaksoa, 72 V-pelilähtöä)
