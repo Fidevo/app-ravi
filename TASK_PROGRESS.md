@@ -19,13 +19,13 @@
 | Vaihe 3.6 — Sire-ablation + LOO-korjaus | ✅ valmis | 14.5.2026 |
 | Vaihe C1 — Drift-monitorointi | ✅ valmis | 14.5.2026 |
 | Vaihe D1 — Travronden Vaihe 1 -selvitys | ✅ valmis | 14.5.2026 |
-| **Vaihe D2 — Travronden Vaihe 2 -pilotti** | 🟡 **KÄYNNISSÄ** (vaiheet 1–4 ✅) | viikon sisällä |
-| Vaihe C2 — Walk-forward-dokumentointi | 🟡 avoin | ~30 min, halpa |
+| **Vaihe D2 — Travronden Vaihe 2 -pilotti** | 🟡 **KÄYNNISSÄ** (vaiheet 1–5 ✅, 6–7 avoin) | viikon sisällä |
+| Vaihe C2 — Walk-forward-dokumentointi | ✅ valmis | 15.5.2026 (ROADMAP.md jo ok) |
 | Vaihe 4 — Backtest + paperitestaus | ⏸ odottaa V3-tuloksia + lisädataa | ~3.6.2026 |
 | Vaihe 5 — Päätöspiste | ⏸ vaatii 8+ viikkoa dataa | ~7.7.2026 |
 
-**Tärkein nyt:** Travronden Vaihe 2 — pace-piirre löydetty (`start_interval_group`),
-A/B-vertailu osoittaa lisääkö se Brier-tarkkuutta.
+**Tärkein nyt:** Travronden Vaihe 2 — A/B-testi valmis. `tr_game_percent_v` = #1 piirre,
+V-pelilähdöt Brier +0.009. Vaihe 6–7 (scheduler-integraatio) seuraavana.
 
 ---
 
@@ -135,22 +135,132 @@ per-hevonen, per-lähtö pace-arvio). Korvaa todennäköisesti C3:n.
 **Suositus koodarilta:** Vaihtoehto A yksinkertaisuuden vuoksi. Datapipeline on jo
 NaN-tolerantti, ja 11 saraketta runners-taulussa (~45→56) on hallittavissa.
 
-#### Avoimet vaiheet
+**Auditoijan päätös (15.5.2026):** ✅ **Vaihtoehto A** — kuten suositit.
 
-- **Vaihe 3:** Schema-laajennus (odottaa auditoijan vastausta yllä olevaan kysymykseen)
-- **Vaihe 5:** A/B-vertailu — baseline vs. baseline + Travronden → Brier-paranema
-  - Päätös: jos paranema ≥ 0.005, integroi tuotantoon
-- **Vaihe 6:** Pollaus-cron `run_forever`:iin (Ma–Pe 15/17, La 9/11/13, Su 10/12)
-- **Vaihe 7:** V-pelilähtöjen tunnistus (`runners.is_v_race` tai näkymä)
+Perustelu:
+- Yhdenmukainen projektin nykyisen tyylin kanssa: `atg_*` (12 saraketta), `shoes_*`/`sulky_*` (6 saraketta), tulokset, kertoimet — kaikki `runners`-taulussa
+- Datankeräys jatkuu kaikista lähdöistä (ROADMAP) — ei-V-pelilähdöt eivät ole "turhia", ne ovat **ennustetavissa pyynnöstä** (kun käyttäjä haluaa)
+- ~40 → ~51 saraketta on SQLite:lle täysin hallittavissa
+- Yksi SQL-haku riittää treenausnotebookissa — `build_feature_matrix` saa runners-DataFramen joka sisältää jo kaiken
+- 25MB lisätallennustila vuodessa on triviaali
 
-**Aikabudjetti jäljellä:** ~2–3 päivää
+Lisäksi: **lisää myös `is_v_race` (BOOLEAN)** `runners`-tauluun samalla migraatiolla. Pollaus merkitsee `True` kun lähtö löytyy Travrondenin V-pelistä. Mahdollistaa myöhemmin yksinkertaisen `WHERE is_v_race = 1` -kyselyn ennustetuotannolle ilman erillistä näkymää.
 
-### 🟡 Vaihe C2 — Walk-forward-dokumentointi
+#### 📋 Auditoijan päätökset piirre-kohtaisesti (FEATURE_COLS)
 
-**Status:** avoin, ~30 min
-**Tehtävä:** päivitä ROADMAP.md:n Vaihe 5 selvyydellä: **stop/go-päätöstä ei tehdä
-alle 8 viikon yhteistuloksesta**, vähintään `n ≥ 200` paperipeliä. Lisää
-"D-Liian vähän dataa" -kategoria.
+**Sisällytä `FEATURE_COLS`:iin** (suoraan tuotantoon):
+- `tr_start_interval_group` ✅ 91.5 % kattavuus, pace-arvio
+- `tr_is_first_after_castration`, `tr_is_first_new_driver`, `tr_is_first_new_trainer`, `tr_is_first_shoes`, `tr_is_first_carriage` ✅ 100 % kattavuus
+- `tr_speed_record_k`, `tr_speed_record_m`, `tr_speed_record_l` ✅ 35–73 % kattavuus
+  - Vaikka K (37 %) ja L (35 %) ovat matalat, **data-aukko on signaali** — hevoset spesialisoituvat matkaluokkiin. Kun K on saatavilla → K-spesialisti. LightGBM oppii tämän automaattisesti.
+- `tr_game_percent_v` ✅ 81.1 % kattavuus
+
+**EI vielä `FEATURE_COLS`:iin** (tallenna DB:hen mutta jätä kommentoituna pois):
+- `tr_expected_odds` 🟡 23.8 % kattavuus — **liian harva luotettavalle oppimiselle**
+  - LightGBM tarvitsee yleensä > 30–40 % kattavuuden piirteelle joka ei ole "puuttuminen on signaali" -tyyppinen
+  - Travrondenin kerroinennuste on vapaaehtoisesti annettu, ei systemaattinen
+  - Säilytä DB:ssä (mahdollinen tutkimuskäyttö myöhemmin), aktivoi jos kattavuus paranee tuotantopollauksessa
+  - Kommentoi `FEATURE_COLS`:issa: `# "tr_expected_odds",  # 23.8 % notna, aktivoi jos kattavuus > 40 %`
+
+#### ⚠️ Tarkennettava ennen Vaihetta 5 (A/B-vertailu)
+
+**Pilot-datan ja treenidatan yhteensopivuus:**
+
+Pilot haki **2023-02-13 – 2026-05-07** kierroksia (3 vuoden ajalta). Mutta treenidatasi
+on **2026-04-27 – 2026-05-14**.
+
+Mitä A/B-vertailu tarvitsee:
+1. Tr_*-arvot **runners-tauluun MERGE:tään** pilot-cachen kautta sille osajoukolle
+   missä `runners.race_date` ja Travrondenin kierroksen päivämäärä matchaavat
+2. Kuinka monta runner-riviä nykyisestä treenidatasta (2 966 + 1 872 = 4 838) saa
+   tr_*-arvoja? Tämä määrittää A/B-vertailun otoksen.
+
+Ennen A/B-vertailua suorita:
+
+```sql
+-- Kuinka monta runners-riviä saa tr_*-arvoja pilot-cachesta?
+SELECT
+    COUNT(*) AS total_runners,
+    SUM(CASE WHEN tr_start_interval_group IS NOT NULL THEN 1 ELSE 0 END) AS with_tr_data,
+    100.0 * SUM(CASE WHEN tr_start_interval_group IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*) AS pct
+FROM runners
+WHERE race_date >= '2026-04-27';
+```
+
+**Jos kattavuus < 30 % treenidatasta**, harkitse pilot-keräyksen täydentämistä:
+hae erikseen vain 2026-04-27 → 2026-05-14 -aikajakson V-pelien kierrokset.
+Tämä on ~15–20 V-pelipäivää × ~2–3 kierrosta = ~50 kierrosta lisää,
+korkeintaan 15 min Travrondenista (1 req/s rate-limit).
+
+#### ✅ Pieni lisähuomio: scraper-yksikkötestit
+
+Huomasin että `tests/test_travronden_features.py` (30 testiä) testaa `parse_travronden_race()` ja
+`merge_travronden_features()`, mutta `TravrondenAPIClient` (HTTP-asiakas, cache, retry) **ei
+ole yksikkötestattu**. Pilotti todisti toiminnan käytännössä (90 kierrosta, 0 virhettä), mutta
+muodollisten yksikkötestien puuttuminen on pieni puute.
+
+**Ei blokkeri**, mutta vahva suositus: lisää `tests/test_travronden_scraper.py` (tai sama
+nimi) joka mockaa httpx.Client:n ja testaa:
+- Cache toimii (file-level, JSON-vika hoidetaan)
+- Rate-limit toimii (testaa pseudoaikaa, `monkeypatch.setattr("time.time", ...)`)
+- Retry tenacityllä toimii 5xx-vastauksille
+- 404 → None, ei kaata
+
+Samanlainen rakenne kuin `tests/test_travronden_tracks.py` (28 testiä).
+
+#### ✅ Vaihe 3: Schema-laajennus valmis (15.5.2026)
+
+`runners`-tauluun lisätty migraatiolla (`_COLUMN_MIGRATIONS`):
+- `is_v_race BOOLEAN` — True = Travrondenin V-pelilähtö
+- 11 × `tr_*`-sarakkeet (INTEGER/REAL)
+
+Migraatio ajettu Hetznerillä onnistuneesti.
+
+#### ✅ Vaihe 5: A/B-vertailu valmis (15.5.2026)
+
+**Backfill:** 2739 runner-riviä päivitetty Travrondenin dense-skannauksesta
+(97 kierrosta, 2026-04-15 – 2026-05-13, step=10 kattava skannaus).
+
+**TR-data kattavuus:** 2500/5154 = **48.5 %** treenidatasta (ylittää 30 % kynnyksen ✅)
+
+**A/B-tulokset (15.5.2026, rs=42):**
+
+| Malli | Brier | NLL | Muutos |
+|---|---|---|---|
+| Baseline (37 piirrettä, ei TR) | 0.0846 | 394.58 | — |
+| **TR-malli (47 piirrettä + tr_*)** | **0.0796** | **366.56** | **−0.0050 ✅** |
+| Baseline vain V-pelilähdöt | 0.0824 | 161.50 | — |
+| **TR-malli vain V-pelilähdöt** | **0.0734** | **136.07** | **−0.0090 ✅** |
+
+**Huomionarvoista:**
+- `tr_game_percent_v` = **#1 piirre** koko mallin 47 piirteen joukossa ⭐⭐⭐
+- `tr_speed_record_m` = #14 (hyvä sijoitus)
+- `tr_start_interval_group` = #34 (kohtalainen)
+- V-pelilähdöillä paranema **+0.009** — selvästi auditoijan 0.005-kynnyksen yli
+
+**Koodarin päätösehdotus auditoijalle:**
+Strateginen fokus on V-pelilähdöt → V-pelilähdöissä paranema on +0.009 (yli 0.005-kynnyksen).
+`tr_game_percent_v` on koko mallin tärkein piirre. **Suositus: INTEGROI TUOTANTOON.**
+
+#### ❓ Avoimet vaiheet — auditoijalle (Vaihe 5 päätös + jatko)
+
+**Vaihe 6:** Pollaus-cron `run_forever`:iin
+- Scheduler hakee Travronden-datan V-pelilähdöille ennen lähtöjä
+- Ma–Pe 15:00/17:00, La 09:00/11:00/13:00, Su 10:00/12:00
+
+**Vaihe 7:** `is_v_race`-kenttä toiminnassa
+- Schema ja migraatio: jo tehty ✅
+- Scheduler pitää merkitä `is_v_race=True` kun V-pelilähtö löytyy Travrondenista
+
+**Aikabudjetti jäljellä:** ~1–2 päivää (vaiheet 6–7)
+
+### ✅ Vaihe C2 — Walk-forward-dokumentointi
+
+**Status:** ✅ valmis (15.5.2026)
+**Tarkistus:** ROADMAP.md:ssä Vaihe 5 sisältää jo kaikki vaaditut kohdat:
+- "Vaatii vähintään 8 viikkoa walk-forward-dataa" ✅
+- D-kategoria: "Liian vähän dataa | n < 200 → Älä tee päätöstä" ✅
+- n ≥ 200 -vaatimus ✅
 
 ### ⏰ Aikataulutetut muistutukset
 
