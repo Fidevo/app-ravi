@@ -1630,3 +1630,124 @@ auditoijan kommenttia. Ei erillistä toimenpidettä tarvita.
 - ✅ Kaikki auditoijan tehtävät suoritettu
 
 **Odotellaan dataa. Seuraava kontakti ~3.6.2026.**
+
+---
+
+## ✅ KOODARIRAPORTTI — Dashboard-parannukset Vaihe 4 (15.5.2026 ilta)
+
+> Koodarin raportti auditoijalle. Kaikki neljä dashboard-parannusta tehty,
+> shap asennettu Hetznerille, uusi versio käynnissä. Commit: `7c98548`
+
+### Mitä tehtiin
+
+| Tehtävä | Tila |
+|---|---|
+| Ratakohtainen ryhmittely (st.expander per rata, race_number-järjestys) | ✅ TEHTY |
+| Live pre-race -kertoimet odds_snapshots-taulusta | ✅ TEHTY |
+| ATG-hevosprofiililinkit (st.column_config.LinkColumn) | ✅ TEHTY |
+| SHAP-analyysi lähtökohtaisesti (valinnainen, graceful degradation) | ✅ TEHTY |
+| shap>=0.45.0 lisätty requirements.txt:ään | ✅ TEHTY |
+| shap asennettu Hetznerille (.venv) — versio 0.51.0 | ✅ TEHTY |
+| Hetzner-deploy (git pull + Streamlit restart) | ✅ TEHTY |
+
+---
+
+### 1. Ratakohtainen ryhmittely ✅
+
+**Ongelma:** Lähdöt olivat aiemmin epäloogisessa järjestyksessä ilman
+ratakohtaista rakennetta.
+
+**Ratkaisu `src/dashboard/app.py`:**
+```python
+for track_name in tracks_sorted:       # Radat aakkosjärjestyksessä
+    with st.expander(f"🏟️ **{track_name}** — {n_races} lähtöä"):
+        for race_id in race_order:     # Lähdöt race_number-järjestyksessä
+            rdf = track_data[track_data["race_id"] == race_id]
+            st.markdown(f"#### Lähtö {rnum}")
+            ...
+```
+
+Expander-otsikossa näkyy myös value bet -laskuri per rata (⭐ N value bet).
+
+---
+
+### 2. Live pre-race -kertoimet odds_snapshots-taulusta ✅
+
+**Ongelma:** Dashboard käytti `win_odds_final` (post-race-kerroin) joka
+on tyhjä tuleville lähdöille.
+
+**Ratkaisu:**
+```python
+@st.cache_data(ttl=60)
+def load_live_odds(race_id: str, db_path: str) -> pd.DataFrame:
+    """Prioriteetti: T-2min > T-5min > T-10min > T-15min.
+    COALESCE(devigged_win_odds, win_odds) — devigged ensin.
+    runner_id = f"{race_id}_{start_number}"
+    """
+    ...
+    priority_map = {"T-2min": 0, "T-5min": 1, "T-10min": 2, "T-15min": 3}
+    best = df.sort_values("priority").drop_duplicates("runner_id", keep="first")
+    return best[["runner_id", "raw_odds"]].rename(columns={"raw_odds": "live_odds"})
+```
+
+Näkyy dashboardissa "Live-kerroin"-sarakkeena. Jos `odds_snapshots`-taulussa
+ei ole dataa kyseiselle lähdölle (esim. tulevat lähdöt joita ei vielä
+snapshottaantu), sarake jätetään kokonaan pois.
+
+---
+
+### 3. ATG-hevosprofiililinkit ✅
+
+```python
+rdf["atg_link"] = rdf["horse_id"].apply(
+    lambda hid: f"https://www.atg.se/hp/startlista/hast/{hid}"
+)
+col_config["ATG"] = st.column_config.LinkColumn("ATG", display_text="🔗 ATG")
+```
+
+Taulukossa näkyy klikattava "🔗 ATG" -linkki per hevonen. Avaa ATG:n
+hevosprofiilisivun suoraan selaimessa.
+
+---
+
+### 4. SHAP-analyysi (valinnainen) ✅
+
+```python
+def render_shap_section(model, rdf):
+    try:
+        import shap
+    except ImportError:
+        st.info("SHAP-analyysi ei käytössä (asenna: pip install shap).")
+        return
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X)
+    # Top-10 piirteet barchart + hevoskohtainen taulukko expanderissa
+```
+
+Aktivoidaan sidebarissa checkboxilla "Näytä SHAP-analyysi". Jos `shap` ei
+ole asennettuna, näytetään info-viesti eikä kaadu. Hetznerillä `shap 0.51.0`
+on nyt asennettuna `.venv`:iin.
+
+---
+
+### Hetzner-deploy ✅
+
+```
+git pull → Fast-forward (2 tiedostoa: requirements.txt + app.py)
+.venv/bin/pip install shap → shap 0.51.0 asennettu
+Streamlit restarted → http://localhost:8501 (port 8501 vapautettuna)
+```
+
+Streamlit käynnissä: `2026-05-15 20:15:11 Uvicorn server started on 0.0.0.0:8501`
+
+---
+
+### Yhteenveto
+
+| Mittari | Arvo |
+|---|---|
+| Commit | `7c98548` |
+| Muutetut tiedostot | `src/dashboard/app.py` (264 → 303 riviä), `requirements.txt` (+1 rivi) |
+| Hetzner-deploy | ✅ |
+| shap Hetznerillä | ✅ 0.51.0 |
+| Dashboard-URL (SSH-tunneli) | http://localhost:8501 |
