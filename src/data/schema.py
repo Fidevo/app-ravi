@@ -130,6 +130,22 @@ class Runner(Base):
     sulky_type = Column(String)        # esim "VA" (Vanlig), "AM" (Amerikansk)
     sulky_changed = Column(Boolean)    # type tai colour muuttunut
 
+    # Travrondenspel.se pre-race-piirteet (D2, 15.5.2026).
+    # Täytetään vain V-pelilähdöistä (V3/V4/V5/V64/V75/V86).
+    # LightGBM käsittelee NaN:t automaattisesti — ei-V-pelilähdöt saavat NULL:n.
+    is_v_race = Column(Boolean)        # True = lähtö on Travrondenin V-pelissä
+    tr_start_interval_group = Column(Integer)     # 1/11/21/31 — asiantuntijan pace-arvio
+    tr_is_first_after_castration = Column(Integer)  # 0/1
+    tr_is_first_new_driver = Column(Integer)        # 0/1
+    tr_is_first_new_trainer = Column(Integer)       # 0/1
+    tr_is_first_shoes = Column(Integer)             # 0/1
+    tr_is_first_carriage = Column(Integer)          # 0/1
+    tr_speed_record_k = Column(Float)   # paras km-aika sprint (s), ~35 % kattavuus
+    tr_speed_record_m = Column(Float)   # paras km-aika middle (s), ~73 % kattavuus
+    tr_speed_record_l = Column(Float)   # paras km-aika long (s), ~35 % kattavuus
+    tr_expected_odds = Column(Float)    # Travrondenin kerroinennuste, ~24 % kattavuus
+    tr_game_percent_v = Column(Float)   # V-pelin markkinaprosentti (0–100), ~81 %
+
     race = relationship("Race", back_populates="runners")
 
 
@@ -289,6 +305,19 @@ _COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
         ("shoes_changed_back", "BOOLEAN"),
         ("sulky_type", "TEXT"),
         ("sulky_changed", "BOOLEAN"),
+        # Travrondenspel.se pre-race-piirteet (D2, 15.5.2026)
+        ("is_v_race", "BOOLEAN"),
+        ("tr_start_interval_group", "INTEGER"),
+        ("tr_is_first_after_castration", "INTEGER"),
+        ("tr_is_first_new_driver", "INTEGER"),
+        ("tr_is_first_new_trainer", "INTEGER"),
+        ("tr_is_first_shoes", "INTEGER"),
+        ("tr_is_first_carriage", "INTEGER"),
+        ("tr_speed_record_k", "REAL"),
+        ("tr_speed_record_m", "REAL"),
+        ("tr_speed_record_l", "REAL"),
+        ("tr_expected_odds", "REAL"),
+        ("tr_game_percent_v", "REAL"),
     ],
     "odds_snapshots": [
         ("raw_win_odds", "REAL"),

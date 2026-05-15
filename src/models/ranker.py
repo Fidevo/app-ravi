@@ -95,6 +95,21 @@ FEATURE_COLS: list[str] = [
     # "sire_lifetime_starts",
     # "dam_sire_lifetime_win_rate",
     # "dam_sire_lifetime_starts",
+    # --- D2: Travrondenspel pre-race-piirteet (15.5.2026) ---
+    # Saatavilla vain V-pelilähdöistä (is_v_race=True). LightGBM käsittelee NaN:t.
+    # Kattavuudet pilottidatasta (4 927 runner-riviä, 85 kierrosta):
+    "tr_start_interval_group",       # 91.5 % — ⭐⭐⭐ pace-arvio (1=nopein, 31=hitain)
+    "tr_is_first_after_castration",  # 100 % — ⭐⭐ tunnettu prediktiivinen signaali
+    "tr_is_first_new_driver",        # 100 % — ⭐⭐ ohjastajan vaihto
+    "tr_is_first_new_trainer",       # 100 % — ⭐ valmentajan vaihto
+    "tr_is_first_shoes",             # 100 % — ⭐ kenkämuutos
+    "tr_is_first_carriage",          # 100 % — ⭐ sulkymuutos
+    "tr_speed_record_k",             # 37 % — ⭐⭐ sprint-ennätys (s); NaN = ei K-spesialisti
+    "tr_speed_record_m",             # 73 % — ⭐⭐ middle-ennätys (s)
+    "tr_speed_record_l",             # 35 % — ⭐⭐ long-ennätys (s); NaN = ei L-spesialisti
+    "tr_game_percent_v",             # 81 % — ⭐ V-pelin markkinaprosentti (0–100)
+    # "tr_expected_odds",  # 23.8 % notna — liian harva luotettavalle oppimiselle;
+    #                      # aktivoi jos tuotantopollauksen kattavuus nousee > 40 %
     # --- D: Ratarakenne (build_features.track_structure_features) ---
     # Vaatii tracks-taulun tracks-parametrina build_feature_matrix():lle.
     # NaN jos rata puuttuu taulusta (gallop-radat, manuaaliset stub-rivit).
