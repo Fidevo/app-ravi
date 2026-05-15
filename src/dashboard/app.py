@@ -39,7 +39,7 @@ def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
         runners = pd.read_sql("""
             SELECT r.*, ra.race_date, ra.track, ra.race_number,
                    ra.distance, ra.start_method, ra.race_age_group,
-                   h.birth_year
+                   h.birth_year, h.name as horse_name
             FROM runners r
             JOIN races ra ON r.race_id = ra.race_id
             LEFT JOIN horses h ON r.horse_id = h.horse_id
@@ -121,7 +121,8 @@ def main() -> None:
         rnum = rdf["race_number"].iloc[0] if "race_number" in rdf.columns else ""
         st.subheader(f"{track} — Lähtö {rnum}")
 
-        cols = ["start_number", "horse_id", "win_prob", odds_col, "edge_pct"]
+        name_col = "horse_name" if "horse_name" in rdf.columns else "horse_id"
+        cols = ["start_number", name_col, "win_prob", odds_col, "edge_pct"]
         cols = [c for c in cols if c and c in rdf.columns]
         disp = rdf[cols].copy().sort_values("start_number", na_position="last")
 
@@ -132,7 +133,7 @@ def main() -> None:
                 lambda x: (f"⭐ {x:+.1f} %" if x > edge_threshold else f"{x:+.1f} %") if pd.notna(x) else "—"
             )
 
-        rename = {"start_number": "#", "horse_id": "Hevonen", "win_prob": "P(win)", odds_col: "Odds", "edge_pct": "Edge"}
+        rename = {"start_number": "#", "horse_id": "Hevonen", "horse_name": "Hevonen", "win_prob": "P(win)", odds_col: "Odds", "edge_pct": "Edge"}
         disp = disp.rename(columns={k: v for k, v in rename.items() if k in disp.columns})
         st.dataframe(disp, hide_index=True, width="stretch")
 
