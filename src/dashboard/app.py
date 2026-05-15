@@ -54,7 +54,6 @@ def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
         runners = pd.read_sql("""
             SELECT r.*, ra.race_date, ra.track, ra.race_number,
                    ra.distance, ra.start_method, ra.race_age_group,
-                   ra.is_v_race,
                    h.birth_year, h.name as horse_name
             FROM runners r
             JOIN races ra ON r.race_id = ra.race_id
