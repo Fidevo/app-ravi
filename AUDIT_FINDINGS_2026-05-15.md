@@ -1002,3 +1002,306 @@ menevät läpi. Commit: `a3f56f3`, pushattu GitHubiin.
 > ⚠️ **Hetzner-deploy tekemättä.** GitHub-push ei deployaa automaattisesti.
 > Ajettava Hetznerillä: `git pull` ennen seuraavaa tuotantoajoa.
 > Kiireellisin: `scheduler.py` (Bugi #4 per-track refresh).
+
+---
+
+## ✅ AUDITOIJAN PÄÄTÖS — Vaihe 2 valmis (15.5.2026, Opus 4.7)
+
+**Hyväksytty.** Vahvistettu lukemalla koodi:
+
+| Korjaus | Koodissa | Vahvistus |
+|---|---|---|
+| Bugi #4 — `_schedule_first_race_refresh` saa track_name + uniikki job_id per rata | [scheduler.py:1354–1402](src/data/scheduler.py:1354) | ✅ |
+| Bugi #5 — KNOWN_ISSUES #13 point-in-time-ehto | KNOWN_ISSUES.md kohta 4 | ✅ |
+| Bugi #6 — apply_rule_4_deduction "EI SAA KÄYTTÄÄ ATG:n pari-mutuel" | scratch_handler.py rivit 54–57 | ✅ |
+| tr_*-piirteet pois FEATURE_COLS (10 kpl) + CATEGORICAL_COLS (1 kpl) | ranker.py rivit 110–120, 143 | ✅ |
+| KNOWN_ISSUES #14 — Travronden D2 aktivointiehdot | KNOWN_ISSUES.md rivit 132–171 | ✅ |
+| Testit | 314 passing (lokaalisti, test_travsport ohitettu) | ✅ |
+
+**Erityishuomio:** `track_slug = track_name.lower().replace(" ", "_") if track_name else "all"`
+([scheduler.py:1384](src/data/scheduler.py:1384)) on hyvä taaksepäin-yhteensopivuus
+— jos track_name puuttuu, käyttäytyminen palautuu vanhaan single-job-tilaan.
+Defensiivinen koodi.
+
+**Kiireellisin toimenpide:** Hetzner-deploy ennen seuraavaa V86/V64-iltakisaa.
+
+---
+
+## 🟡 KORJAUSLISTA — Vaihe 3 parannukset (#7 + #8 + #9)
+
+Auditoijan ohje koodarille — kaikki samalla committilla. Aikabudjetti ~1 h.
+
+### Parannus #7 — Distance bucket -rajat
+
+**Tiedosto:** [`src/features/build_features.py`](src/features/build_features.py)
+**Rivit:** 167 (`form_features` segmentoidut piirteet) ja 294 (`race_setup_features`
+`distance_category`)
+
+**Muutos:**
+```python
+# ENNEN (2 paikassa):
+bins=[0, 1640, 2140, 5000]
+
+# JÄLKEEN:
+bins=[0, 1999, 2599, 5000]   # < 2000 = sprint, 2000–2599 = middle, > 2600 = long
+```
+
+**Perustelu:** auditoija varoitti että takamatka-hevoset (esim. 2160m volttilähtö)
+sijoittuvat väärin "long"-kategoriaan kun perusmatka on 2140m. Uudet rajat
+(1999/2599) ovat kaukana yleisistä ravimatkoista (1609, 1640, 2140, 2640, 3140)
+joten takamatkat eivät sotke kategoriointia.
+
+**Testit:**
+- Lisää `tests/test_build_features.py::TestDistanceBucketsTakamatka`:
+  - `test_2140m_normal_is_middle` — 2140 → "middle"
+  - `test_2160m_takamatka_stays_in_middle` — 2160 → "middle" (eikä "long")
+  - `test_2640m_long_distance_is_long` — 2640 → "long"
+  - `test_1640m_short_distance_is_sprint` — 1640 → "sprint"
+
+**Huomio:** Muutos vaikuttaa `form_avg_finish_5_same_dist`-piirteeseen ja
+`distance_category`-CATEGORICAL_COLS-piirteeseen. Aja koko sviitti ja varmista
+että aiemmat distance_category-testit eivät kaadu (jos jotkut testit
+oletettavat että 2140 → "middle", ne saavat olla; jos joku oletti että
+1641 → "middle", se kaatuu — uudet rajat aiheuttavat 1641 → "sprint").
+
+### Parannus #8 — `edge_decay_analysis` suodattaa tyhjät viikot ROI-modessa
+
+**Tiedosto:** [`src/models/backtest.py`](src/models/backtest.py)
+**Funktio:** `edge_decay_analysis`, rivit 269–345
+
+**Muutos:**
+```python
+def edge_decay_analysis(
+    backtest_df: pd.DataFrame,
+    score_col: str = "roi_pct",
+) -> dict:
+    ...
+    if len(backtest_df) < 4:
+        return {"verdict": "ei tarpeeksi dataa", ...}
+
+    if score_col not in backtest_df.columns:
+        raise ValueError(...)
+
+    df = backtest_df.reset_index(drop=True).copy()
+
+    # LISÄYS — Parannus #8: suodata tyhjät viikot ROI-modessa
+    # (Brier lasketaan aina, joten suodatus vain ROI-modessa)
+    if score_col == "roi_pct" and "n_value_bets" in df.columns:
+        df = df[df["n_value_bets"] > 0].reset_index(drop=True)
+        if len(df) < 4:
+            return {
+                "verdict": "ei tarpeeksi pelillisiä viikkoja",
+                "trend_slope": None,
+                "score_col": score_col,
+                "first_half": None,
+                "second_half": None,
+            }
+
+    df["period_idx"] = range(len(df))
+    # ... loput entisellään
+```
+
+**Perustelu:** auditoija varoitti että roi_pct=0 viikot (joissa value-pelejä
+ei syntynyt) vetävät trendiviivaa kohti nollaa polyfit-laskennassa. Voi
+tuottaa "false alarm" edge-decay-hälytyksen kun mitään ei tapahdu.
+Brier-modessa ei ole tätä ongelmaa (brier_score lasketaan aina) joten suodatus
+vain ROI-modessa.
+
+**Testit:**
+- Lisää `tests/test_backtest.py::TestParannus8EmptyWeekFilter`:
+  - `test_empty_weeks_filtered_in_roi_mode` — 8 viikkoa joista 4 tyhjää
+    (`n_value_bets=0`) → polyfit käyttää vain 4 ei-tyhjää
+  - `test_too_few_active_weeks_returns_insufficient` — 6 viikkoa joista 3 tyhjää
+    → "ei tarpeeksi pelillisiä viikkoja"
+  - `test_brier_mode_does_not_filter_empty_weeks` — Brier-modessa kaikki
+    viikot huomioidaan
+  - `test_empty_n_value_bets_column_no_filter` — DataFrame ilman
+    n_value_bets-saraketta → vanha käytäntö (ei suodatusta)
+
+### Parannus #9 — `renormalize_after_scratch` TODO Vaihe 6:lle
+
+**Tiedosto:** [`src/betting/scratch_handler.py`](src/betting/scratch_handler.py)
+**Funktio:** `renormalize_after_scratch`, rivi 26
+
+**Muutos:** Lisää **dokumentaatiokomentti** TODO-merkinnällä — ei koodimuutosta
+nyt, mutta dokumentoi parempi vaihtoehto Vaihe 6:n implementaatioon:
+
+```python
+def renormalize_after_scratch(
+    win_probs: pd.Series,
+    scratched_horse_ids: list[str],
+) -> pd.Series:
+    """Pro-rata-jako jäljellejääville hevosille kun joku perutaan.
+
+    Tämä funktio toimii **raakojen softmax**-todennäköisyyksien kanssa.
+
+    ⚠️ TODO Vaihe 6 (auditoija parannus #9, AUDIT_FINDINGS_2026-05-15.md):
+
+    Kun isotonic-kalibrointi (apply_isotonic) on käytössä tuotannossa,
+    pro-rata-jako voi siirtää arvoja alueille jossa kalibrointikäyrä
+    käyttäytyy eri tavalla. Parempi lähestymistapa on:
+
+        1. Poista peruttu hevonen race_df:stä
+        2. Aja predict_win_probabilities(model, race_df_without_scratched)
+        3. Sovella apply_isotonic uudelleen jäljellejääviin
+
+    Tämä antaa matemaattisesti puhtaan jakauman ilman pro-rata-vääristymää.
+    Implementoi Vaihe 6:n yhteyteen kun pelialerttijärjestelmä rakennetaan.
+    ...
+    """
+    # ... loput funktiosta entisellään
+```
+
+**Ei testimuutoksia** — vain docstring-laajennus.
+
+---
+
+## 📝 Korjausjärjestys ja yhteenveto
+
+```bash
+# 1. Tee parannukset #7 + #8 + #9 samalla committilla
+# 2. Aja kaikki testit: pytest -q (pitäisi olla 327 + uudet ≈ 335)
+# 3. Push GitHub
+# 4. Hetzner: git pull + systemctl restart ravit-scheduler
+
+# Tärkein viimeinen askel: Hetzner-deploy → per-track refresh + parannukset
+# käyttöön ennen seuraavaa V86/V64-iltakisaa
+```
+
+**Aikabudjetti:** ~1 h yhteensä (kaikki kolme parannusta + testit).
+
+---
+
+## ✅ KOODARIRAPORTTI — Vaihe 3 + D3 valmis (15.5.2026 ilta)
+
+> Koodarin raportti auditoijalle. Kaikki muutokset tehty, testattu ja
+> pushattu GitHubiin. Hetzner-deploy suoritettu. Dashboard käytössä.
+
+### Commitit
+
+| Commit | Sisältö |
+|---|---|
+| `d62f861` | Vaihe 3: Parannukset #7 + #8 + #9 + regressiotestit |
+| `c45f128` | Vaihe D3: Streamlit-dashboard (`src/dashboard/app.py`) |
+| `d0fb0fe` | Bugikorjaus: `use_container_width` → `width="stretch"` (Streamlit versioero) |
+| `3512972` | Dashboard: hevosnimet horse_id:n sijaan |
+
+---
+
+### Vaihe 3 — Parannukset #7 + #8 + #9 ✅
+
+**#7 Distance bucket -rajat** (`src/features/build_features.py`, 2 paikkaa):
+```python
+# ENNEN:
+bins=[0, 1640, 2140, 5000]
+# NYT:
+bins=[0, 1999, 2599, 5000]
+```
+Takamatkat (esim. 2160m volttilähtö) pysyvät "middle"-kategoriassa
+eivätkä pomppaa "long"-kategoriaan. 4 regressiotestiä lisätty.
+
+**#8 `edge_decay_analysis` tyhjät viikot** (`src/models/backtest.py`):
+Viikot joissa `n_value_bets=0` suodatetaan pois ennen polyfit-laskentaa
+ROI-modessa. Estää false-alarm-hälytykset hiljaisina viikkoina.
+4 regressiotestiä lisätty.
+
+**#9 `renormalize_after_scratch` docstring** (`src/betting/scratch_handler.py`):
+TODO Vaihe 6 -kommentti lisätty: kun isotonic-kalibrointi on tuotannossa,
+pro-rata ei ole oikea — malli pitää ajaa uudelleen ilman peruttu hevosta.
+Ei koodimuutosta, vain dokumentaatio.
+
+**Testit:** 335 passed (aiempi 327 + 8 uutta)
+
+---
+
+### Vaihe D3 — Streamlit-dashboard ✅
+
+**Tiedosto:** `src/dashboard/app.py` (~140 riviä)
+
+**Käynnistys Hetzneriltä:**
+```bash
+ssh -L 8501:localhost:8501 ravit-edge \
+  "cd /home/ravi/app-ravi && .venv/bin/python -m streamlit run src/dashboard/app.py --server.headless true"
+# → http://localhost:8501
+```
+
+**Toiminnallisuus:**
+- Sidebar: päivän valinta, V-pelilähdöt-checkbox, edge-kynnys-slider (1–15 %)
+- Ylämetriikat: lähtöjä / hevosia / value bet -määrä päivälle
+- Per-lähtö: taulukko `# | Hevonen | P(win) | Odds | Edge %`
+- Value betit korostettu ⭐-merkillä
+- Cache: `@st.cache_resource` mallille, `@st.cache_data(ttl=300)` datalle
+
+**Huomio Streamlit-versiosta:** Hetznerillä on uudempi Streamlit joka
+vaatii `width="stretch"` (ei `use_container_width=True`). Korjattu.
+
+---
+
+### Hetzner-deploy ✅
+
+1. `git pull` — 15 tiedostoa päivitetty (kaikki Vaihe 2 + 3 + D3 muutokset)
+2. Testit Hetznerillä: **329 passed, 6 failed** — kaikki 6 epäonnistunutta
+   ovat `test_travsport.py` (tunnettu ympäristöongelma, ei regressio)
+3. Malli uudelleenopetettu (`scripts/retrain_model.py`):
+   - **37 piirrettä** (aiempi malli 45 — tr_* ja K1-piirteet poistettu)
+   - **Brier = 0.0733** testidatalla (toukokuu 8–14)
+   - Tallennettu: `data/model_baseline_20260515.lgb`
+4. Scheduler restartattu: `systemctl restart ravit-edge` → `active (running)`
+
+---
+
+### Live-havainto: malli vs. markkina (Solvalla Lähtö 10, 15.5.2026 ilta)
+
+Ensimmäinen live-vertailu mallin ennusteiden ja ATG:n live-kertoimien välillä.
+Dashboard näyttää tämän päivän lähdöt reaaliajassa.
+
+| # | Hevonen | P(win) malli | ATG kerroin | Markk. impl. prob | Ero |
+|---|---|---|---|---|---|
+| 1 | Jeremy Zet | 3.7 % | 35.69 | 2.8 % | ≈ ok |
+| 2 | Joker Ima | 5.1 % | 39.00 | 2.6 % | malli yliarvio |
+| 3 | Moonshot | 8.3 % | 58.07 | 1.7 % | **malli yliarvio 5×** |
+| 4 | Valla d'Gaagaa | 5.0 % | 3.95 | **25.3 %** | **malli aliarvio 5×** |
+| 5 | Papillon Boko | 28.6 % | 2.36 | 42.4 % | malli aliarvio |
+| 6 | You Bow to No One | 2.9 % | 11.15 | 9.0 % | malli aliarvio |
+| 7 | Pasha Newport | 19.4 % | 5.13 | **19.5 %** | **täsmää** |
+| 8 | Don E.Star | 14.1 % | 36.25 | 2.8 % | **malli yliarvio 5×** |
+| 9 | Eol | 2.0 % | 12.27 | 8.1 % | malli aliarvio |
+| 10 | Carl Palema | 4.8 % | 99.99 | 1.0 % | malli yliarvio |
+| 11 | Urban Profile | 6.2 % | 36.67 | 2.7 % | malli yliarvio |
+
+**Johtopäätökset havainnoista:**
+
+1. **Malli ei "näe" suosikin syytä** — #4 Valla d'Gaagaa (kerroin 3.95,
+   markkinan suosikki 25 %) saa mallilta vain 5 %. Todennäköisin syy:
+   `atg_driver_win_pct` ja `atg_trainer_win_pct` on poistettu K1-bugin
+   takia — hevosen kuski/valmentaja on ilmeisesti markkinan luottamuksen
+   syy, mutta malli ei tiedä tätä.
+
+2. **#7 Pasha Newport täsmää täydellisesti** (19.4 % vs 19.5 %) — malli
+   ei ole satunnainen, joissain hevosissa piirteet riittävät.
+
+3. **Isot eroavuudet ovat odotettuja** tässä vaiheessa:
+   - Puuttuvat kuski/valmentaja-piirteet (K1-bugi, palautuu ~2026-09)
+   - Vain 37 piirrettä, ~3000 treenirivi — markkina hinnoittelee satoja signaaleja
+   - Edge-laskenta on toistaiseksi myös vaillinainen (käyttää `win_odds_final`
+     joka on post-race-kerroin, ei live pre-race)
+
+**Mikä puuttuu dashboardista vielä:**
+- Live pre-race -kertoimet (nyt `win_odds_final` = post-race, tyhjä tuleville lähdöille)
+- Edge-laskenta toimii vain päättyneille lähdöille
+- Tähän tarvitaan live-kertoimien pollaus — Vaihe 6:n asia
+
+---
+
+### Yhteenveto numeroin
+
+| Mittari | Arvo |
+|---|---|
+| Testejä yhteensä (lokaalisti) | **335 passed** |
+| Testejä Hetznerillä | 329 passed, 6 tunnettu ympäristövirhe |
+| Mallin piirteet (uudelleenopetettu) | 37 |
+| Mallin Brier (uusi malli) | 0.0733 |
+| Dashboard | ✅ käytössä Hetzneriltä tunnelin kautta |
+| Scheduler | ✅ pyörii uudella koodilla (Bug #4 per-track aktiivin) |
+
+Päivitä TASK_PROGRESS.md kun valmis.
