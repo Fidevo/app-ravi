@@ -1042,12 +1042,16 @@ def driver_trainer_track_features(
             lambda t: TRACKCODE_TO_NAME.get(t, t) if t is not None else None
         )
 
-    # Liitä track runners:iin races-taulun kautta
+    # Liitä track runners:iin races-taulun kautta.
+    # Huom: build_feature_matrix() kutsuu tätä JÄLKEEN race_setup_features():n,
+    # joten df:ssä on jo track-sarake. Mergetään vain jos se puuttuu — muuten
+    # saadaan track_x/track_y-konflikti joka kaataa funktion.
     track_map = races_df[["race_id", "track"]].drop_duplicates("race_id").copy()
     track_map["race_id"] = track_map["race_id"].astype(str)
     runners_with_track = runners_df.copy()
     runners_with_track["race_id"] = runners_with_track["race_id"].astype(str)
-    runners_with_track = runners_with_track.merge(track_map, on="race_id", how="left")
+    if "track" not in runners_with_track.columns:
+        runners_with_track = runners_with_track.merge(track_map, on="race_id", how="left")
 
     out = runners_df[["race_id", "horse_id"]].copy()
     out["race_id"] = out["race_id"].astype(str)
