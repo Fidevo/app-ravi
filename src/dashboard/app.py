@@ -227,9 +227,11 @@ def main() -> None:
     odds_col: Optional[str] = "win_odds_final" if "win_odds_final" in data.columns else None
     data = data.copy()
     if odds_col and "win_prob" in data.columns:
+        # Odds = 0 on sama kuin NULL — tallennusvirhe, ei oikea kerroin
+        valid_odds = data[odds_col].where(data[odds_col] > 1.0, other=float("nan"))
         data["edge_pct"] = (
-            (data["win_prob"] * data[odds_col] - 1.0) * 100
-        ).where(data[odds_col].notna(), other=float("nan"))
+            (data["win_prob"] * valid_odds - 1.0) * 100
+        ).where(valid_odds.notna(), other=float("nan"))
     else:
         data["edge_pct"] = float("nan")
 
