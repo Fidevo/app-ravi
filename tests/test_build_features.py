@@ -20,10 +20,14 @@ from src.features.build_features import (
     derived_features,
     driver_trainer_features,
     driver_trainer_hs_features,
+    driver_trainer_track_features,
     fill_finish_positions,
     form_features,
     race_setup_features,
+    rest_days_bucket_features,
     sire_features,
+    start_method_features,
+    start_position_features,
 )
 
 
@@ -1488,3 +1492,385 @@ class TestDriverTrainerHsFeatures:
         for col in ["driver_win_rate_60d", "driver_top3_rate_60d",
                     "trainer_win_rate_60d", "trainer_top3_rate_60d"]:
             assert col in result.columns, f"Sarake '{col}' puuttuu tuloksesta"
+
+
+# ---------------------------------------------------------------------------
+# C2 — start_position_features: starttipaikan vinouma per rata
+# ---------------------------------------------------------------------------
+
+class TestStartPositionFeatures:
+    """Testit start_position_features()-funktiolle."""
+
+    def test_start_position_win_rate_basic(self):
+        """Starttirata 1 voittaa 3/5 → win_rate = 0.60."""
+        runners = _runners(
+            # Historiadata: 5 lähtöä, starttirata 1, Solvalla
+            {"race_id": 1, "horse_id": 1, "race_date": "2024-01-01",
+             "start_number": 1, "finish_position": 1},
+            {"race_id": 2, "horse_id": 2, "race_date": "2024-01-08",
+             "start_number": 1, "finish_position": 1},
+            {"race_id": 3, "horse_id": 3, "race_date": "2024-01-15",
+             "start_number": 1, "finish_position": 1},
+            {"race_id": 4, "horse_id": 4, "race_date": "2024-01-22",
+             "start_number": 1, "finish_position": 2},
+            {"race_id": 5, "horse_id": 5, "race_date": "2024-01-29",
+             "start_number": 1, "finish_position": 3},
+        )
+        races = _races(
+            {"race_id": 1, "track": "Solvalla"},
+            {"race_id": 2, "track": "Solvalla"},
+            {"race_id": 3, "track": "Solvalla"},
+            {"race_id": 4, "track": "Solvalla"},
+            {"race_id": 5, "track": "Solvalla"},
+        )
+        result = start_position_features(runners, races, min_samples=5)
+        val = result[result["race_id"].astype(str) == "1"]["start_position_win_rate"].iloc[0]
+        assert val == pytest.approx(3 / 5), (
+            f"start_position_win_rate = {val}, odotettiin 0.60 (3/5 voittoa)"
+        )
+
+    def test_start_position_win_rate_nan_below_min_samples(self):
+        """Alle min_samples näytteitä → NaN."""
+        runners = _runners(
+            {"race_id": 1, "horse_id": 1, "race_date": "2024-01-01",
+             "start_number": 1, "finish_position": 1},
+            {"race_id": 2, "horse_id": 2, "race_date": "2024-01-08",
+             "start_number": 1, "finish_position": 2},
+        )
+        races = _races(
+            {"race_id": 1, "track": "Solvalla"},
+            {"race_id": 2, "track": "Solvalla"},
+        )
+        result = start_position_features(runners, races, min_samples=10)
+        assert result["start_position_win_rate"].isna().all(), (
+            "Alle min_samples näytteitä → pitää olla NaN"
+        )
+
+    def test_start_position_win_rate_output_columns(self):
+        """Tuloksessa on oikeat sarakkeet."""
+        runners = _runners({"race_id": 1, "horse_id": 1,
+                            "start_number": 1, "finish_position": 1})
+        races = _races({"race_id": 1, "track": "Solvalla"})
+        result = start_position_features(runners, races)
+        assert "start_position_win_rate" in result.columns
+        assert "start_position_win_rate_n" in result.columns
+
+
+# ---------------------------------------------------------------------------
+# C3 — start_method_features: lähtötapa-preferenssi
+# ---------------------------------------------------------------------------
+
+class TestStartMethodFeatures:
+    """Testit start_method_features()-funktiolle."""
+
+    def _make_runner(
+        self,
+        race_date: str = "2024-06-01",
+        horse_id: str = "h1",
+        race_id: int = 99,
+    ) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "race_id": race_id,
+            "horse_id": horse_id,
+            "race_date": race_date,
+            "driver": "Arto",
+            "trainer": "Matti",
+            "finish_position": None,
+            "start_number": 1,
+        }])
+
+    def test_start_method_win_rate_diff_auto_better(self):
+        """Auto 40%, voltti 20% → diff = +0.20."""
+        runner = self._make_runner(race_date="2024-06-01", horse_id="h1")
+        hs = pd.DataFrame([
+            # Auto: 5 starttia, 2 voittoa → 40%
+            {"horse_id": "h1", "race_date": "2024-05-01", "start_method": "auto",
+             "finish_position": 1, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            {"horse_id": "h1", "race_date": "2024-04-15", "start_method": "auto",
+             "finish_position": 1, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            {"horse_id": "h1", "race_date": "2024-04-01", "start_method": "auto",
+             "finish_position": 2, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            {"horse_id": "h1", "race_date": "2024-03-15", "start_method": "auto",
+             "finish_position": 3, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            {"horse_id": "h1", "race_date": "2024-03-01", "start_method": "auto",
+             "finish_position": 4, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            # Voltti: 5 starttia, 1 voitto → 20%
+            {"horse_id": "h1", "race_date": "2024-05-15", "start_method": "volte",
+             "finish_position": 1, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            {"horse_id": "h1", "race_date": "2024-04-20", "start_method": "volte",
+             "finish_position": 2, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            {"horse_id": "h1", "race_date": "2024-04-05", "start_method": "volte",
+             "finish_position": 3, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            {"horse_id": "h1", "race_date": "2024-03-20", "start_method": "volte",
+             "finish_position": 4, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            {"horse_id": "h1", "race_date": "2024-03-05", "start_method": "volte",
+             "finish_position": 5, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+        ])
+        result = start_method_features(runner, hs, min_starts=3)
+        val = result.iloc[0]["start_method_win_rate_diff"]
+        assert val == pytest.approx(0.20, abs=1e-6), (
+            f"start_method_win_rate_diff = {val}, odotettiin +0.20 (auto=0.40 - volte=0.20)"
+        )
+
+    def test_start_method_win_rate_diff_nan_too_few(self):
+        """Alle 3 starttia kummassakin → NaN."""
+        runner = self._make_runner(race_date="2024-06-01", horse_id="h2")
+        hs = pd.DataFrame([
+            {"horse_id": "h2", "race_date": "2024-05-01", "start_method": "auto",
+             "finish_position": 1, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            {"horse_id": "h2", "race_date": "2024-04-01", "start_method": "volte",
+             "finish_position": 2, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+        ])
+        result = start_method_features(runner, hs, min_starts=3)
+        val = result.iloc[0]["start_method_win_rate_diff"]
+        # auto_wr=NaN, volte_wr=NaN → diff = NaN
+        assert pd.isna(val), (
+            f"start_method_win_rate_diff = {val}, odotettiin NaN (alle 3 starttia)"
+        )
+
+    def test_start_method_point_in_time(self):
+        """Saman päivän startit eivät saa vaikuttaa (< ei <=)."""
+        runner = self._make_runner(race_date="2024-06-01", horse_id="h3")
+        hs = pd.DataFrame([
+            # 3 ennen race_date
+            {"horse_id": "h3", "race_date": "2024-05-20", "start_method": "auto",
+             "finish_position": 1, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            {"horse_id": "h3", "race_date": "2024-05-10", "start_method": "auto",
+             "finish_position": 2, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            {"horse_id": "h3", "race_date": "2024-05-01", "start_method": "auto",
+             "finish_position": 3, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+            # Sama päivä — EI saa tulla mukaan
+            {"horse_id": "h3", "race_date": "2024-06-01", "start_method": "auto",
+             "finish_position": 1, "driver": "A", "trainer": "B",
+             "kilometer_time_seconds": 90.0, "win_odds_final": 5.0},
+        ])
+        result = start_method_features(runner, hs, min_starts=3)
+        val = result.iloc[0]["start_method_win_rate_diff"]
+        # auto: 3 starttia (1 win, 2 ei) → win_rate = 1/3
+        # volte: 0 starttia → NaN → diff = NaN (koska volte NaN)
+        # Tärkeintä: diff ei ole 2/4 (ei vuoda saman päivän starttia)
+        # Jos vuotaa → auto=2/4=0.5, jos ei → auto=1/3; diff on NaN koska volte=NaN
+        assert pd.isna(val) or val != pytest.approx(0.5), (
+            "Saman päivän startti vuosi mukaan (käytä <, ei <=)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# C1 — rest_days_bucket: lepopäivien U-käyrä
+# ---------------------------------------------------------------------------
+
+class TestRestDaysBucket:
+    """Testit rest_days_bucket_features()-funktiolle."""
+
+    def _df_with_days(self, days) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "horse_id": 1,
+            "race_id": 1,
+            "race_date": "2024-01-15",
+            "form_days_since_last": days,
+        }])
+
+    def test_rest_days_bucket_short(self):
+        """< 6 päivää → 'short'."""
+        result = rest_days_bucket_features(self._df_with_days(4))
+        assert result.iloc[0]["rest_days_bucket"] == "short"
+
+    def test_rest_days_bucket_optimal(self):
+        """10 päivää → 'optimal'."""
+        result = rest_days_bucket_features(self._df_with_days(10))
+        assert result.iloc[0]["rest_days_bucket"] == "optimal"
+
+    def test_rest_days_bucket_long(self):
+        """30 päivää → 'long'."""
+        result = rest_days_bucket_features(self._df_with_days(30))
+        assert result.iloc[0]["rest_days_bucket"] == "long"
+
+    def test_rest_days_bucket_very_long(self):
+        """90 päivää → 'very_long'."""
+        result = rest_days_bucket_features(self._df_with_days(90))
+        assert result.iloc[0]["rest_days_bucket"] == "very_long"
+
+    def test_rest_days_bucket_nan_is_very_long(self):
+        """NaN (ensimmäinen startti) → 'very_long'."""
+        result = rest_days_bucket_features(self._df_with_days(np.nan))
+        assert result.iloc[0]["rest_days_bucket"] == "very_long"
+
+    def test_rest_days_bucket_boundary_6_is_optimal(self):
+        """Tasan 6 päivää → 'optimal' (raja: >= 6)."""
+        result = rest_days_bucket_features(self._df_with_days(6))
+        assert result.iloc[0]["rest_days_bucket"] == "optimal"
+
+    def test_rest_days_bucket_boundary_21_is_optimal(self):
+        """Tasan 21 päivää → 'optimal' (raja: <= 21)."""
+        result = rest_days_bucket_features(self._df_with_days(21))
+        assert result.iloc[0]["rest_days_bucket"] == "optimal"
+
+    def test_rest_days_bucket_boundary_22_is_long(self):
+        """Tasan 22 päivää → 'long' (raja: >= 22)."""
+        result = rest_days_bucket_features(self._df_with_days(22))
+        assert result.iloc[0]["rest_days_bucket"] == "long"
+
+    def test_rest_days_bucket_no_form_days_column(self):
+        """Jos form_days_since_last puuttuu, rest_days_bucket = NaN, ei kaaduta."""
+        df = pd.DataFrame([{"horse_id": 1, "race_id": 1, "race_date": "2024-01-01"}])
+        result = rest_days_bucket_features(df)
+        assert "rest_days_bucket" in result.columns
+
+
+# ---------------------------------------------------------------------------
+# C4 — driver_trainer_track_features: kuski×rata ja valmentaja×rata 60d
+# ---------------------------------------------------------------------------
+
+class TestDriverTrainerTrackFeatures:
+    """Testit driver_trainer_track_features()-funktiolle."""
+
+    def _make_runner(
+        self,
+        race_date: str = "2024-03-01",
+        driver: str = "Arto",
+        trainer: str = "Matti",
+        race_id: int = 99,
+        horse_id: str = "h99",
+    ) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "race_id": race_id,
+            "horse_id": horse_id,
+            "race_date": race_date,
+            "driver": driver,
+            "trainer": trainer,
+            "finish_position": None,
+            "start_number": 1,
+        }])
+
+    def test_driver_track_win_rate_60d_basic(self):
+        """Kuski×rata: 5 starttia, 2 voittoa → 0.40."""
+        runner = self._make_runner(race_date="2024-03-01", driver="Arto")
+        races = _races({"race_id": 99, "track": "Solvalla"})
+        hs = pd.DataFrame([
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-02-20", "finish_position": 1,
+             "horse_id": "h1", "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-02-10", "finish_position": 1,
+             "horse_id": "h2", "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-01-25", "finish_position": 2,
+             "horse_id": "h3", "kilometer_time_seconds": 91.0, "win_odds_final": 5.0},
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-01-15", "finish_position": 3,
+             "horse_id": "h4", "kilometer_time_seconds": 92.0, "win_odds_final": 6.0},
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-01-05", "finish_position": 4,
+             "horse_id": "h5", "kilometer_time_seconds": 93.0, "win_odds_final": 7.0},
+        ])
+        result = driver_trainer_track_features(runner, hs, races, min_starts=3)
+        val = result.iloc[0]["driver_track_win_rate_60d"]
+        assert val == pytest.approx(2 / 5), (
+            f"driver_track_win_rate_60d = {val}, odotettiin 0.40 (2/5 voittoa)"
+        )
+
+    def test_driver_track_win_rate_60d_nan_below_min(self):
+        """Alle min_starts starteja → NaN."""
+        runner = self._make_runner(race_date="2024-03-01", driver="Arto")
+        races = _races({"race_id": 99, "track": "Solvalla"})
+        hs = pd.DataFrame([
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-02-20", "finish_position": 1,
+             "horse_id": "h1", "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-02-10", "finish_position": 2,
+             "horse_id": "h2", "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+        ])
+        result = driver_trainer_track_features(runner, hs, races, min_starts=3)
+        val = result.iloc[0]["driver_track_win_rate_60d"]
+        assert pd.isna(val), (
+            f"driver_track_win_rate_60d = {val}, odotettiin NaN (alle 3 starttia)"
+        )
+
+    def test_driver_track_excludes_different_track(self):
+        """Eri radan startit eivät tule mukaan."""
+        runner = self._make_runner(race_date="2024-03-01", driver="Arto")
+        races = _races({"race_id": 99, "track": "Solvalla"})
+        hs = pd.DataFrame([
+            # Solvalla: 2 starttia (S = Solvalla)
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-02-20", "finish_position": 1,
+             "horse_id": "h1", "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-02-10", "finish_position": 1,
+             "horse_id": "h2", "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+            # Bergsåker: 5 tappiota — ei saa vaikuttaa Solvalla-win_rateen
+            {"driver": "Arto", "trainer": "M", "track": "B",
+             "race_date": "2024-02-15", "finish_position": 5,
+             "horse_id": "h3", "kilometer_time_seconds": 95.0, "win_odds_final": 10.0},
+            {"driver": "Arto", "trainer": "M", "track": "B",
+             "race_date": "2024-02-05", "finish_position": 5,
+             "horse_id": "h4", "kilometer_time_seconds": 95.0, "win_odds_final": 10.0},
+            {"driver": "Arto", "trainer": "M", "track": "B",
+             "race_date": "2024-01-25", "finish_position": 5,
+             "horse_id": "h5", "kilometer_time_seconds": 95.0, "win_odds_final": 10.0},
+        ])
+        result = driver_trainer_track_features(runner, hs, races, min_starts=2)
+        val = result.iloc[0]["driver_track_win_rate_60d"]
+        # Vain 2 Solvalla-starttia → NaN jos min_starts=3, mutta tässä min_starts=2
+        # Jos molemmat voittoja → 1.0 (EI 0.4 Bergsåker mukana)
+        assert val == pytest.approx(1.0), (
+            f"driver_track_win_rate_60d = {val}, odotettiin 1.0 (vain Solvalla-startit mukaan)"
+        )
+
+    def test_point_in_time_excludes_same_day(self):
+        """Saman päivän startit eivät tule mukaan."""
+        runner = self._make_runner(race_date="2024-03-01", driver="Arto")
+        races = _races({"race_id": 99, "track": "Solvalla"})
+        hs = pd.DataFrame([
+            # 3 ennen race_date
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-02-20", "finish_position": 1,
+             "horse_id": "h1", "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-02-10", "finish_position": 2,
+             "horse_id": "h2", "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-01-20", "finish_position": 3,
+             "horse_id": "h3", "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+            # Sama päivä kuin runner — EI saa tulla mukaan
+            {"driver": "Arto", "trainer": "M", "track": "S",
+             "race_date": "2024-03-01", "finish_position": 1,
+             "horse_id": "h4", "kilometer_time_seconds": 88.0, "win_odds_final": 3.0},
+        ])
+        result = driver_trainer_track_features(runner, hs, races, min_starts=3)
+        val = result.iloc[0]["driver_track_win_rate_60d"]
+        # 3 starttia (1 voitto) → 1/3 ≈ 0.333
+        # Jos saman päivän vuotaa: 4 starttia (2 voittoa) → 0.5
+        assert val == pytest.approx(1 / 3, abs=1e-6), (
+            f"driver_track_win_rate_60d = {val}, odotettiin 1/3. "
+            "Saman päivän startti vuosi mukaan."
+        )
+
+    def test_output_columns_present(self):
+        """Molemmat sarakkeet löytyvät tuloksesta."""
+        runner = self._make_runner()
+        races = _races({"race_id": 99, "track": "Solvalla"})
+        hs = pd.DataFrame([
+            {"driver": "Arto", "trainer": "Matti", "track": "S",
+             "race_date": "2024-01-01", "finish_position": 1,
+             "horse_id": "h1", "kilometer_time_seconds": 90.0, "win_odds_final": 4.0},
+        ])
+        result = driver_trainer_track_features(runner, hs, races)
+        assert "driver_track_win_rate_60d" in result.columns
+        assert "trainer_track_win_rate_60d" in result.columns

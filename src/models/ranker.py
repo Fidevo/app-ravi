@@ -123,6 +123,11 @@ FEATURE_COLS: list[str] = [
     # "tr_game_percent_v",             # 81 % — ⭐⭐⭐ #1 feature A/B:ssä — COPYCAT-RISKI
     #                                  # Aktivoi vasta multi-snapshot delta-piirteen kanssa
     # "tr_expected_odds",              # 23.8 % notna — liian harva; aktivoi jos > 40 %
+    # --- C: Uudet piirteet (build_features, C1–C4) ---
+    "start_position_win_rate",     # starttipaikan historiallinen voitto-% tällä radalla (C2)
+    "start_method_win_rate_diff",  # auto_win_rate - volte_win_rate per hevonen (C3)
+    "driver_track_win_rate_60d",   # kuski×rata voitto-% 60d (C4)
+    "trainer_track_win_rate_60d",  # valmentaja×rata voitto-% 60d (C4)
     # --- D: Ratarakenne (build_features.track_structure_features) ---
     # Vaatii tracks-taulun tracks-parametrina build_feature_matrix():lle.
     # NaN jos rata puuttuu taulusta (gallop-radat, manuaaliset stub-rivit).
@@ -139,6 +144,7 @@ FEATURE_COLS: list[str] = [
 CATEGORICAL_COLS: list[str] = [
     "distance_category",       # sprint / middle / long
     "start_method",            # auto / voltstart
+    "rest_days_bucket",        # short / optimal / long / very_long (C1)
     "race_age_group",          # 2yo / 3yo / 3yo+ / 4yo+ / 5yo+
     "track_condition",         # light / heavy (ATG races.condition)
     "sulky_type",              # VA / AM
