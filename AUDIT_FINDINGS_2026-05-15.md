@@ -1751,3 +1751,81 @@ Streamlit käynnissä: `2026-05-15 20:15:11 Uvicorn server started on 0.0.0.0:85
 | Hetzner-deploy | ✅ |
 | shap Hetznerillä | ✅ 0.51.0 |
 | Dashboard-URL (SSH-tunneli) | http://localhost:8501 |
+
+---
+
+## ✅ KOODARIRAPORTTI — Vaihe 5: Historiadata + Kuski/Valmentaja-piirteet (16.5.2026)
+
+> Koodarin raportti auditoijalle. Commit: `c099b6b`
+
+### Tausta
+
+Live-vertailu (Lähtö 11, 16.5.2026) paljasti mallin sokeat pisteet konkreettisesti:
+A Fair Day markkinoilla 49.6 % → malli antoi 23.5 %. Syyt:
+1. Kuski/valmentaja-piirteet puuttuvat (K1-bugi)
+2. Vain ~3 000 training-riviä (muutama viikko dataa)
+
+### Mitä tehtiin
+
+| Tehtävä | Tila |
+|---|---|
+| `scripts/backfill_history.py` — hae 3 v. ATG-historia | ✅ kirjoitettu + käynnistetty |
+| `driver_trainer_hs_features()` — kuski/valmentaja horse_starts:sta | ✅ toteutettu |
+| 4 uutta piirrettä FEATURE_COLS:iin (42 → 46) | ✅ |
+| 8 uutta regressiotestiä | ✅ 343 passed |
+| Hetzner-deploy | ✅ |
+| Backfill käynnissä Hetznerillä yön yli | ✅ käynnissä |
+
+---
+
+### 1. Historiadata-backfill
+
+**Tiedosto:** `scripts/backfill_history.py`
+
+```
+python scripts/backfill_history.py --start 2023-01-01
+```
+
+- Hakee 1 212 päivää (2023-01-01 → 2026-05-15), ohittaa jo DB:ssä olevat 19 päivää
+- Rate limit: 1 req/sek (automaattinen ATGClient:ssa) — ei lisäkoodia tarvittu
+- Idempotenssi: uudelleenajo turvallista
+- Arvioitu kesto: ~12–15 h → valmis aamulla 17.5.
+- **Tulos:** ~3 000 → ~70 000 training-riviä (20× lisäys)
+
+---
+
+### 2. Kuski/valmentaja-piirteet horse_starts-taulusta
+
+**Uudet piirteet** (bypass K1-bugiin — ei käytä `atg_driver_win_pct`):
+
+| Piirre | Kuvaus |
+|---|---|
+| `driver_win_rate_60d` | Kuljettajan voittoprosentti viimeiset 60 pv |
+| `driver_top3_rate_60d` | Kuljettajan top3-prosentti viimeiset 60 pv |
+| `trainer_win_rate_60d` | Valmentajan voittoprosentti viimeiset 60 pv |
+| `trainer_top3_rate_60d` | Valmentajan top3-prosentti viimeiset 60 pv |
+
+**Point-in-time:** `race_date_hist < race_date_runner` (ei <=) — ei data leakagea.
+**NaN-käsittely:** alle 3 starttia → NaN (LightGBM käsittelee automaattisesti).
+**Sarakkeet syntyvät aina** — myös jos horse_starts puuttuu (NaN), FEATURE_COLS pysyy yhtenäisenä.
+
+---
+
+### 3. Seuraava askel: retrain aamulla
+
+Kun backfill valmistuu (~17.5. aamulla):
+```bash
+ssh ravit-edge "cd /home/ravi/app-ravi && .venv/bin/python scripts/retrain_model.py"
+```
+
+Uusi malli: 46 piirrettä (aiempi 42), ~70 000 training-riviä (aiempi ~3 000).
+Evaluointi: `evaluate_model.py` → Brier kaikki + V-peli.
+
+---
+
+### Testit
+
+```
+343 passed (aiempi 335, +8 TestDriverTrainerHsFeatures)
+Hetznerillä: 337 passed, 6 tunnettu ympäristövirhe (test_travsport)
+```
