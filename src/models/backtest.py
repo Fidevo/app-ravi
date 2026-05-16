@@ -88,6 +88,9 @@ def quarterly_walk_forward(
         )
     df["race_date"] = pd.to_datetime(df["race_date"])
 
+    # KRIITTINEN: suodata vain labeloidut rivit — ks. rolling_walk_forward-kommentti.
+    df = df[df["finish_position"].notna()].copy()
+
     # Quarterit treenin alkupisteen jälkeen
     test_start = pd.to_datetime(initial_train_end) + pd.Timedelta(days=1)
     test_end = df["race_date"].max()
@@ -221,6 +224,21 @@ def rolling_walk_forward(
         )
     df["race_date"] = pd.to_datetime(df["race_date"])
 
+    # KRIITTINEN: suodata vain labeloidut rivit (finish_position notna).
+    # Koko features-DataFrame sisältää myös tulevaisuuden runnerit (pre-race)
+    # joilla ei ole ground truth -labelia. Ilman tätä suodatusta len(train_df)
+    # ylittää 100-rajan mutta train_ranker():n sisäinen dropna() tyhjentää
+    # treenisetin → LightGBM kaatuu "Input data must be non-empty" -virheeseen.
+    df = df[df["finish_position"].notna()].copy()
+
+    _empty_cols = [
+        "period", "n_races", "n_value_bets", "total_staked",
+        "total_pnl", "roi_pct", "avg_edge_pct", "win_rate", "brier_score",
+    ]
+
+    if df.empty:
+        return pd.DataFrame(columns=_empty_cols)
+
     date_min = df["race_date"].min()
     date_max = df["race_date"].max()
 
@@ -229,10 +247,7 @@ def rolling_walk_forward(
 
     if first_test_start >= date_max:
         # Ei tarpeeksi dataa edes ensimmäiseen ikkunaan
-        return pd.DataFrame(columns=[
-            "period", "n_races", "n_value_bets", "total_staked",
-            "total_pnl", "roi_pct", "avg_edge_pct", "win_rate", "brier_score",
-        ])
+        return pd.DataFrame(columns=_empty_cols)
 
     results: list[BacktestResult] = []
 
