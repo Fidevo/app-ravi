@@ -851,22 +851,24 @@ def start_position_features(
 ) -> pd.DataFrame:
     """Laske historiallinen voitto-% per (track, start_number).
 
-    Käyttää globaalia (ei point-in-time) tilastoa kaikesta saatavilla olevasta
-    datasta, koska backfill on käynnissä eikä historiallinen runners-data ole
-    vielä täynnä. Lisää _n-sarakkeen (näytteiden määrä).
+    Käyttää **point-in-time** -tilastoa kun runners_df:ssä on race_date-sarake:
+    kullekin lähdölle lasketaan aggregaatti vain aiemmista lähdöistä
+    (race_date < nykyinen race_date), jolloin treenidatan oma tulos ei
+    kontaminoi omaa start_position_win_rate -arvoaan. Ilman race_date-saraketta
+    käytetään fallback-globaaliaggregointia (taaksepäin-yhteensopiva).
 
     Args:
-        runners_df: nykyiset lähdöt, vaaditut sarakkeet: race_id, start_number, finish_position
+        runners_df: nykyiset lähdöt, vaaditut sarakkeet: race_id, start_number,
+            finish_position. Valinnaisesti race_date (point-in-time-laskentaan).
         races_df: races-taulu, vaaditut sarakkeet: race_id, track
         historical_runners_df: runners historiasta (valinnainen). Jos annetaan,
-            yhdistetään runners_df:ään ennen aggregointia.
+            yhdistetään pooliin ennen aggregointia.
         min_samples: min. näytemäärä — alle tämän → NaN (oletus 10)
 
     Returns:
         DataFrame sarakkeilla [race_id, start_number,
             start_position_win_rate, start_position_win_rate_n]
     """
-    # Yhdistä track runners:iin
     track_map = races_df[["race_id", "track"]].drop_duplicates("race_id")
 
     def _add_track(df: pd.DataFrame) -> pd.DataFrame:
@@ -876,39 +878,100 @@ def start_position_features(
         tm["race_id"] = tm["race_id"].astype(str)
         return d.merge(tm, on="race_id", how="left")
 
-    pool = _add_track(runners_df[["race_id", "start_number", "finish_position"]].copy())
+    def _compute_agg(pool_sub: pd.DataFrame) -> pd.DataFrame:
+        """Laske win rate -aggregaatti osajoukolle."""
+        agg = (
+            pool_sub.groupby(["track", "start_number"])
+            .agg(_n=("is_win", "count"), _wins=("is_win", "sum"))
+            .reset_index()
+        )
+        agg["start_position_win_rate"] = np.where(
+            agg["_n"] >= min_samples,
+            agg["_wins"] / agg["_n"],
+            np.nan,
+        )
+        agg = agg.rename(columns={"_n": "start_position_win_rate_n"})
+        return agg[["track", "start_number", "start_position_win_rate",
+                    "start_position_win_rate_n"]]
+
+    # Rakenna pool race_date:n kanssa (point-in-time-suodatusta varten)
+    has_race_date = "race_date" in runners_df.columns
+    pool_cols = ["race_id", "start_number", "finish_position"]
+    if has_race_date:
+        pool_cols = pool_cols + ["race_date"]
+
+    pool = _add_track(runners_df[[c for c in pool_cols if c in runners_df.columns]].copy())
 
     if historical_runners_df is not None and len(historical_runners_df) > 0:
         cols_needed = ["race_id", "start_number", "finish_position"]
         hist_cols = [c for c in cols_needed if c in historical_runners_df.columns]
         if len(hist_cols) == 3:
+            if has_race_date and "race_date" in historical_runners_df.columns:
+                hist_cols = hist_cols + ["race_date"]
             hist = _add_track(historical_runners_df[hist_cols].copy())
             pool = pd.concat([pool, hist], ignore_index=True)
 
     pool = pool.dropna(subset=["track", "start_number", "finish_position"])
     pool["is_win"] = (pool["finish_position"] == 1).astype(float)
 
-    # Aggregoi per (track, start_number)
-    agg = (
-        pool.groupby(["track", "start_number"])
-        .agg(
-            _n=("is_win", "count"),
-            _wins=("is_win", "sum"),
-        )
-        .reset_index()
-    )
-    agg["start_position_win_rate"] = np.where(
-        agg["_n"] >= min_samples,
-        agg["_wins"] / agg["_n"],
-        np.nan,
-    )
-    agg = agg.rename(columns={"_n": "start_position_win_rate_n"})
-    agg = agg[["track", "start_number", "start_position_win_rate", "start_position_win_rate_n"]]
+    # ------------------------------------------------------------------ #
+    # Point-in-time -laskenta: jos race_date saatavilla, käytetään vain   #
+    # dataa joka oli olemassa ENNEN kunkin lähdön päivää.                  #
+    # Tämä estää treenilähdön oman tuloksen kontaminoimasta omia piirteitä. #
+    # ------------------------------------------------------------------ #
+    if has_race_date and "race_date" in pool.columns:
+        unique_dates = sorted(runners_df["race_date"].dropna().unique())
+        parts: list[pd.DataFrame] = []
 
-    # Liitä runners:iin track-saraketta käyttäen
-    runners_with_track = _add_track(
-        runners_df[["race_id", "start_number"]].copy()
-    )
+        for cut_date in unique_dates:
+            # Suodata historiallinen data: vain päivät ennen cut_date
+            hist_pool = pool[pool["race_date"] < cut_date]
+            runners_slice = runners_df[
+                runners_df["race_date"] == cut_date
+            ][["race_id", "start_number"]].copy()
+
+            if hist_pool.empty:
+                # Ei historiaa — palautetaan NaN
+                runners_slice["start_position_win_rate"] = np.nan
+                runners_slice["start_position_win_rate_n"] = np.nan
+                parts.append(runners_slice)
+                continue
+
+            agg = _compute_agg(hist_pool)
+            runners_with_track = _add_track(runners_slice)
+            runners_with_track = runners_with_track.merge(
+                agg, on=["track", "start_number"], how="left"
+            )
+            runners_with_track["race_id"] = runners_with_track["race_id"].astype(str)
+
+            result_slice = runners_slice.copy()
+            result_slice["race_id"] = result_slice["race_id"].astype(str)
+            result_slice = result_slice.merge(
+                runners_with_track[["race_id", "start_number",
+                                    "start_position_win_rate",
+                                    "start_position_win_rate_n"]],
+                on=["race_id", "start_number"],
+                how="left",
+            )
+            parts.append(result_slice)
+
+        out = runners_df[["race_id", "start_number"]].copy()
+        out["race_id"] = out["race_id"].astype(str)
+        if parts:
+            combined = pd.concat(parts, ignore_index=True)
+            combined["race_id"] = combined["race_id"].astype(str)
+            out = out.merge(combined, on=["race_id", "start_number"], how="left")
+        else:
+            out["start_position_win_rate"] = np.nan
+            out["start_position_win_rate_n"] = np.nan
+        return out
+
+    # ------------------------------------------------------------------ #
+    # Fallback: globaali aggregaatti (ei race_date -saraketta käytettävissä) #
+    # ------------------------------------------------------------------ #
+    agg = _compute_agg(pool)
+
+    runners_with_track = _add_track(runners_df[["race_id", "start_number"]].copy())
     runners_with_track = runners_with_track.merge(agg, on=["track", "start_number"], how="left")
 
     out = runners_df[["race_id", "start_number"]].copy()

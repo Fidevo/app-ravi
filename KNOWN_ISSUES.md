@@ -94,6 +94,38 @@ WHERE (withdrawn IS NULL OR withdrawn != 1)
 
 ---
 
+## Avoimet — aktivoidaan sire-piirteiden kanssa (~2026-07)
+
+### #17 · `sire_features()` LOO ei suodata tulevaisuuden startteilla
+
+**Tiedosto:** `src/features/build_features.py`, funktio `_loo_stats()` (rivi ~638)
+
+**Ongelma:** `_loo_stats()` laskee sire-aggregaatin kaikista `horse_starts`-riveistä
+ilman päivämäärärajausta. Kun treenataan historiallisella datalla (esim. lähtö 2026-04-01),
+muiden saman sireen hevosten startit 2026-04-02 → 2026-05-16 (ja myöhemmin) vuotavat
+mukaan LOO-laskentaan — tulevaisuuden tieto kontaminoi historiallisen piirteen.
+
+**Vaikutus nykyään:** EI VAIKUTUSTA. Sire-piirteet ovat kommentoitu pois `FEATURE_COLS`:ista
+(KNOWN_ISSUES #13). Bugi on relevantti vasta kun sire-piirteet aktivoidaan (~2026-07).
+
+**Korjaus:** Lisää point-in-time -suodatus `_loo_stats()`-kutsuihin. Koska eri runner-riveillä
+on eri `race_date`, laskenta pitää tehdä per päivä (sama patterrn kuin `start_position_features`):
+
+```python
+# sire_features() -funktion sisällä:
+# runners:iin on jo lisätty race_date (build_feature_matrix()-virrassa)
+unique_dates = sorted(runners["race_date"].dropna().unique())
+for cut_date in unique_dates:
+    hist = horse_starts[horse_starts["race_date"] < cut_date]
+    loo_sire = _loo_stats(hist, "sire", "sire")
+    # ... join back to runners for this date ...
+```
+
+**Huom:** `horse_starts`-taulussa on `race_date`-sarake (Travsport-data). ✓
+**TODO:** Korjaa ennen sire-aktivointia 2026-07. Tarkista yhdessä #13:n aktivointiehtojen kanssa.
+
+---
+
 ## Avoimet — koodihygienia (ei tuotantovaikutusta)
 
 ### #2 · `_km_seconds` ei validoi arvoaluetta

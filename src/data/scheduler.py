@@ -1065,7 +1065,11 @@ def fetch_results(
                 # se voi olla {"code": "10"} -muodossa - _km_seconds palauttaa
                 # silloin None.
                 runner.kilometer_time_seconds = _km_seconds(result.get("kmTime"))
-                win_odds = _odds_to_decimal(result.get("finalOdds"))
+                win_odds_raw = _odds_to_decimal(result.get("finalOdds"))
+                # ATG voi palauttaa 0.0 tai alle 1.0 virheelliselle kertoimelle.
+                # Tallennetaan win_odds_final vain kun kerroin on matemaattisesti
+                # validi (> 1.0). Muutoin jätetään None → edge-laskenta saa "—".
+                win_odds = win_odds_raw if (win_odds_raw is not None and win_odds_raw > 1.0) else None
                 runner.win_odds_final = win_odds
 
                 stats["runners_updated"] += 1

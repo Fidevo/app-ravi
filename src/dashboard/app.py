@@ -38,12 +38,22 @@ st.set_page_config(page_title="Ravit Edge", layout="wide", page_icon="🏇")
 # Resurssien lataus
 # ---------------------------------------------------------------------------
 
-@st.cache_resource
+@st.cache_data
+def _load_model_cached(model_path: str, _mtime: float) -> lgb.Booster:
+    """Välimuistitettu malli — invalidoituu automaattisesti kun tiedosto muuttuu."""
+    return lgb.Booster(model_file=model_path)
+
+
 def load_model() -> lgb.Booster | None:
+    """Lataa uusin malli data/-hakemistosta. Käyttää mtime-pohjaista välimuistia:
+    jos model-tiedosto päivitetään (uusi treeni), uusi malli ladataan automaattisesti
+    ilman palvelimen uudelleenkäynnistystä."""
     models = sorted(Path(".").glob(_MODEL_GLOB))
     if not models:
         return None
-    return lgb.Booster(model_file=str(models[-1]))
+    path = str(models[-1])
+    mtime = models[-1].stat().st_mtime
+    return _load_model_cached(path, mtime)
 
 
 @st.cache_data(ttl=60)
@@ -77,8 +87,10 @@ def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
         return None
 
     try:
+        # HUOM: fill_finish_positions() on VAIN koulutusaineistolle — älä kutsu
+        # sitä ennusteputkessa. Ennustetaan päivän lähtöjä joilla finish_position=NULL.
         features = build_feature_matrix(
-            fill_finish_positions(runners), races,
+            runners, races,
             horse_starts=horse_starts, horses=horses, tracks=tracks,
         )
     except Exception as e:
@@ -291,6 +303,19 @@ def main() -> None:
                     )
                     rdf = rdf.merge(live_odds, on="runner_id", how="left")
                     live_odds_col = "live_odds"
+
+                    # Korjaus D1: päivitä edge_pct live-kertoimilla kun saatavilla.
+                    # Aiemmin edge laskettiin vain win_odds_final:sta (koko data-tasolla),
+                    # mutta live-kerroin on tuoreempi ja informatiivisempi ennen lähtöä.
+                    if "win_prob" in rdf.columns and "edge_pct" in rdf.columns:
+                        live_valid = rdf["live_odds"].where(
+                            rdf["live_odds"] > 1.0, other=float("nan")
+                        )
+                        live_edge = (rdf["win_prob"] * live_valid - 1.0) * 100
+                        # Käytä live-kerrointa kun saatavilla; fallback win_odds_final-edgeen
+                        rdf["edge_pct"] = live_edge.where(
+                            live_valid.notna(), other=rdf["edge_pct"]
+                        )
                 else:
                     live_odds_col = None
 
