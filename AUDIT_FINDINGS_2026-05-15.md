@@ -1829,3 +1829,73 @@ Evaluointi: `evaluate_model.py` → Brier kaikki + V-peli.
 343 passed (aiempi 335, +8 TestDriverTrainerHsFeatures)
 Hetznerillä: 337 passed, 6 tunnettu ympäristövirhe (test_travsport)
 ```
+
+---
+
+## ✅ KOODARIRAPORTTI — Vaihe 6: Feature audit + 4 uutta piirrettä (16.5.2026)
+
+> Commit: `22562db` | Testit: 363 passed (+20) | Hetzner: 357 passed
+
+### Tausta
+
+Live-vertailu (Lähtö 11, A Fair Day 49.6% vs malli 23.5%) herätti kysymyksen:
+onko dataa jota emme hyödynnä? Tehtiin kattava feature audit.
+
+### Feature audit — löydökset
+
+Auditointi löysi **13+ piirrettä** jotka ovat laskettavissa olemassa olevasta
+datasta ilman yhtään uutta API-kutsua. Priorisoituna:
+
+| Tärkeys | Piirre | Lähde | Status |
+|---|---|---|---|
+| ⭐⭐⭐ | Starttipaikan vinouma/rata | runners | ✅ **TOTEUTETTU** |
+| ⭐⭐⭐ | Lepopäivien U-käyrä | horse_starts | ✅ **TOTEUTETTU** |
+| ⭐⭐⭐ | Kuski×rata win% | horse_starts | ✅ **TOTEUTETTU** |
+| ⭐⭐⭐ | Km-aikatrendi (slope) | horse_starts | 🔄 Vaihe 7 |
+| ⭐⭐ | Lähtötapa-preferenssi auto/voltti | horse_starts | ✅ **TOTEUTETTU** |
+| ⭐⭐ | Rataolosuhteiden vaikutus/hevonen | races+hs | 🔄 Vaihe 7 |
+| ⭐⭐ | Palkintosummatrendi (luokkanousu) | races+hs | 🔄 Vaihe 7 |
+| ⭐ | Form plateau (varianssi) | horse_starts | Myöhemmin |
+| ⭐ | Kenkä/sulky-muutosten historia | runners | Myöhemmin |
+
+---
+
+### Toteutetut piirteet
+
+**1. `start_position_win_rate`** — starttipaikan historiallinen voitto-% per rata
+- Lähde: `runners.start_number` × `races.track`
+- Globaali tilasto (ei point-in-time) koska data yhä kertyy backfillillä
+- NaN jos < 10 näytettä
+
+**2. `rest_days_bucket`** — lepopäivien U-käyrä (kategorinen)
+- `short` < 6 pv | `optimal` 6–21 pv | `long` 22–60 pv | `very_long` > 60 pv
+- Lisätty CATEGORICAL_COLS:iin (LightGBM käsittelee kategorisena)
+
+**3. `start_method_win_rate_diff`** — auto vs voltti preferenssi
+- `auto_win_rate - volte_win_rate` per hevonen 60 pv (point-in-time)
+- NaN jos < 3 starttia kummallakaan tavalla
+
+**4. `driver_track_win_rate_60d` + `trainer_track_win_rate_60d`**
+- Kuski×rata ja valmentaja×rata -yhdistelmän voitto-% 60 pv (point-in-time)
+- TRACKCODE_TO_NAME normalisointi (Travsport-koodit → ATG-nimet)
+- NaN jos < 3 starttia yhdistelmässä
+
+**FEATURE_COLS: 46 → 50 | CATEGORICAL_COLS: +1 (rest_days_bucket)**
+
+---
+
+### Backfill-status
+
+Historia-haku käynnissä Hetznerillä (PID 478580):
+- Haettu tähän mennessä: ~2023-01 → 2023-03 (~71+ päivää, ~18k runneria)
+- Arvioitu valmistuminen: ~26.5.2026
+- Retrain ajetaan kun backfill valmis
+
+---
+
+### Seuraava vaihe (Vaihe 7)
+
+Jäljellä olevat helpot piirteet olemassa olevasta datasta:
+- Km-aikatrendi (parantuuko vai heikkeneekö hevonen)
+- Rataolosuhteiden vaikutus per hevonen
+- Palkintosummatrendi (nouseeko luokka)
