@@ -31,6 +31,12 @@ korrelaatiosäätöä. Oikea toteutus: `[r * total_prob for r in raw]`.
 
 ## Avoimet — korjattava ennen seuraavaa uudelleentreenauksia
 
+*(Ei avoimia — kaikki seuraavaan treeniin vaikuttavat korjattu 16.5.2026)*
+
+---
+
+## Korjattu (16.5.2026)
+
 ### #15 · Kuski/valmentaja-nimiformaatti ei täsmää: ATG "Etunimi Sukunimi" vs. Travsport "Sukunimi Etunimi"
 
 **Havainto (16.5.2026):** `driver_win_rate_60d`, `driver_top3_rate_60d`, `trainer_win_rate_60d`,
@@ -61,7 +67,7 @@ hs["trainer"] = hs["trainer"].map(_normalize_name)
 **Vaikutus:** 6 piirrettä on tällä hetkellä täysin hyödyttömiä. Korjaus lisäisi
 merkittävää signaalia kuski- ja valmentajatilastoihin.
 
-**Prioriteetti:** korkea — korjaa ennen seuraavaa uudelleentreenauksia (~26.5.).
+**Korjattu:** 16.5.2026, commit `e4b2266` — `_normalize_driver_name()` + per-driver-iteraatio OOM-räjähdyksen estämiseksi.
 
 ---
 
@@ -84,7 +90,7 @@ WHERE (withdrawn IS NULL OR withdrawn != 1)
   AND (finish_position IS NULL OR finish_position != 99)
 ```
 
-**Prioriteetti:** korkea — korjaa ennen seuraavaa uudelleentreenauksia.
+**Korjattu:** 16.5.2026, commit `e4b2266` — kaikki 7 scriptiä päivitetty.
 
 ---
 
