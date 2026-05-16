@@ -473,6 +473,58 @@ auditoijan tarkistuksen tärkeimpiin tiedostoihin — odotamme sitä ennen jatko
 
 **Aikabudjetti jäljellä:** ~1–2 päivää (vaiheet 6–7)
 
+---
+
+### 🟡 Vaihe 3 — Parannukset #7 + #8 + #9 (auditoijan korjauslista)
+
+**Status:** 🟡 avoin, ~1 h yhteensä
+**Tausta:** Vaihe 2 (kriittiset bugit #1–#6) hyväksytty 15.5.2026. Parannukset
+#7–#9 ovat matalan prioriteetin mutta hyödyllisiä tehdä yhdessä committilla.
+
+Ohjeet: [`AUDIT_FINDINGS_2026-05-15.md`](AUDIT_FINDINGS_2026-05-15.md) →
+"KORJAUSLISTA — Vaihe 3 parannukset"
+
+| Parannus | Tiedosto | Aika |
+|---|---|---|
+| #7 — Distance bucket -rajat 1640/2140 → 1999/2599 | `build_features.py` (rivit 167, 294) | 10 min + testit |
+| #8 — `edge_decay_analysis` suodattaa tyhjät viikot ROI-modessa | `backtest.py` | 15 min + testit |
+| #9 — `renormalize_after_scratch` TODO Vaihe 6 docstring | `scratch_handler.py` | 5 min |
+
+Sitten Hetzner-deploy: `git pull` + restart-scheduler.
+
+---
+
+### 🆕 Vaihe D3 — Streamlit-dashboard (visuaalinen näkymä)
+
+**Status:** 🟡 uusi tehtävä, ~1 työpäivä
+**Tausta:** käyttäjän pyynnöstä 15.5.2026 — visuaalinen näkymä päivän
+ennusteille. Päätösperusteet ja koodirunko: [`docs/FRONTEND_DECISION.md`](docs/FRONTEND_DECISION.md).
+
+**Suositus:** Streamlit, ei Astro (alkuvaiheessa). Astro Vaihe 6:lle jos
+halutaan julkinen sivu.
+
+| Tehtävä | Aika |
+|---|---|
+| Lisää `streamlit` requirements.txt:hen | 1 min |
+| `src/dashboard/app.py` — perusrunko (~150 riviä, runko FRONTEND_DECISION.md:ssä) | 4–5 h |
+| Testaus: `streamlit run src/dashboard/app.py` lokaalisti | 30 min |
+| README.md: dashboard-osio | 15 min |
+| Smoke-testi Hetzner-datalla | 30 min |
+
+**UI-spesifikaatio:**
+
+- Sidebar: päivän valinta, V-pelilähdöt-checkbox, edge-kynnys-slider
+- Päänäkymä per V-pelikierros, per lähtö → taulukko:
+  - `# | Hevonen | P(win) % | Odds | Edge %`
+  - Value-pelit korostettuna värillä/⭐
+- Cache: `@st.cache_data(ttl=300)` ja `@st.cache_resource` mallin lataukseen
+
+**Tärkeä huomio:** dashboard on **tutkimuskäyttöön**, ei pelaamiseen.
+Mallin voittosignaali on edelleen 0.0023 vs. uniform — älä luota
+ennusteisiin rahapelipäätöksiin ennen Vaihe 5:n päätöskriteerit täyttyvät.
+
+---
+
 ### ✅ Vaihe C2 — Walk-forward-dokumentointi
 
 **Status:** ✅ valmis (15.5.2026)

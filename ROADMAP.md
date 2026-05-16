@@ -1,40 +1,59 @@
 # Ravit Edge — Roadmap
 
-## Nykytila (11.5.2026 — Vaihe 2 valmis + korjaukset, Vaihe 2.5 valmis)
-
-Datankeräys on pyörinyt tuotannossa 4.5.2026 alkaen. Feature engineering
--pipeline on valmis ja validoitu oikealla datalla. Mallin treenaukselle ei
-ole teknisiä esteitä.
-
-**Dataset (10.5.2026):**
-
-| Mittari | Arvo |
-|---|---|
-| Keräyspäiviä | 14 vrk (27.4 → 10.5.2026) |
-| Trot-lähtöjä | **356** (galloppi suodatettu) |
-| Trot-runnereita | **3 757** |
-| Koulutuskelpoiset rivit | **3 685** (fill_finish_positions jälkeen) |
-| Hevoshistoriastartteja | **103 747** (Travsport, 2014→) |
-| Odds-snapshotteja | **14 758** (T-15/10/5/2min + tulos) |
-| Testejä | **192** (kaikki vihreällä) |
-| Keräysvauhti | ~23 trot-lähtöä/vrk (lauantait ~35+) |
-
-**Piirteiden laatu (validoitu 10.5.2026):**
-
-| Piirre | NaN ilman horse_starts | NaN horse_starts kanssa |
-|---|---|---|
-| form_avg_finish_5 | 95 % | **11 %** |
-| form_win_rate_5 | 93 % | **11 %** |
-| atg_lifetime_win_rate | — | 4.5 % |
-| atg_driver_win_pct | — | 7.5 % |
+> Päivitetty 15.5.2026.
+> Vaiheet 1–3 + auditointikorjaukset + drift-monitorointi VALMIIT.
+> Tämänhetkinen tila ja avoimet tehtävät: [`TASK_PROGRESS.md`](TASK_PROGRESS.md).
 
 ---
 
-## Vaihe 1: Infrastruktuuri ✅ VALMIS
+## Strateginen fokus (15.5.2026 alkaen)
+
+Projekti keskittyy **V-pelilähtöihin** (V64, V75, V86, V5, V4, V3) koska
+niissä on Travrondenin pace-arvio (`start_interval_group`) ja paras
+markkinaliikkuvuus. Erottelu datapuolen ja ennustustuotannon välillä on
+olennainen:
+
+| Asia | Laajuus | Syy |
+|---|---|---|
+| **Datankeräys** | Kaikki SE-trottilähdöt | Treenidata, vakaampi malli |
+| **Mallin treenaus** | Kaikki lähdöt | Maksimoi otoskoko, LightGBM kestää NaN:n |
+| **Drift-monitorointi** | Kaikki lähdöt | Havaitsee bugit kaikissa lähteissä |
+| **Ennustetuotanto** | Vain V-pelilähdöt + pyynnöstä yksittäiset | Paras pre-race-data, paras markkina |
+| **Pelaaminen** | Single-win V-pelilähdöistä | Unibet/Betsson + Betfair Exchange |
+
+V-pelilähdöistä **ei pelata V-peliä** — pelataan single-win-markkinaa samoissa
+lähdöissä. Travronden tarjoaa vain paremman pre-race-näkemyksen.
+
+---
+
+## Nykytila (15.5.2026)
+
+Datankeräys on pyörinyt tuotannossa 4.5.2026 alkaen (18 vrk). Auditointi-
+korjaukset (K1 data leakage, M1, B1, B2) ovat tehtynä. Mallin baseline on
+treenattu ja drift-monitorointi tuotannossa. Vaihe D2 (Travronden pace-
+piirteet) on seuraava prioriteetti.
+
+**Dataset (14.5.2026):**
+
+| Mittari | Arvo |
+|---|---|
+| Keräyspäiviä | 18 vrk (27.4 → 14.5.2026) |
+| Trot-lähtöjä | **455** |
+| Trot-runnereita | **4 838** |
+| Hevoshistoriastartteja | **115 824** (Travsport) |
+| Hevosia (`horses`) | **4 114** (sire 100 %, dam_sire 34 %) |
+| Ratoja (`tracks`) | **30** (25 Travronden-rikkaita + 5 manuaalista stub) |
+| Testejä | **257** (lokaali) / 244 (Hetzner) |
+| Mallin Brier (rs=42) | **0.0818** (vs. uniform 0.0843) |
+| Voittosignaali | 0.0025 — pieni, **vaatii lisädataa** |
+
+---
+
+## Vaihe 1 — Infrastruktuuri ✅ VALMIS (4/2026)
 
 - ATG REST API -asiakas + Travsport WebAPI -asiakas
 - SQLite WAL-mode + skeemamigraatio
-- Scheduler: 4-vaiheinen snapshot-ajo per lähtö
+- Scheduler: 4-vaiheinen snapshot-ajo per lähtö (T-15/10/5/2min)
 - Result-haku T+30min + päivittäinen retry 04:30
 - CLV-tracker ja bankroll management
 - Hetzner CAX11, Helsinki + päivittäinen DB-backup, UFW, fail2ban
@@ -42,166 +61,243 @@ ole teknisiä esteitä.
 
 ---
 
-## Vaihe 2: Datankeräys + feature engineering ✅ VALMIS
-
-### Datankeräysjakso (27.4 – 10.5.2026)
+## Vaihe 2 — Datankeräys + feature engineering ✅ VALMIS (10.5.2026)
 
 - Shoes/sulky-piirteet (6 saraketta runners-tauluun)
 - Gallop-suodatus (Bro Park, Göteborg Galopp, Jägersro Galopp pois)
-- `retry_incomplete_results` cron 04:30 — km-ajat täydentyvät yön yli
-- Track condition Travsportista + race-luokka ATG:sta kaikille 356 lähdölle
-  (`race_min_earnings`, `race_max_earnings`, `race_age_group`, `track_condition`)
-
-### Feature engineering -pipeline (10.5.2026)
-
-Kaikki tehtiin ennen Vaihetta 3, testit jokaiselle muutokselle:
-
-| Muutos | Tiedosto | Vaikutus |
-|---|---|---|
-| FEATURE_COLS-nimet korjattu (blokkeri) | `ranker.py` | Olisi kaatunut KeyError:iin |
-| ATG-aggregaatit FEATURE_COLS:iin (9 piirrettä) | `ranker.py` | Koko vuoden ohjastaja/hevostilastot |
-| Shoes/sulky FEATURE_COLS:iin | `ranker.py` | Varustemutossignaali |
-| Race-luokka `race_setup_features()`:iin | `build_features.py` | Lähdön tason konteksti |
-| `derived_features()`: horse_age + barfota_law | `build_features.py` | Talvikiellon erottelu |
-| `form_features()` käyttää horse_starts (103k) | `build_features.py` | NaN 95 % → 11 % |
-| `fill_finish_positions()` — treeniesimerkit | `build_features.py` | 2 332 → 3 685 koulutuskelp. riviä |
-| Bugit #1, #5, #6, #8 korjattu | scheduler + build_features | Ks. KNOWN_ISSUES.md |
+- Race-luokka ATG:n terms-parsinta (min/max_earnings, age_group)
+- Track-condition Travsportista
+- Feature pipeline: form_features (103k starttia), driver_trainer_features,
+  race_setup_features, derived_features
 
 ---
 
-## Vaihe 2B: Korjaukset (11.5.2026) ✅ VALMIS
+## Vaihe 2B — Auditointikorjaukset ✅ VALMIS (10.5.2026)
 
-Ennen Vaihetta 3 korjattu auditoijan löytämät ongelmat:
+Auditoija (Claude Opus 4.7) löysi neljä merkittävää bugia. Kaikki korjattu.
 
-| Korjaus | Tiedosto | Tulos |
+| Bugi | Vaikutus | Korjaus |
 |---|---|---|
-| B1: Isotoninen regressio kalibroinnissa | `ranker.py` | Kalibrointi nyt monotoninen |
-| B2: `pedigree.grandfather` → `horses.dam_sire` | `scheduler.py` | 88 % notna (oli 0 %) |
-| B2: `backfill_dam_sire()` — ryhmästrategia | `scheduler.py` | 3 477 hevosta, 356 race-kutsua |
+| K1 | `fetch_results` ylikirjoitti ATG-aggregaatit post-race → data leakage | `_ensure_runner_exists()` + backfill 3 589 riviä |
+| M1 | `_upsert_race`/`_upsert_runner` ylikirjoittivat Nonella | `_set_if_not_none()` molempiin |
+| B1 | `race_setup_features`: Travsport-trackCode (`"S"`) ≠ ATG-nimi (`"Solvalla"`) | `track_codes.py` -mappi, 26 SE-rataa |
+| B2 | `form_features`: segmentoidut piirteet 100 % NaN tuotannossa | Pre-merge start_method+distance + Travsport-koodin normalisointi |
 
-Ks. tarkemmin: `docs/TASK_PLAN_FIXES.md` ja `TASK_PROGRESS.md`.
+Lisäksi: `pedigree.grandfather → horses.dam_sire` (oli `mothersFather`, väärä
+avain), `backfill_dam_sire()` täytti 3 477 hevosen dam_sire-kentän.
+
+Yksityiskohdat: [`docs/TASK_PLAN_FIXES.md`](docs/TASK_PLAN_FIXES.md).
 
 ---
 
-## Vaihe 2.5: Ratarakenne-piirteet ✅ VALMIS
+## Vaihe 2.5 — Ratarakenne-piirteet ✅ VALMIS (11.5.2026)
 
-Track-piirteet antavat mallin oppia ratafysiikan vaikutukset automaattisesti.
+Travrondenspel-API:n `round.tracks`-objektista 7 staattista rakennepiirrettä:
 
-| Tehtävä | Status | Kuvaus |
-|---|---|---|
-| A: `Track`-luokka schemaan | ✅ VALMIS | 19 saraketta, `tracks`-taulu |
-| B: Travronden-scraper | ✅ VALMIS| `src/data/scrapers/travronden_tracks.py` |
-| C: Validointi (Wikipedia) | ✅ VALMIS| 3–5 rataa vertaillaan |
-| D: `track_structure_features()` | ✅ VALMIS| Lisätään `build_features.py` + `FEATURE_COLS` |
-| E: Smoke test | ✅ VALMIS | `track_length_total notna% >= 95` |
+| Tehtävä | Tila |
+|---|---|
+| A: `Track`-luokka schemaan (19 saraketta) | ✅ |
+| B: Travronden-scraper + CLI (`fetch-track-structures`) | ✅ |
+| C: Sanity-tarkistukset (kattavuus + arvoalueet, Wikipedia-validointi hylätty liiallisena) | ✅ |
+| D: `track_structure_features()` + 7 piirrettä FEATURE_COLS:iin | ✅ |
+| E: Smoke-testi (`track_length_total notna% = 90.0 %`) | ✅ |
 
-Ks. tarkemmin: `docs/TASK_TRACK_FEATURES.md` ja `TASK_PROGRESS.md` (VAIHE 2.5).
+Yksityiskohdat: [`docs/TASK_TRACK_FEATURES.md`](docs/TASK_TRACK_FEATURES.md).
 
 ---
 
-## Vaihe 3: Mallin prototyyppi 🟡 VOI ALOITTAA NYT
+## Vaihe 3 — Mallin baseline ✅ VALMIS (14.5.2026)
 
-Ei odoteta kesäkuuhun — data riittää prototyyppiin jo nyt.
-
-**Workflow:**
+**Workflow vakiintunut:**
 
 ```python
-# 1. Lataa data
-runners  = pd.read_sql("SELECT r.*, ra.race_date FROM runners r JOIN races ra ...", con)
-races    = pd.read_sql("SELECT * FROM races", con)
-horse_starts = pd.read_sql(
-    "SELECT * FROM horse_starts WHERE withdrawn != 1 AND finish_position != 99 ...", con
+runners = pd.read_sql("""
+    SELECT r.*, ra.race_date, h.birth_year
+    FROM runners r
+    JOIN races ra ON r.race_id = ra.race_id
+    LEFT JOIN horses h ON r.horse_id = h.horse_id
+""", con)
+features = build_feature_matrix(
+    fill_finish_positions(runners), races,
+    horse_starts=horse_starts, horses=horses, tracks=tracks,
 )
-
-# 2. Esikäsittely
-runners_filled = fill_finish_positions(runners)
-features = build_feature_matrix(runners_filled, races, horse_starts=horse_starts)
-
-# 3. Walk-forward split (ei random — data leakage)
-train = features[features["race_date"] < "2026-05-05"]
-test  = features[features["race_date"] >= "2026-05-05"]
-
-# 4. Treenaa
-model = train_ranker(train)
-
-# 5. Arvioi
-predictions = predict_win_probabilities(model, test)
-# → calibration table, NDCG@1, NDCG@3
+model = train_ranker(train_df, random_state=42)
 ```
 
-**Tavoitteet vaiheessa 3:**
+**Tärkeimmät tutkimustulokset:**
 
-- [ ] Walk-forward treenaus + evaluointi (NDCG, kalibrointitaulu)
-- [ ] Piirteiden tärkeysjärjestys (LightGBM feature importance)
-- [ ] `horse_age` — lisää birth_year JOIN runners-dataan (horses-taulu)
-- [ ] Mallin tallennus ja lataus (`save_model` / `load_model`)
-- [ ] Ennuste tuleville lähdöille + value-bet-detektio
+- **Sire-piirteet eivät paranna mallia** (Brier delta +0.0005 LOO-korjauksen
+  jälkeen) → kommentoitu pois FEATURE_COLS:ista, palautetaan ~7.7.2026
+- **`form_market_avg_5`-ablation** vahvisti markkina-arvio sisältää aitoa
+  signaalia (Brier +0.0003 ilman sitä) — ei pelkkä korrelointi muiden kanssa
+- **Brier 0.0818 vs. uniform 0.0843** → voittosignaali 0.0025, pieni mutta
+  positiivinen — **älä tee tuotantopäätöstä alle 8 vk:n datalla**
 
-**Tunnetut rajoitukset nyt:**
+**Vaiheen 3 jälkitehtävät tehty:**
+- `compute_nll()`, `calibrate_isotonic()`, `apply_isotonic()` lisätty
+- `rolling_walk_forward()` 14 vrk -ikkunalla
+- `edge_decay_analysis()` tukee Brier-scorea (ei vain ROI)
+- `random_state`-parametri `train_ranker`:iin (reproducibility)
 
-- 356 lähtöä on vähän — prototyyppi, ei tuotantomalli
-- `track_horse_win_rate` on 97.5 % NaN (vain 14 pv dataa samalta radalta)
-- `driver_win_rate_365d` on 35 % NaN (ATG:n valmis aggregaatti on parempi tässä vaiheessa)
-- Malli paranee automaattisesti kun keräys jatkuu
-
-**⏰ Aikataulutetut muistutukset (lisätty auditoijan suosituksesta 14.5.2026):**
-
-- **rolling_walk_forward ajetaan ~2026-06-08** — vaatii vähintään 42 vrk dataa
-  (28 vrk treeni + 14 vrk testi-ikkuna). Stop/go-päätös vasta 8 viikon
-  yhteistuloksesta (C2-vaatimus).
-- **28+56 train_window_days -ablation ajetaan ~2026-07-01** — vaatii 56 vrk dataa
-  ennen kuin 56-vrk treenijoukkoa voidaan edes muodostaa.
+Mallitiedosto: `data/model_baseline_20260514.lgb` (Hetzner).
 
 ---
 
-## Vaihe 4: Backtest + paperitestaus (2–4 viikkoa V3:n jälkeen)
+## Vaihe C1 — Drift-monitorointi ✅ VALMIS (14.5.2026)
 
-- Walk-forward backtest viimeisten viikkojen datalla
-- Paperitestauksen aloitus elävillä lähdöillä (ei rahaa)
+Tuotannossa: sunnuntaisin 02:00 (Hetzner cron) ajetaan `scripts/run_feature_drift.py`.
+
+- Per-piirre mean/std/p25/p50/p75/NaN-% kaikille FEATURE_COLS:n piirteille
+- Vertaa edelliseen historiaan, hälytys jos NaN-% +10pp tai mean/p50 yli 2σ
+- Alle 3 vk historaa: raw 20 % raja
+- K1-tyyppinen leakage havaitaan **viikossa** (testattu yksikkötesteillä)
+- 15 testiä, kaikki passing
+
+Lokit: `data/logs/feature_drift_YYYY-WW.csv` + `drift_cron.log`.
+
+---
+
+## Vaihe D1 — Travronden Vaihe 1 -selvitys ✅ VALMIS (14.5.2026)
+
+Tutkittu 18 finished-kierrosta. Kriittiset löydökset:
+
+- **`speed`-kenttä on POST-RACE km-aika**, ei pre-race ennuste → ei käytetä
+  piirteenä (leakage-riski)
+- **`rating`-kenttä 0 % täytetty** → ei saatavilla
+- **`start_interval_group {1, 11, 21, 31}`** — asiantuntijan per-hevonen, per-
+  lähtö **pace-arvio**. Tämä on **lähinnä pace-piirrettä mitä saadaan ilman
+  manuaalista scrapingia**. C3:n korvike.
+
+Yksityiskohdat: [`docs/TASK_TRAVRONDEN_INVESTIGATION.md`](docs/TASK_TRAVRONDEN_INVESTIGATION.md).
+
+---
+
+## Vaihe D2 — Travronden pre-race-piirteet 🟡 SEURAAVA (viikon sisällä)
+
+Pace-piirteen integrointi V-pelilähtöihin.
+
+### Tekninen toteutus
+
+1. **`src/data/scrapers/travronden.py`** — HTTP-asiakas
+   - Cache `data/raw/travronden/{round,race}_{id}.json`, 30 vrk TTL
+   - Rate limit 1 req/s, rehellinen User-Agent
+   - Smart-skip: jos kaikki kierroksen legit ovat täytetyt cachessa, ei uudelleenpyyntöä
+
+2. **`src/features/travronden_features.py`** — vain pre-race-kentät
+   - `tr_start_interval_group` (pace-arvio 1/11/21/31) ⭐⭐⭐
+   - `tr_is_first_after_castration/new_driver/new_trainer/shoes/carriage`
+   - `tr_speed_record_k/m/l` (rikkaampi kuin atg_best_km_for_this_setup)
+   - `tr_expected_odds`, `tr_game_percent_v`
+   - **EI:** `speed` ja `comment` (post-race, leakage-riski)
+
+3. **Pollaus-aikataulu** — scheduler-cron, Stockholm-aika:
+
+   | Päivä | Ajat | Perustelu |
+   |---|---|---|
+   | Ma–Pe | 15:00, 17:00 | ATG-lähdöt alkavat 18:00–19:00 |
+   | Lauantai | 09:00, 11:00, 13:00 | V75 alkaa usein 14:30 |
+   | Sunnuntai | 10:00, 12:00 | V75 alkaa ~15:00 |
+
+   Pollaus discoveroi päivän round_id:t, hakee jokaisen kierroksen legit,
+   tallentaa `start_interval_group`:n DB:hen. Cache estää uudelleenpyynnöt.
+
+4. **100-kierroksen pilotti** — A/B-vertailu Vaihe 3:n baseline-malliin
+   - A: nykyinen malli (41 piirrettä, `random_state=42`, Brier 0.0818)
+   - B: nykyinen + tr_*-piirteet (~48 piirrettä)
+
+5. **Päätös:** paranema **ΔBrier ≤ -0.005** → tuotantointegraatio. Pieni
+   paranema → kerää lisää. Negatiivinen → hylkää, dokumentoi syyt.
+
+Aikabudjetti: 3–5 päivää.
+
+### V-pelilähtöjen tunnistus
+
+Travrondenin `round.legs[].race` → ATG race_id mappaus tehdään
+`(race_date, track, race_number)`-avaimella. Tallenna `runners.is_v_race`
+boolean tai erillinen `v_pool_races`-näkymä päivittäin päivittyvänä.
+
+---
+
+## Vaihe 4 — Backtest + paperitestaus ⏸ (~3.6.2026, kun 42+ vrk dataa)
+
+- `rolling_walk_forward()` 14 vrk -ikkunalla
+- Paperitestauksen aloitus **V-pelilähdöistä** (ei rahaa)
   - Kirjaa value-pelit, älä pelaa
   - Tallenna T-2min kerroin pelihetkenä, vertaa closing odds:iin
 - CLV-mittaus ATG-devig-laskennalla
-- Tavoite: vähintään 100 paperipeliä ennen päätöstä
+- Tavoite: vähintään 100 paperipeliä **V-pelilähdöistä** ennen päätöstä
+
+> **Huom:** paperitestaus rajataan V-pelilähtöihin koska niissä on paras
+> pre-race-data (Travronden) ja paras likviditeetti pelivaiheessa.
 
 ---
 
-## Vaihe 5: Päätöspiste (~8 viikkoa V3:n käynnistymisestä)
+## Vaihe 5 — Päätöspiste ⏸ (~7.7.2026)
 
-| Lopputulos | CLV | Toimenpide |
-|---|---|---|
-| **A: Edge todistettu** | +3 % tai enemmän, n>100 | Siirry V6 pienillä rahoilla |
-| **B: Edge epäselvä** | -2 % – +3 %, kohinaa | Lisää 4 vk dataa, treenaa uudelleen |
-| **C: Ei edgea** | alle -2 % | Pysähdy, tutki bugit, älä pelaa |
+**Vaatii vähintään 8 viikkoa walk-forward-dataa** ennen mitään stop/go-päätöstä.
+Trotissa on kausivaihtelua (talvi/kesä, ratakelit) joka ei näy lyhyemmässä
+ikkunassa.
 
-Useimmat ML-vedonlyöntiprojektit eivät pääse tähän vaiheeseen
-positiivisella lopputuloksella — rehellinen näkymä, ei pessimismiä.
+| Lopputulos | CLV | n | Toimenpide |
+|---|---|---|---|
+| **A: Edge todistettu** | +3 % tai enemmän | ≥ 200 | Siirry V6 pienillä rahoilla |
+| **B: Edge epäselvä** | -2 % – +3 % | ≥ 200 | Lisää 4 vk dataa, treenaa uudelleen |
+| **C: Ei edgea** | alle -2 % | ≥ 200 | Pysähdy, tutki bugit, älä pelaa |
+| **D: Liian vähän dataa** | mikä tahansa | < 200 | **Älä tee päätöstä — odota** |
+
+Useimmat ML-vedonlyöntiprojektit eivät pääse tähän vaiheeseen positiivisella
+lopputuloksella — rehellinen näkymä, ei pessimismiä.
 
 ---
 
-## Vaihe 6 (vain jos edge todistettu): Pelaaminen pienillä rahoilla
+## Vaihe 6 (vain jos edge todistettu) — Pelaaminen pienillä rahoilla
 
-- Streamlit-dashboard päivän lähdöistä
-- Manuaalinen pelaaminen 1–5 € panoksiin
+- Streamlit-dashboard **V-pelilähdöistä** (default-näkymä)
+  - Filter: "näytä kaikki" -toggle ei-V-pelilähdöille tarvittaessa
+- Manuaalinen pelaaminen 1–5 € panoksiin single-win-markkinaan
 - 4–8 viikkoa CLV-seurantaa oikealla rahalla
 - 200–300+ peliä tilastollisesti merkittävään lopputulokseen
-- Korjattava ennen V6: `correlated_kelly_adjust` (ks. KNOWN_ISSUES.md #7)
+- Korjattava ennen V6: `correlated_kelly_adjust` (KNOWN_ISSUES.md #7)
+
+V-pelilähdöistä ei pelata V-peliä (multi-leg-tuotteita) — pelataan
+yksittäisten lähtöjen voittajamarkkinaa fixed-odds-vedonvälittäjillä.
 
 ---
 
-## Vaihe 7 (vain jos pelaaminen tuottavaa): Skaalaus
+## Vaihe 7 (vain jos pelaaminen tuottavaa) — Skaalaus
 
 - Betfair Exchange -integraatio (tutki likviditeetti ensin)
 - Persistentit job-storet (`SQLAlchemyJobStore`) scheduler-restartteja varten
 - Sharp-markkinakertoimet (Pinnacle/Betfair) CLV-vertailuun — skeema valmis
-- Telegram/email-alert kun value-peli löytyy
+- Telegram/email-alert **vain V-pelilähdöistä** kun value-peli löytyy
+- Tuotantotreenissä **ensemble 5–10 random_state-seedillä** vähentää
+  yksittäisen ajon kohinaa
+
+---
+
+## Aikataulutetut muistutukset
+
+| Päiväys | Tehtävä | Lähde |
+|---|---|---|
+| Heti | Vaihe D2 (Travronden pace-piirteet) | TASK_PROGRESS.md |
+| ~6.6.2026 | `rolling_walk_forward` ajo, 42+ vrk dataa kerätty | Vaihe 3 |
+| ~1.7.2026 | `train_window_days` 28 vs. 56 -ablation | Vaihe 3 |
+| ~7.7.2026 | **Sire-piirteiden palautus** + uusi ablation | KNOWN_ISSUES #13 |
+| ~7.7.2026 | **Vaihe 5 päätöspiste** (jos n ≥ 200) | Vaihe 5 |
+| ~1.9.2026 | **K1-pollutoitujen kenttien palautus** | KNOWN_ISSUES #11 |
 
 ---
 
 ## Pitkän tähtäimen visio
 
-- **Pace-piirteet:** position_at_800m ei saada ATG:n eikä Travsportin API:sta
-  nykymuodossaan. Vaatii erillisen tutkimuksen tai web-scrapingin.
+- **Pace-piirre** — ratkaistu Travronden `start_interval_group`-kentällä
+  (Vaihe D2 vahvistaa). C3-manuaaliscraping ei enää tarvittavissa.
+- **V-pelilähtöjen fokus** — pace-piirre kattaa vain V-pelilähdöt;
+  laajempi pace-piirre vaatisi manuaalisen scrapingin Travsportin
+  raviraporteista (suunniteltu vain jos V-pelipelaaminen tuottava)
 - **Sää-integraatio:** Open-Meteo — rata × sade × hevosen rata-kokemus
+- **Sukutaulupiirteet** — `horses.sire` + `horses.dam_sire` 100 %/34 % notna;
+  aktivoidaan ~7.7.2026 jos ablation osoittaa parannuksen
 - **Conditional logit / Plackett-Luce** trifecta-todennäköisyyksille
 - **Postgres** jos DB kasvaa yli 500 MB
-- **Sukutaulupiirteet** (isä/emänisä kerätty — `horses.sire` + `horses.dam_sire` 88 % notna; tilastoanalyysi tulevaisuudessa)
+- **Ensemble-treenaus** Vaihe 7 — useita random_state-seedejä → keskiarvoennusteet

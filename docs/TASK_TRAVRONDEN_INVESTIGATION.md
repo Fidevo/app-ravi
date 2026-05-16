@@ -1,53 +1,73 @@
-# Travrondenspel.se API — per-runner-analytiikkapilotti
+# Travrondenspel.se API — per-runner-pilotti
 
-> Auditoija: Claude (Opus 4.7), 10.5.2026 (päivitetty samana päivänä)
-> Tilanne: empiirinen tutkimus tehty, API on käyttökelpoinen
+> Päivitetty: 15.5.2026. Vaihe 1 (selvitys) tehty 14.5.2026.
+> Vaihe 2 (rakentaminen) on **seuraava prioriteetti** — viikon sisällä.
 >
-> **⚠ PRIORITEETTIMUUTOS:** Tämä tiedosto käsittelee per-runner-analytiikkaa
-> (rating/speed/comment). Käyttäjän palautteen perusteella **rata-piirteet
-> ovat tärkeämmät** — tee ensin **[TASK_TRACK_FEATURES.md](TASK_TRACK_FEATURES.md)**.
+> **Tila:** Vaihe 1 paljasti **start_interval_group**-kentän pace-arviona.
+> Tämä on lähinnä pace-piirrettä mitä saadaan ilman manuaalista scrapingia
+> ja tekee Vaihe 2:sta tärkeän — todennäköisesti **korvaa C3:n** (manuaalinen
+> pace-pilotti) kokonaan.
 >
-> Tämä tiedosto jää kakkostasoiseksi pilotiksi joka tehdään Vaiheen 3
-> ensimmäisten treenausten jälkeen, kun nähdään mitä mallista vielä puuttuu.
->
-> **ToS-tarkennus:** URL-polku sisältää literaalisti `/public/` — endpoint
-> on suunniteltu julkiseksi. Aiempi ohjeen ToS-paranoia oli liiallinen.
-> Käytetään rehellistä User-Agentia, 1 req/s, ei piiloutumista. Sama linja
-> kuin nykyisellä ATG/Travsport-keräyksellä.
+> **ToS:** URL-polku sisältää literaalisti `/public/` — endpoint on
+> suunniteltu julkiseksi. Rate limit 1 req/s, rehellinen User-Agent
+> (`"ravit-edge research (jarkkom.lahde@gmail.com)"`).
 
 ---
 
-## TL;DR
+## Vaihe 1 -tutkimustulokset (14.5.2026) ✅
 
-Travrondenspel.se:n julkinen API tarjoaa per-hevoselle dataa, jota nykyiset
-ATG- ja Travsport-rajapinnat eivät anna:
+Tutkittu **18 finished-kierrosta** (round_id 166000–171800), 40 runner-riviä
+analysoitu. Kenttien todellinen täyttöaste:
 
-**Varmasti saatavilla (vahvistettu live-pyynnöllä):**
-- `is_first_new_driver`, `is_first_new_trainer` — ohjastajan/valmentajan vaihtosignaali
-- `is_first_after_castration` — 1. startti kuohitsemisen jälkeen (tunnettu prediktiivinen signaali)
-- `is_first_shoes`, `is_first_carriage` — varustevaihtosignaali "first time"-semantiikalla
-- `start_interval_group` — mystinen intervalliryhmä (todennäköisesti pace-luokitus, vahvistettava)
-- `game_percent` — reaaliaikainen pelijakauma per V-peli (esim. V64-prosentti)
-- `horse.speed_records.{K,M,L}` — kilometriaikaennätykset eri matkaluokille
-- `horse.totals` — koko uran tilastot (starts, place1/2/3, percentWin, earnings)
-- Mahdollinen yhdistäjä: `horse.atg_id` ↔ meidän `horse_id`
+### Pre-race-kentät — käyttökelpoisia ✅
 
-**Mahdollisesti saatavilla — tarkistettava vanhalla kierroksella:**
-- `rating` — Travrondenin asiantuntijaluokitus
-- `speed` — pace/lähtövauhti-arvio (jos tämä on int 1–5 tai vastaava, tämä on **#1 odotettu piirre**)
-- `comment` — vapaateksti-kommentti
-- `interviews` — kuski/valmentajahaastattelut
+| Kenttä | Täyttö% | Tyyppi | Hyödyllisyys |
+|---|---|---|---|
+| **`start_interval_group`** | **~60 %** | int (1/11/21/31) | ⭐⭐⭐ **asiantuntijan per-hevonen pace-arvio** |
+| `is_first_after_castration` | ~100 % | bool | ⭐⭐ tunnettu prediktiivinen signaali |
+| `is_first_new_driver` | ~100 % | bool | ⭐⭐ vaihtosignaali |
+| `is_first_new_trainer` | ~100 % | bool | ⭐⭐ vaihtosignaali |
+| `is_first_shoes` | ~100 % | bool | ⭐ varustemuutos |
+| `is_first_carriage` | ~100 % | bool | ⭐ varustemuutos |
+| `game_percent.ATG.V*` | ~100 % V-peleillä | int×100 | ⭐ markkinasentimentti |
+| `horse.speed_records.{K,M,L}` | ~70 % | dict | ⭐⭐ rikkaampi kuin atg_best_km_for_this_setup |
+| `expected_odds` | 47.5 % | int×100 | ⭐ markkina-arvio toiselta lähteeltä |
 
-Yllä olevat olivat `None` testaamamme **upcoming**-statuksen kierroksen
-kohdalla — todennäköisesti täytetty vasta kun Travrondenin asiantuntijat
-ovat julkaisseet analyysinsa (esim. 24 h ennen lähtöä).
+### Ei käyttökelpoisia ❌
 
-**Kattavuus:** Travrondenspel kattaa vain V-pelien kierrokset (V64, V75,
-V86, V5, V3, V4). Arviolta 40–60 % päivän SE-lähdöistä. **Ei sovellu
-ensisijaiseksi lähteeksi** mutta voi täydentää.
+| Kenttä | Tulos | Syy |
+|---|---|---|
+| **`speed`** | post-race km-aika | **LEAKAGE-RISKI** — `speed == speed_records.M.speed` samana päivänä |
+| `comment` | post-race teksti | Jälkikommentti ("Ledn, släppte e 400...") — vain NLP-tarpeisiin |
+| `rating` | 0 % täytetty | Ei saatavilla edes finished-kierroksilla |
+| `interviews` | 0 % täytetty | Ei saatavilla |
+| `ranking`, `preliminary_equipment` | 0 % täytetty | Ei saatavilla |
 
-**Riskit:** dokumentoimaton kolmannen osapuolen API → voi muuttua tai
-kaatua varoittamatta. ToS-tarkistus tehtävä ennen käyttöä.
+### `start_interval_group` -tulkinta vahvistettu (tulkinta c)
+
+Sama hevonen voi saada **eri ryhmän eri kierroksilla** (esim. atg_id=764491:
+group=1 kierroksella 171600, group=31 kierroksella 171100). Tämä **ei ole
+hevosen kiinteä ominaisuus** — se on Travrondenin asiantuntijoiden
+**per-hevonen, per-lähtö pace-arvio** joka huomioi lähtöradan, vastustajat,
+distan ja muut tekijät.
+
+Arvot: 1 (nopein) / 11 / 21 / 31 (hitain) — 4-portainen pace-luokitus.
+
+**Tämä on lähinnä pace-piirre mitä saadaan ilman manuaalista raviraportti-
+scrapingia.** Korvaa todennäköisesti C3-vaiheen.
+
+### Kattavuus
+
+Travrondenspel kattaa V-pelien kierrokset (V64, V75, V86, V5, V3, V4) —
+**40–60 % päivän SE-lähdöistä**. LightGBM hoitaa NaN automaattisesti,
+mutta pace-piirre toimii vain noissa lähdöissä.
+
+### Riskit
+
+- Dokumentoimaton kolmannen osapuolen API → voi muuttua varoittamatta
+- ~40 % päivän lähdöistä saa NaN — ei kriittistä mutta pace-piirre
+  toimii vain osalle
+- `speed` ja `comment` ovat post-race — **ehdoton kielto piirteinä**
 
 ---
 
@@ -186,74 +206,141 @@ T-1h ennen lähtöä) jotta tämä on suljettu pois.
 
 ## 3. Strategia — vaiheittainen pilotti
 
-**Älä integroi tuotantoon ennen vaiheita 1–3.** Resurssit eivät riitä
-debuggaamaan kahta integraatiota yhtä aikaa.
+### Vaihe 1 — Selvitys ✅ VALMIS (14.5.2026)
 
-### Vaihe 1 — Selvitä mikä on todella saatavilla (1–2 h, ~20 API-kutsua)
+Tulokset ylhäällä otsikossa "Vaihe 1 -tutkimustulokset". `speed` osoittautui
+post-race-kentäksi (leakage-riski), `rating`/`interviews` olivat 0 % täytettyjä,
+mutta `start_interval_group` paljastui asiantuntijan pace-arvioksi.
+Implementointiskripti: `scripts/travronden_vaihe1.py`.
 
-**Tehtävä:** Hae 3–5 **vanhaa, päättynyttä** round_id:tä ja vahvista:
-1. Onko `rating`, `speed`, `comment`, `interviews` täytetty? Mitä tyyppiä?
-2. Mikä on `start_interval_group`:n skaalan tarkoitus?
-3. Onko `previous_starts` rakenne haittakelpoinen vai pre-race-vaarallinen?
-4. Mikä on `round.status`-arvojen elinkaari (`upcoming → analysed → finished`)?
+### Vaihe 2 — Pilotti + polling-tuotantointegraatio 🟡 SEURAAVA
 
-**Miten löytää vanhoja round_id:tä:**
-- Devtoolsista: navigoi travrondenspel.se → mene vanhaan päivään → katso
-  XHR-pyynnöt. Round_id näkyy URL:eissa.
-- Tai inkrementaalisesti: 171922 on 11.5.2026 V64 Färjestad. Aja peräkkäisiä
-  alempia ID-arvoja (171800, 171000) varovaisesti — joka 5. ID toimii
-  todennäköisesti.
-
-**Tehtäväkonteksti:**
-```bash
-# rate limit 1 req/s — 20 kutsua = 20 s
-python -c "
-import requests, json, time
-hdrs = {'User-Agent': 'ravit-edge research (jarkkom.lahde@gmail.com)'}
-for rid in [171800, 171500, 171000, 170500, 170000]:
-    r = requests.get(f'https://www.travrondenspel.se/api/v1/public/round/{rid}/', headers=hdrs, timeout=10)
-    if r.status_code != 200:
-        print(f'{rid}: {r.status_code}'); continue
-    d = r.json()
-    print(f'round={rid} status={d.get(\"status\")} date={d.get(\"round_date\")} legs={len(d.get(\"legs\",[]))}')
-    if d.get('status') in ('analysed','finished') and d['legs']:
-        rcid = d['legs'][0]['race']
-        time.sleep(1)
-        rr = requests.get(f'https://www.travrondenspel.se/api/v1/public/race/{rcid}/', headers=hdrs).json()
-        if rr.get('starts'):
-            s = rr['starts'][0]
-            print(f'  race={rcid} start[0] rating={s.get(\"rating\")} speed={s.get(\"speed\")} comment={(s.get(\"comment\") or \"\")[:60]!r} interviews={len(s.get(\"interviews\") or [])}')
-    time.sleep(1)
-"
-```
-
-**Päätös vaiheen 1 jälkeen:**
-- Jos `speed` on numeerinen ja `rating` täytetty vanhoilla kierroksilla → **jatka vaiheeseen 2** (rakenna pilotti).
-- Jos kaikki ovat None myös valmiilla kierroksilla → **vain "varmasti saatavilla" -kentät** ovat hyötyä (luettelo 1.4). Päätä erikseen onko se yksin tarpeeksi.
-
-### Vaihe 2 — Pilotti: 100 lähdön data + treeniaja vertailu (1 viikko)
-
-**Tehtävä:** Kerää 100 vanhaa lähtöä Travrondenista ja vertaa treenitulokset
-piirteen kanssa ja ilman.
+**Tehtävä:** Kerää 100 vanhaa lähtöä Travrondenista, rakenna polling-pohjainen
+tuotantointegraatio ja vertaa treenitulokset piirteen kanssa ja ilman.
+Vaihe 1 vahvisti että `start_interval_group` on asiantuntijan pace-arvio —
+sen lisääminen on tämän pilotin pääarvo.
 
 **Tekniset askeleet:**
-1. Lisää `src/data/scrapers/travronden.py` — yksinkertainen client cache:lla
-2. Lisää `data/raw/travronden/round_<id>.json` ja `race_<id>.json` cacheen
-3. Aja kerääjä 100 round-kierrokselle (~10 lähtöä/kierros = 1 000 runneria)
-4. Lisää `travronden_features()` `build_features.py`:hyn
-5. Treenaa kaksi mallia: (a) ilman travronden-piirteitä, (b) niiden kanssa
-6. Vertaa NDCG@1, NDCG@3, log-loss
 
-**Päätös vaiheen 2 jälkeen:**
-- ΔNDCG@1 > 0.02 → integroi tuotantoon (vaihe 3)
-- 0.005 < ΔNDCG@1 < 0.02 → kerää lisää, älä vielä integroi
-- ΔNDCG@1 < 0.005 → hylkää, dokumentoi, siirry pace-pilottiin (C3)
+#### 2A — Scraper + cache
 
-### Vaihe 3 — Tuotantointegraatio (vain jos vaihe 2 on positiivinen)
+1. Rakenna `src/data/scrapers/travronden.py` — client cache:lla
+   - **Cache 30 vrk TTL**, rate limit 1 req/s, rehellinen User-Agent
+   - Smart-skip: jos kierroksen kaikkien legien tracks-race-objektit on
+     täytettyjä (`start_interval_group` ei-None), ohita uudelleenpyyntö
+   - Tiedostot: `data/raw/travronden/round_<id>.json`, `race_<id>.json`
 
-Lisää travronden-haku scheduler-jobiin. Aika: T-1h ennen lähtöä (analyysit
-julkaistu) tai T-15min (varmuusmarginaali). Lisää uusi taulu
-`runner_travronden_stats`. Vaiheittainen rollout.
+2. **Polling-aikataulu** (cron `run_forever`:iin, Stockholm-aika):
+
+   | Päivä | Pollausajat | Tausta |
+   |---|---|---|
+   | Ma–Pe | 15:00, 17:00 | ATG-lähdöt 18:00–19:00 |
+   | Lauantai | 09:00, 11:00, 13:00 | V75 alkaa usein 14:30 |
+   | Sunnuntai | 10:00, 12:00 | V75 alkaa ~15:00 |
+
+   APScheduler-konfiguraatio:
+   ```python
+   scheduler.add_job(
+       poll_travronden_today,
+       trigger=CronTrigger(
+           day_of_week="mon-fri", hour="15,17",
+           timezone=ATG_TZ,
+       ),
+       id="travronden_poll_weekday",
+       misfire_grace_time=1800,
+   )
+   # + sat 9,11,13 + sun 10,12 erillisinä jobeina
+   ```
+
+3. **Pollauksen logiikka** (`poll_travronden_today`):
+   ```python
+   def poll_travronden_today(db_path: str = DB_PATH) -> dict:
+       today = datetime.now(ATG_TZ).date()
+       round_ids = discover_today_rounds(today)  # cache-haku tai pieni skannaus
+       updated = 0
+       for rid in round_ids:
+           round_obj = client.get_round(rid)  # cache-aware
+           if round_obj.get("status") in ("upcoming",):
+               continue  # analyysit ei vielä julkaistu
+           for leg in round_obj.get("legs", []):
+               race_obj = client.get_race(leg["race"])
+               # Tallenna tr_*-piirteet runners-tauluun
+               updated += upsert_travronden_features(session, race_obj)
+       return {"rounds": len(round_ids), "rows_updated": updated}
+   ```
+
+   `discover_today_rounds`:
+   - Yritä ensin cachen `round_<id>.json`-tiedostoja → suodata `round_date == today`
+   - Jos ei mitään → skannaa pieni alue tunnetusta uusimmasta round_id:stä
+     (~5–10 pyyntöä per päivä)
+
+#### 2B — Schema + feature-pipeline
+
+4. **Schema-laajennus** (`src/data/schema.py`) — lisää `_COLUMN_MIGRATIONS["runners"]`:
+   ```python
+   ("tr_start_interval_group", "INTEGER"),
+   ("tr_is_first_after_castration", "BOOLEAN"),
+   ("tr_is_first_new_driver", "BOOLEAN"),
+   ("tr_is_first_new_trainer", "BOOLEAN"),
+   ("tr_is_first_shoes", "BOOLEAN"),
+   ("tr_is_first_carriage", "BOOLEAN"),
+   ("tr_speed_record_k", "REAL"),
+   ("tr_speed_record_m", "REAL"),
+   ("tr_speed_record_l", "REAL"),
+   ("tr_expected_odds", "REAL"),
+   ("tr_game_percent_v", "REAL"),
+   ("is_v_race", "BOOLEAN"),   # V-pelilähdön tunnistin
+   ```
+
+5. **`src/features/travronden_features.py`** — pre-race-kentät runners:iin
+   (kuten dokumentin osa 4.2 ehdottaa, mutta `tr_*`-piirteet ovat jo
+   `runners`-taulussa → ei JOIN:ia, vain `FEATURE_COLS`-laajennus)
+
+6. **`FEATURE_COLS`-laajennus** (`src/models/ranker.py`):
+   ```python
+   # Travronden pre-race-piirteet (V-pelilähdöt, ~60 % kattavuus)
+   "tr_start_interval_group",
+   "tr_is_first_after_castration",
+   "tr_is_first_new_driver",
+   "tr_is_first_new_trainer",
+   "tr_is_first_shoes",
+   "tr_is_first_carriage",
+   "tr_speed_record_k",
+   "tr_speed_record_m",
+   "tr_speed_record_l",
+   "tr_expected_odds",
+   "tr_game_percent_v",
+   ```
+   LightGBM käsittelee NaN-arvot automaattisesti ei-V-pelilähdöissä.
+
+#### 2C — Pilotti + A/B-vertailu
+
+7. **Aja pilotti** 100 vanhalle round-kierrokselle (`scripts/travronden_pilot.py`):
+   - Yksi kerää-ajo, ~3–5 min
+   - Tallenna pilot-cache: `data/raw/travronden/`
+   - Päivitä runners-taulu tr_*-arvoilla pilot-lähdöille
+
+8. **A/B-vertailu** baseline-mallin (Brier 0.0818, rs=42) pohjalta:
+   - A: nykyinen malli (41 piirrettä)
+   - B: nykyinen + 11 tr_*-piirrettä (~52 piirrettä)
+   - Vertaa **Brier-scorea** (ei NDCG — alkuvaiheen pieni n)
+   - Suoritettavasti vain V-pelilähdöistä, mutta treeniaineisto kaikki
+
+#### Päätös vaiheen 2 jälkeen
+
+- **ΔBrier ≤ -0.005** (paranema) → pollaus jää tuotantoon, integroi
+- **-0.005 < ΔBrier < 0** → kerää 2–4 vk lisää, vertaa uudelleen
+- **ΔBrier ≥ 0** → hylkää, dokumentoi syyt (start_interval_group ei toiminut
+  — liian harva tai asiantuntijat eivät osu oikein)
+
+### Vaihe 3 — Lopputuotantointegraatio (kun Vaihe 2 onnistunut)
+
+Vaihe 2 sisältää jo polling-cron:n `run_forever`:iin. Vaihe 3 vain:
+
+- Vahvista että pollaus on tuotannossa Hetznerillä (logit, drift-monitorointi)
+- Lisää CLI: `python -m src.data.scheduler poll-travronden [--date YYYY-MM-DD]`
+  manuaalitestiä varten
+- Dokumentoi ROADMAP:iin Vaihe D2 ✅
 
 ---
 
@@ -642,22 +729,32 @@ tyyppi, sample-arvot):
 
 ---
 
-## 8. Yhteenveto auditoijalta
+## 8. Yhteenveto auditoijalta (päivitetty 15.5.2026)
 
-**Onko tästä hyötyä?** Kyllä, mutta epävarmuus on suuri kunnes vaihe 1
-on tehty. Varmasti saatavilla olevat kentät (`is_first_*`, `game_percent`,
-`speed_records`) **antavat marginaalista lisäarvoa nykyiseen featuristoon**.
-Jos `speed`, `rating`, `comment` osoittautuvat täytetyiksi vanhoilla
-kierroksilla, hyöty kasvaa merkittävästi — `speed` voisi olla
-**pace-pilotin oikotie**.
+**Onko tästä hyötyä? Kyllä, suuremmalla todennäköisyydellä kuin alunperin
+arvioitiin.** Vaihe 1 -tutkimus paljasti että `start_interval_group` on
+Travrondenin asiantuntijoiden per-hevonen, per-lähtö pace-arvio — **lähinnä
+pace-piirre mitä saadaan ilman manuaalista raviraportti-scrapingia**.
 
-**Onko tämä prioriteetti yli Vaiheen 3?** Ei. Vaihe 3 (mallin treenaus)
-on edelleen seuraava askel. Travronden-pilotti tehdään **rinnakkain**
-Vaihe 3:n ensimmäisten treenausajojen kanssa, jotta voimme verrata heti
-"baseline" vs. "baseline + Travronden" -mallit.
+Tämä on **C3-vaiheen oikotie** — manuaalista pace-pilottia ei luultavasti
+tarvita.
 
-**Tämä on tutkimusta, ei käännekohta.** Jos pilotti ei näytä paranemaa,
-hylätään ilman katumusta ja siirrytään pace-pilottiin (C3) tai
-sukutaulu-iterointiin.
+**Realistiset odotukset Brier-paranemasta:** 0.005–0.020 (alalla tyypillinen
+pace-piirteen vaikutus). Pohjana 0.0818 → mahdollinen tulos ~0.075–0.080.
+Voittosignaali kasvaisi 0.0025 → 0.005–0.010 — 2–4× parannus mutta yhä
+ei riittävä tuotantopelaamiseen 17 vrk:n datalla.
 
-Onnea matkaan — ja tarkista käyttöehdot ennen kuin alat keräämään.
+**Tärkeä rajoitus:** kattavuus ~60 % (vain V-pelilähdöt). 40 % lähdöistä saa
+NaN. LightGBM hoitaa NaN automaattisesti, mutta pace-piirre toimii vain
+osalle.
+
+**Onko tämä nyt prioriteetti yli muiden vaiheiden?** Kyllä, viikon sisällä:
+- ✅ Vaihe C1 (drift-monitorointi) on tehty
+- ✅ Vaihe 3 baseline on treenattu — A/B-vertailu mahdollinen heti
+- 🎯 Tämä Vaihe 2 on **seuraava prioriteetti** ennen Vaihe 4 (paperitestaus)
+
+**Tämä ei sitouta mihinkään pysyvään.** Jos Vaihe 2 -pilotti ei näytä Brier-
+paranemaa, hylätään ja suunnitellaan uudelleen. Cache (30 vrk TTL) säilyy
+joka tapauksessa hyödyllisenä myöhempään tutkimukseen.
+
+Onnea — käyttöehdot ja UA ovat jo tiedostossa.
