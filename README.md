@@ -70,7 +70,7 @@ lähtö. Tällöin todennäköisyydet summautuvat 1.0:aan per lähtö.
 |---|---|---|
 | Hevosen muoto | `form_avg_finish_5`, `form_win_rate_5`, `form_days_since_last` | `horse_starts` (103k starttia) |
 | ATG-aggregaatit | `atg_lifetime_win_rate`, `atg_best_km_for_this_setup` | ATG per startti |
-| Ohjastaja/valmentaja | `atg_driver_win_pct`, `driver_win_rate_365d` | ATG + rolling |
+| Ohjastaja/valmentaja | `driver_win_rate_60d`, `driver_track_win_rate_60d`, `driver_win_rate_365d` | horse_starts (PiT) + rolling |
 | Lähtöasetelma | `inside_post`, `back_row`, `distance_category` | Lähtökortti |
 | Lähdön luokka | `race_min_earnings`, `race_max_earnings`, `race_age_group` | ATG terms-parsinta |
 | Varusteet | `shoes_changed_front`, `sulky_changed`, `sulky_type` | ATG per startti |
@@ -151,7 +151,12 @@ ravit-edge/
 │       ├── bankroll.py             Kelly-panostus + stop-loss
 │       └── clv_tracker.py          CLV + devig-laskuri
 ├── scripts/                        Ad-hoc-skriptit (pilotit, ablation, drift)
-├── tests/                          257 pytest-testiä (244 Hetzner)
+│   ├── backfill_history.py         Historiallinen ATG-backfill (2023→, idempotenssi)
+│   ├── retrain_model.py            Mallin uudelleentreenaus
+│   ├── evaluate_model.py           Brier + V-pelilähdöt -evaluointi
+│   └── run_feature_drift.py        Viikoittainen piirre-drift -monitorointi
+├── tests/                          363 pytest-testiä
+│   └── fixtures/travsport/         Travsport-sample-JSON:t (gitattu, ei data/)
 ├── data/                           ⚠ .gitignore — luodaan paikallisesti
 │   ├── ravit.db                    SQLite-tietokanta (Hetznerillä ~22 MB)
 │   ├── raw/travsport/              Travsport-cache (7 vrk TTL)
@@ -250,15 +255,22 @@ parhaillaan, 1 req/s rate-limit.
 
 ## Dashboard (visuaalinen näkymä)
 
-Streamlit-dashboard päivän ennusteille:
+Streamlit-dashboard päivän ennusteille (`src/dashboard/app.py`):
 
 ```bash
 streamlit run src/dashboard/app.py
 # → http://localhost:8501
 ```
 
-Näyttää päivän V-pelilähdöt, mallin win-todennäköisyydet ja edge-prosentit.  
-Tutkimuskäyttöön — älä käytä rahapelipäätöksiin ennen Vaihe 5:n päätöskriteerit täyttyvät.
+**Ominaisuudet:**
+- Päivän valinta sidebarista, V-pelilähdöt-checkbox, edge-kynnys-slider
+- Lähdöt ratakohtaisesti ryhmiteltyinä (expander per rata, race_number-järjestyksessä)
+- Live-kertoimet `odds_snapshots`-taulusta (prioriteetti T-2min → T-15min)
+- ATG-hevosprofiililinkit (klikattavat 🔗)
+- SHAP-piirreanalyysi per lähtö (valinnainen, vaatii `shap`-paketin)
+- 🔄 Päivitä-nappi välimuistin tyhjentämiseen
+
+⚠️ **Tutkimuskäyttöön** — älä käytä rahapelipäätöksiin ennen Vaihe 5:n päätöskriteerit täyttyvät.
 
 ---
 
@@ -311,7 +323,7 @@ Jos jokin parametri puuttuu, vastaavat piirteet ovat 100 % NaN.
 ## Testien ajaminen
 
 ```bash
-# Kaikki testit (257 lokaalisti, 244 Hetzner)
+# Kaikki testit (363 testiä)
 PYTHONPATH=. python -m pytest
 
 # Tiivis output
@@ -321,8 +333,8 @@ PYTHONPATH=. python -m pytest -q
 PYTHONPATH=. python -m pytest tests/test_build_features.py -v
 ```
 
-`tests/test_travsport.py` on tunnettu epäonnistumaan Hetznerillä (ympäristö-
-riippuvuus, ei regressio).
+Fixture-tiedostot (`tests/fixtures/travsport/`) on gitattu — testit toimivat
+sekä lokaalisti että Hetznerillä ilman erillisiä kopiointeja.
 
 ---
 

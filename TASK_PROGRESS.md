@@ -3,7 +3,7 @@
 > **Tarkoitus:** projektin tämänhetkinen tila + seuraavat avoimet tehtävät.
 > Yksityiskohtainen historia (auditoinnit, koodariraportit, päätökset
 > 10.–14.5.2026) on arkistossa: [`docs/archive/TASK_PROGRESS_2026-05_history.md`](docs/archive/TASK_PROGRESS_2026-05_history.md).
-> Päivitetty: 15.5.2026 (D2-pilottitulokset lisätty).
+> Päivitetty: 16.5.2026 (dashboard ✅, backfill käynnissä, 4 uutta piirrettä ✅, test-infrakorjaus ✅).
 
 ---
 
@@ -21,10 +21,13 @@
 | Vaihe D1 — Travronden Vaihe 1 -selvitys | ✅ valmis | 14.5.2026 |
 | **Vaihe D2 — Travronden Vaihe 2 -pilotti** | 🟡 **KÄYNNISSÄ** (vaiheet 1–5 ✅, 6–7 avoin) | viikon sisällä |
 | Vaihe C2 — Walk-forward-dokumentointi | ✅ valmis | 15.5.2026 (ROADMAP.md jo ok) |
-| Vaihe 4 — Backtest + paperitestaus | ⏸ odottaa V3-tuloksia + lisädataa | ~3.6.2026 |
+| **Vaihe D3 — Streamlit-dashboard** | ✅ **valmis** | 16.5.2026 |
+| **Vaihe D4 — Historiallinen backfill (2023→)** | 🟡 **KÄYNNISSÄ** Hetznerillä | ~26.5.2026 valmis |
+| **Vaihe D5 — 4 uutta piirrettä (horse_starts-pohj.)** | ✅ **valmis** | 16.5.2026 |
+| Vaihe 4 — Backtest + paperitestaus | ⏸ odottaa backfilliä + lisädataa | ~3.6.2026 |
 | Vaihe 5 — Päätöspiste | ⏸ vaatii 8+ viikkoa dataa | ~7.7.2026 |
 
-**Tärkein nyt:** Travronden Vaihe 2 — A/B-testi ajettu uudelleen korjatuilla koodeilla (3 kriittistä bugia korjattu 15.5.2026). Korjattu delta: +0.0003 (kaikki lähdöt), +0.0039 (V-pelilähdöt). Odottaa auditoijan integraatiopäätöstä.
+**Tärkein nyt:** Historiallinen backfill käynnissä Hetznerillä (`scripts/backfill_history.py`, PID 478580) — hakee 2023–2026 ravilähdöt ATG:stä ~5 päivää/tunti. Valmistuu n. 26.5.2026. Mahdollistaa merkittävästi paremman mallin uudelleentreenauksen.
 
 ---
 
@@ -37,7 +40,9 @@
 | Brier-score (rs=42) | **0.0818** | Uniform-baseline 0.0843 |
 | **Voittosignaali vs. uniform** | **0.0025** | Pieni mutta positiivinen |
 | Kalibrointi (0–16 % alue) | Erinomainen | Juuri value-pelien alue |
-| FEATURE_COLS määrä | 41 | Sire (4) + K1-pollutoidut (5) odottavat |
+| FEATURE_COLS määrä | **45** aktiivista | Sire (4) + K1-pollutoidut (5) + TR (10) kommentoitu pois |
+| CATEGORICAL_COLS | 6 aktiivista | dist/method/rest_days/age/condition/sulky |
+| Testejä | **363** passing | Lokaali + Hetzner (test_travsport.py korjattu 16.5.) |
 | Top-3 piirrettä | `form_market_avg_5`, `atg_lifetime_top3_rate`, `form_avg_finish_5` | |
 
 **Tärkein johtopäätös:** malli on terve mutta voittosignaali on **pieni**.
@@ -494,34 +499,69 @@ Sitten Hetzner-deploy: `git pull` + restart-scheduler.
 
 ---
 
-### 🆕 Vaihe D3 — Streamlit-dashboard (visuaalinen näkymä)
+### ✅ Vaihe D3 — Streamlit-dashboard (visuaalinen näkymä)
 
-**Status:** 🟡 uusi tehtävä, ~1 työpäivä
-**Tausta:** käyttäjän pyynnöstä 15.5.2026 — visuaalinen näkymä päivän
-ennusteille. Päätösperusteet ja koodirunko: [`docs/FRONTEND_DECISION.md`](docs/FRONTEND_DECISION.md).
+**Status:** ✅ VALMIS (16.5.2026)
+**Tiedosto:** `src/dashboard/app.py` (~370 riviä)
 
-**Suositus:** Streamlit, ei Astro (alkuvaiheessa). Astro Vaihe 6:lle jos
-halutaan julkinen sivu.
+**Toteutetut ominaisuudet:**
+- Ratakohtainen ryhmittely (expander per rata, race_number-järjestyksessä)
+- Live-kertoimet `odds_snapshots`-taulusta (prioriteetti T-2min → T-15min)
+- ATG-hevosprofiililinkit (klikattavia, `st.column_config.LinkColumn`)
+- SHAP-piirreanalyysi per lähtö (kaikki 45+6 piirrettä, `model.feature_name()`)
+- 🔄 Päivitä-nappi välimuistin tyhjentämiseen, TTL 60 s
+- ⚠️ Tutkimuskäyttö-varoitus sidebarissa
+- Edge-% laskenta + ⭐-korostus value-peleille
 
-| Tehtävä | Aika |
+Käynnistys: `streamlit run src/dashboard/app.py` → http://localhost:8501  
+Hetzner: `.venv/bin/streamlit run src/dashboard/app.py --server.port 8501`
+
+---
+
+### 🟡 Vaihe D4 — Historiallinen backfill (2023→)
+
+**Status:** 🟡 KÄYNNISSÄ Hetznerillä (PID 478580, käynnistyi 16.5.2026 ~09:10)
+**Tiedosto:** `scripts/backfill_history.py`
+
+Hakee ATG:stä kaikki ravilähdöt 2023-01-01 → tänään päivä kerrallaan.
+Rate limit 1 req/s automaattinen (ATGClient._rate_limit), idempotenssi
+(`SELECT DISTINCT race_date` — jo tallennetut päivät ohitetaan).
+
+| Mittari | Arvo |
 |---|---|
-| Lisää `streamlit` requirements.txt:hen | 1 min |
-| `src/dashboard/app.py` — perusrunko (~150 riviä, runko FRONTEND_DECISION.md:ssä) | 4–5 h |
-| Testaus: `streamlit run src/dashboard/app.py` lokaalisti | 30 min |
-| README.md: dashboard-osio | 15 min |
-| Smoke-testi Hetzner-datalla | 30 min |
+| Hakunopeus | ~5 päivää/tunti |
+| Arvioitu valmistuminen | ~26.5.2026 |
+| Uusia lähtöjä (arvio) | ~3 000–5 000 (3 vuotta × ~5 lähtöä/päivä) |
+| **Vaikutus malliin** | Treenidataa ~18 vrk → ~3 vuotta → merkittävästi parempi malli |
 
-**UI-spesifikaatio:**
+**Jälkitoimenpiteet backfillin jälkeen:**
+1. `ssh ravit-edge ".venv/bin/python scripts/retrain_model.py"` — uudelleentreenaus
+2. Uusi `evaluate_model.py` — Brier kaikki lähdöt + V-pelilähdöt
+3. `rolling_walk_forward` uudella datalla
 
-- Sidebar: päivän valinta, V-pelilähdöt-checkbox, edge-kynnys-slider
-- Päänäkymä per V-pelikierros, per lähtö → taulukko:
-  - `# | Hevonen | P(win) % | Odds | Edge %`
-  - Value-pelit korostettuna värillä/⭐
-- Cache: `@st.cache_data(ttl=300)` ja `@st.cache_resource` mallin lataukseen
+---
 
-**Tärkeä huomio:** dashboard on **tutkimuskäyttöön**, ei pelaamiseen.
-Mallin voittosignaali on edelleen 0.0023 vs. uniform — älä luota
-ennusteisiin rahapelipäätöksiin ennen Vaihe 5:n päätöskriteerit täyttyvät.
+### ✅ Vaihe D5 — Uudet piirteet olemassa olevasta datasta
+
+**Status:** ✅ VALMIS (16.5.2026), 363 testiä passing
+**Tiedosto:** `src/features/build_features.py`, `src/models/ranker.py`
+
+4 uutta piirrettä lisätty FEATURE_COLS:iin K1-bugin kiertotienä (horse_starts-pohjainen laskenta, ei ATG-aggregaatteja):
+
+| Piirre | Kuvaus | Funktio |
+|---|---|---|
+| `driver_win_rate_60d` | Kuski voitto-% 60d, horse_starts-pohj. | `driver_trainer_hs_features()` |
+| `driver_top3_rate_60d` | Kuski top3-% 60d | `driver_trainer_hs_features()` |
+| `trainer_win_rate_60d` | Valmentaja voitto-% 60d | `driver_trainer_hs_features()` |
+| `trainer_top3_rate_60d` | Valmentaja top3-% 60d | `driver_trainer_hs_features()` |
+| `rest_days_bucket` | Lepopäiväkategoria (CATEGORICAL) | `rest_days_bucket_features()` |
+| `start_position_win_rate` | Starttipaikan historiavoitto-% radalla | `start_position_features()` |
+| `start_method_win_rate_diff` | auto−voltti voitto-% ero per hevonen | `start_method_features()` |
+| `driver_track_win_rate_60d` | Kuski×rata voitto-% 60d | `driver_trainer_track_features()` |
+| `trainer_track_win_rate_60d` | Valmentaja×rata voitto-% 60d | `driver_trainer_track_features()` |
+
+Kaikki point-in-time-turvallisia (`race_date_hist < race_date_runner`).
+NaN-fallback jos horse_starts ei saatavilla.
 
 ---
 
@@ -537,6 +577,8 @@ ennusteisiin rahapelipäätöksiin ennen Vaihe 5:n päätöskriteerit täyttyvä
 
 | Päiväys | Tehtävä |
 |---|---|
+| ~2026-05-26 | **Backfill valmis** — aja `retrain_model.py` Hetznerillä |
+| ~2026-05-27 | **Evaluate uusi malli** (`evaluate_model.py`) Brierillä + V-pelilähdöt |
 | ~2026-06-08 | `rolling_walk_forward` ajetaan, vaatii 42+ vrk dataa |
 | ~2026-07-01 | `train_window_days` 28 vs. 56 -ablation, vaatii 56+ vrk dataa |
 | ~2026-07-07 | **Sire-piirteiden palautus** FEATURE_COLS:iin (KNOWN_ISSUES #13) |
@@ -561,8 +603,8 @@ ennusteisiin rahapelipäätöksiin ennen Vaihe 5:n päätöskriteerit täyttyvä
 - ✅ **Scheduler** — datankeräys jatkuu (4×snapshot/lähtö + tulokset T+30min
   + retry 04:30). Cron 03:00 hakee päivän lähdöt.
 - ✅ **Backupit** — päivittäinen DB-backup Hetzneriltä.
-- ✅ **Testit** — 302 passing (lokaalisti, sis. uudet D2-testit); 244 passing (Hetzner; `test_travsport.py`
-  on tunnettu ympäristöongelma, ei regressio).
+- ✅ **Testit** — **363 passing** (lokaali + Hetzner). `test_travsport.py`-ympäristöongelma
+  korjattu 16.5.2026 — fixture-JSON:t siirretty `tests/fixtures/travsport/`-hakemistoon (gitattu).
 
 ---
 

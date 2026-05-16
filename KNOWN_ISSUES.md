@@ -1,6 +1,6 @@
 # Ravit Edge — Tunnetut ongelmat
 
-> Päivitetty 15.5.2026.
+> Päivitetty 16.5.2026.
 > Vain avoimet ongelmat — korjatut bugit löytyvät tiedoston lopusta.
 > Tämänhetkinen tila ja avoimet tehtävät: [`TASK_PROGRESS.md`](TASK_PROGRESS.md).
 
@@ -187,3 +187,4 @@ kaikki 3 ehtoa.
 | **dam_sire** | `_upsert_horse` luki `pedigree.mothersFather` — ATG-avain on `pedigree.grandfather`. Backfill täytti 3 477 hevosta | 10.5.2026 |
 | **sire-leakage** | `sire_features()` sisällytti hevosen omat startit aggregaattiin → leave-one-out -korjaus | 14.5.2026 |
 | **backtest race_date -kollissio** | `rolling_walk_forward` ja `quarterly_walk_forward` kaatuivat KeyError:iin kun race_date oli jo features-DataFramessa | 14.5.2026 |
+| **test_travsport fixture** | `sample_792729_*.json` fixture-tiedostot `data/raw/` (gitignored) → siirretty `tests/fixtures/travsport/` (gitattu). 6 testiä kaatui Hetznerillä. | 16.5.2026 |

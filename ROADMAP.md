@@ -1,7 +1,8 @@
 # Ravit Edge — Roadmap
 
-> Päivitetty 15.5.2026.
-> Vaiheet 1–3 + auditointikorjaukset + drift-monitorointi VALMIIT.
+> Päivitetty 16.5.2026.
+> Vaiheet 1–3, D1, D3 (dashboard) + auditointikorjaukset + drift-monitorointi VALMIIT.
+> D2 (Travronden) vaiheet 1–5 ✅, 6–7 avoimena. D4 (backfill) käynnissä Hetznerillä.
 > Tämänhetkinen tila ja avoimet tehtävät: [`TASK_PROGRESS.md`](TASK_PROGRESS.md).
 
 ---
@@ -37,14 +38,15 @@ piirteet) on seuraava prioriteetti.
 
 | Mittari | Arvo |
 |---|---|
-| Keräyspäiviä | 18 vrk (27.4 → 14.5.2026) |
-| Trot-lähtöjä | **455** |
-| Trot-runnereita | **4 838** |
+| Keräyspäiviä | 18 vrk reaaliaikainen (27.4 → 16.5.2026) + backfill 2023→ käynnissä |
+| Trot-lähtöjä | **455** (reaaliaikainen) + backfill lisää ~3 000–5 000 |
+| Trot-runnereita | **4 838** (reaaliaikainen) |
 | Hevoshistoriastartteja | **115 824** (Travsport) |
 | Hevosia (`horses`) | **4 114** (sire 100 %, dam_sire 34 %) |
 | Ratoja (`tracks`) | **30** (25 Travronden-rikkaita + 5 manuaalista stub) |
-| Testejä | **257** (lokaali) / 244 (Hetzner) |
-| Mallin Brier (rs=42) | **0.0818** (vs. uniform 0.0843) |
+| Testejä | **363** (lokaali + Hetzner) |
+| FEATURE_COLS | **45** aktiivista (+ 6 CATEGORICAL_COLS) |
+| Mallin Brier (rs=42) | **0.0818** (vs. uniform 0.0843) — uudelleentreenaus backfillin jälkeen |
 | Voittosignaali | 0.0025 — pieni, **vaatii lisädataa** |
 
 ---
@@ -172,7 +174,7 @@ Yksityiskohdat: [`docs/TASK_TRAVRONDEN_INVESTIGATION.md`](docs/TASK_TRAVRONDEN_I
 
 ---
 
-## Vaihe D2 — Travronden pre-race-piirteet 🟡 SEURAAVA (viikon sisällä)
+## Vaihe D2 — Travronden pre-race-piirteet 🟡 KÄYNNISSÄ (vaiheet 1–5 ✅, 6–7 avoimena)
 
 Pace-piirteen integrointi V-pelilähtöihin.
 
@@ -252,8 +254,8 @@ lopputuloksella — rehellinen näkymä, ei pessimismiä.
 
 ## Vaihe 6 (vain jos edge todistettu) — Pelaaminen pienillä rahoilla
 
-- Streamlit-dashboard **V-pelilähdöistä** (default-näkymä)
-  - Filter: "näytä kaikki" -toggle ei-V-pelilähdöille tarvittaessa
+- Streamlit-dashboard **valmis** (`src/dashboard/app.py`) — Vaihe D3 tehty ✅
+  - V-pelilähdöt default-näkymässä, track-ryhmittely, live-kertoimet, SHAP, ATG-linkit
 - Manuaalinen pelaaminen 1–5 € panoksiin single-win-markkinaan
 - 4–8 viikkoa CLV-seurantaa oikealla rahalla
 - 200–300+ peliä tilastollisesti merkittävään lopputulokseen
@@ -279,7 +281,8 @@ yksittäisten lähtöjen voittajamarkkinaa fixed-odds-vedonvälittäjillä.
 
 | Päiväys | Tehtävä | Lähde |
 |---|---|---|
-| Heti | Vaihe D2 (Travronden pace-piirteet) | TASK_PROGRESS.md |
+| Heti | Vaihe D2 vaiheet 6–7 (pollaus-cron, is_v_race scheduler) | TASK_PROGRESS.md |
+| ~26.5.2026 | **Backfill valmis** — `retrain_model.py` + `evaluate_model.py` | D4 |
 | ~6.6.2026 | `rolling_walk_forward` ajo, 42+ vrk dataa kerätty | Vaihe 3 |
 | ~1.7.2026 | `train_window_days` 28 vs. 56 -ablation | Vaihe 3 |
 | ~7.7.2026 | **Sire-piirteiden palautus** + uusi ablation | KNOWN_ISSUES #13 |
