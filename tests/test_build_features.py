@@ -23,11 +23,14 @@ from src.features.build_features import (
     driver_trainer_track_features,
     fill_finish_positions,
     form_features,
+    km_time_trend_features,
+    prize_money_trend_features,
     race_setup_features,
     rest_days_bucket_features,
     sire_features,
     start_method_features,
     start_position_features,
+    track_condition_win_rate_features,
 )
 
 
@@ -1270,7 +1273,8 @@ class TestBuildFeatureMatrixWithTracks:
         result = build_feature_matrix(runners, races)  # ei tracks-parametria
 
         track_struct_cols = [c for c in result.columns if c.startswith("track_") and c not in
-                             ("track_horse_starts", "track_horse_win_rate", "track_condition")]
+                             ("track_horse_starts", "track_horse_win_rate", "track_condition",
+                              "track_condition_win_rate")]
         assert not track_struct_cols, (
             f"track_*-sarakkeet ilmestyivät ilman tracks-parametria: {track_struct_cols}"
         )
@@ -1874,3 +1878,296 @@ class TestDriverTrainerTrackFeatures:
         result = driver_trainer_track_features(runner, hs, races)
         assert "driver_track_win_rate_60d" in result.columns
         assert "trainer_track_win_rate_60d" in result.columns
+
+
+# ---------------------------------------------------------------------------
+# C5 — Vaihe 7: km_time_trend, prize_money_trend, track_condition_win_rate
+# ---------------------------------------------------------------------------
+
+def _horse_starts_v7(*rows: dict) -> pd.DataFrame:
+    """Luo horse_starts-DataFramen Vaihe 7 -testeille.
+
+    Sisältää kaikki C5-piirteiden vaatimat sarakkeet:
+    horse_id, race_date, finish_position, kilometer_time_seconds,
+    prize_won, track_condition, win_odds_final.
+    """
+    defaults: dict = {
+        "horse_id": 1,
+        "race_date": "2023-01-01",
+        "finish_position": 2,
+        "kilometer_time_seconds": 90.0,
+        "prize_won": 0,
+        "track_condition": "n",  # Travsport: "n"=kevyt
+        "win_odds_final": 5.0,
+    }
+    return pd.DataFrame([{**defaults, **r} for r in rows])
+
+
+class TestVaihe7Features:
+    """Testit C5-piirteille: km_time_trend, prize_money_trend,
+    track_condition_win_rate."""
+
+    # ------------------------------------------------------------------
+    # km_time_trend_features
+    # ------------------------------------------------------------------
+
+    def test_km_time_trend_negative_means_improving(self):
+        """Kun km-ajat laskevat (nopeutuminen), kulmakerroin on negatiivinen."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 10, "race_date": "2024-05-01",
+             "finish_position": 1},
+        )
+        hs = _horse_starts_v7(
+            # Km-ajat laskevat: 95 → 93 → 91 → 89 (nopeutuminen)
+            {"horse_id": 1, "race_date": "2024-01-01", "kilometer_time_seconds": 95.0},
+            {"horse_id": 1, "race_date": "2024-02-01", "kilometer_time_seconds": 93.0},
+            {"horse_id": 1, "race_date": "2024-03-01", "kilometer_time_seconds": 91.0},
+            {"horse_id": 1, "race_date": "2024-04-01", "kilometer_time_seconds": 89.0},
+        )
+        result = km_time_trend_features(runners, hs)
+        assert "km_time_trend" in result.columns
+        trend = result.iloc[0]["km_time_trend"]
+        assert trend < 0, (
+            f"Nopeutuvan hevosen km_time_trend pitää olla negatiivinen, sai {trend}"
+        )
+
+    def test_km_time_trend_positive_means_slowing(self):
+        """Kun km-ajat nousevat (hidastuminen), kulmakerroin on positiivinen."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 10, "race_date": "2024-05-01",
+             "finish_position": 1},
+        )
+        hs = _horse_starts_v7(
+            {"horse_id": 1, "race_date": "2024-01-01", "kilometer_time_seconds": 88.0},
+            {"horse_id": 1, "race_date": "2024-02-01", "kilometer_time_seconds": 90.0},
+            {"horse_id": 1, "race_date": "2024-03-01", "kilometer_time_seconds": 92.0},
+            {"horse_id": 1, "race_date": "2024-04-01", "kilometer_time_seconds": 94.0},
+        )
+        result = km_time_trend_features(runners, hs)
+        trend = result.iloc[0]["km_time_trend"]
+        assert trend > 0, (
+            f"Hidastuvan hevosen km_time_trend pitää olla positiivinen, sai {trend}"
+        )
+
+    def test_km_time_trend_no_history_gives_nan(self):
+        """Hevosella ei aiempaa historiaa → km_time_trend = NaN."""
+        runners = _runners(
+            {"horse_id": 99, "race_id": 1, "race_date": "2024-05-01",
+             "finish_position": 1},
+        )
+        hs = _horse_starts_v7(
+            {"horse_id": 1, "race_date": "2024-01-01"},  # eri hevonen
+        )
+        result = km_time_trend_features(runners, hs)
+        assert pd.isna(result.iloc[0]["km_time_trend"]), (
+            "Hevosella ilman historiaa km_time_trend pitää olla NaN"
+        )
+
+    def test_km_time_trend_point_in_time_no_leakage(self):
+        """Tulevat startit eivät saa vuotaa trendipiirteisiin."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 10, "race_date": "2024-03-01",
+             "finish_position": 1},
+        )
+        hs = _horse_starts_v7(
+            # Ennen runner.race_date: km-ajat tasainen
+            {"horse_id": 1, "race_date": "2024-01-01", "kilometer_time_seconds": 90.0},
+            {"horse_id": 1, "race_date": "2024-02-01", "kilometer_time_seconds": 90.0},
+            # SAMA PÄIVÄ kuin runner → ei saa tulla mukaan
+            {"horse_id": 1, "race_date": "2024-03-01", "kilometer_time_seconds": 70.0},
+            # TULEVAISUUS → ei saa tulla mukaan
+            {"horse_id": 1, "race_date": "2024-04-01", "kilometer_time_seconds": 70.0},
+        )
+        result = km_time_trend_features(runners, hs)
+        trend = result.iloc[0]["km_time_trend"]
+        # Ilman leakagea: 2 pistettä (90, 90) → slope ≈ 0
+        # Jos saman päivän tai tulevaisuuden startit vuotavat: slope << 0
+        assert trend == pytest.approx(0.0, abs=1e-6), (
+            f"km_time_trend = {trend}, odotettiin ≈ 0 (ei leakagea). "
+            "Saman päivän tai tulevaisuuden startit vuosivat."
+        )
+
+    def test_km_time_trend_missing_column_gives_nan(self):
+        """km_time_trend on NaN jos horse_starts ei sisällä kilometer_time_seconds."""
+        runners = _runners({"horse_id": 1, "race_id": 1, "race_date": "2024-05-01"})
+        hs = pd.DataFrame([{"horse_id": 1, "race_date": "2024-01-01",
+                             "finish_position": 2, "prize_won": 0}])
+        result = km_time_trend_features(runners, hs)
+        assert "km_time_trend" in result.columns
+        assert pd.isna(result.iloc[0]["km_time_trend"])
+
+    # ------------------------------------------------------------------
+    # prize_money_trend_features
+    # ------------------------------------------------------------------
+
+    def test_prize_money_trend_positive_means_rising_class(self):
+        """Kun palkintorahat nousevat, kulmakerroin on positiivinen."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 10, "race_date": "2024-05-01",
+             "finish_position": 1},
+        )
+        hs = _horse_starts_v7(
+            {"horse_id": 1, "race_date": "2024-01-01", "prize_won": 500},
+            {"horse_id": 1, "race_date": "2024-02-01", "prize_won": 1000},
+            {"horse_id": 1, "race_date": "2024-03-01", "prize_won": 2000},
+            {"horse_id": 1, "race_date": "2024-04-01", "prize_won": 4000},
+        )
+        result = prize_money_trend_features(runners, hs)
+        assert "prize_money_trend" in result.columns
+        trend = result.iloc[0]["prize_money_trend"]
+        assert trend > 0, (
+            f"Nousevan palkintorahan prize_money_trend pitää olla positiivinen, "
+            f"sai {trend}"
+        )
+
+    def test_prize_money_trend_missing_column_gives_nan(self):
+        """prize_money_trend on NaN jos horse_starts ei sisällä prize_won."""
+        runners = _runners({"horse_id": 1, "race_id": 1, "race_date": "2024-05-01"})
+        hs = pd.DataFrame([{"horse_id": 1, "race_date": "2024-01-01",
+                             "finish_position": 2, "kilometer_time_seconds": 90.0}])
+        result = prize_money_trend_features(runners, hs)
+        assert "prize_money_trend" in result.columns
+        assert pd.isna(result.iloc[0]["prize_money_trend"])
+
+    def test_prize_money_trend_no_row_explosion(self):
+        """prize_money_trend_features ei saa kasvattaa rivimäärää."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 1, "race_date": "2024-05-01"},
+            {"horse_id": 2, "race_id": 2, "race_date": "2024-05-01"},
+        )
+        hs = _horse_starts_v7(
+            {"horse_id": 1, "race_date": "2024-01-01", "prize_won": 1000},
+            {"horse_id": 1, "race_date": "2024-02-01", "prize_won": 2000},
+            {"horse_id": 2, "race_date": "2024-01-01", "prize_won": 500},
+        )
+        result = prize_money_trend_features(runners, hs)
+        assert len(result) == len(runners), (
+            f"Rivimäärä kasvoi: {len(runners)} → {len(result)}"
+        )
+
+    # ------------------------------------------------------------------
+    # track_condition_win_rate_features
+    # ------------------------------------------------------------------
+
+    def test_track_condition_win_rate_basic(self):
+        """Voitto-% lasketaan oikein historiasta samassa rataolossa."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 10, "race_date": "2024-05-01"},
+        )
+        races = _races({"race_id": 10, "track_condition": "light"})
+        hs = _horse_starts_v7(
+            # 3 startia kevyessä kentässä (Travsport "n" = "light"), 1 voitto
+            {"horse_id": 1, "race_date": "2024-01-01", "track_condition": "n",
+             "finish_position": 1},
+            {"horse_id": 1, "race_date": "2024-02-01", "track_condition": "n",
+             "finish_position": 2},
+            {"horse_id": 1, "race_date": "2024-03-01", "track_condition": "n",
+             "finish_position": 3},
+            # Eri rataolo → ei saa tulla mukaan
+            {"horse_id": 1, "race_date": "2024-04-01", "track_condition": "v",
+             "finish_position": 1},
+        )
+        result = track_condition_win_rate_features(runners, hs, races, min_starts=3)
+        assert "track_condition_win_rate" in result.columns
+        val = result.iloc[0]["track_condition_win_rate"]
+        # 3 startia "light"-kentässä, 1 voitto → 1/3
+        assert val == pytest.approx(1 / 3, abs=1e-6), (
+            f"track_condition_win_rate = {val}, odotettiin 1/3"
+        )
+
+    def test_track_condition_normalization(self):
+        """'n' (Travsport) ja 'light' (ATG) matchaavat samaan rataoloon."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 10, "race_date": "2024-05-01"},
+        )
+        # Nykyinen lähtö: ATG-formaatissa "light"
+        races = _races({"race_id": 10, "track_condition": "light"})
+        # Historia: Travsport-formaatissa "n" (kevyt) — pitää matcha
+        hs = _horse_starts_v7(
+            {"horse_id": 1, "race_date": "2024-01-01", "track_condition": "n",
+             "finish_position": 1},
+            {"horse_id": 1, "race_date": "2024-02-01", "track_condition": "N",
+             "finish_position": 2},
+            {"horse_id": 1, "race_date": "2024-03-01", "track_condition": "light",
+             "finish_position": 2},
+        )
+        result = track_condition_win_rate_features(runners, hs, races, min_starts=3)
+        val = result.iloc[0]["track_condition_win_rate"]
+        # 3 startia kaikki normalisoituvat "light"-luokkaan, 1 voitto → 1/3
+        assert val == pytest.approx(1 / 3, abs=1e-6), (
+            f"Normalisaatio ei toiminut: track_condition_win_rate = {val}, "
+            "odotettiin 1/3 (n, N, light → kaikki 'light')"
+        )
+
+    def test_track_condition_below_min_starts_is_nan(self):
+        """Alle min_starts havaintoa samassa rataolossa → NaN."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 10, "race_date": "2024-05-01"},
+        )
+        races = _races({"race_id": 10, "track_condition": "light"})
+        hs = _horse_starts_v7(
+            {"horse_id": 1, "race_date": "2024-01-01", "track_condition": "n",
+             "finish_position": 1},
+            {"horse_id": 1, "race_date": "2024-02-01", "track_condition": "n",
+             "finish_position": 2},
+        )
+        result = track_condition_win_rate_features(runners, hs, races, min_starts=3)
+        assert pd.isna(result.iloc[0]["track_condition_win_rate"]), (
+            "Alle min_starts-kynnyksen pitää palauttaa NaN"
+        )
+
+    def test_track_condition_win_rate_point_in_time(self):
+        """Tulevat startit eivät saa vuotaa track_condition_win_rate:een."""
+        runners = _runners(
+            {"horse_id": 1, "race_id": 10, "race_date": "2024-03-15"},
+        )
+        races = _races({"race_id": 10, "track_condition": "heavy"})
+        hs = _horse_starts_v7(
+            # Ennen runner.race_date: 3 startia raskaassa, 0 voittoa
+            {"horse_id": 1, "race_date": "2024-01-01", "track_condition": "v",
+             "finish_position": 2},
+            {"horse_id": 1, "race_date": "2024-02-01", "track_condition": "v",
+             "finish_position": 3},
+            {"horse_id": 1, "race_date": "2024-03-01", "track_condition": "v",
+             "finish_position": 4},
+            # TULEVAISUUS — voitto, ei saa tulla mukaan
+            {"horse_id": 1, "race_date": "2024-04-01", "track_condition": "v",
+             "finish_position": 1},
+        )
+        result = track_condition_win_rate_features(runners, hs, races, min_starts=3)
+        val = result.iloc[0]["track_condition_win_rate"]
+        # Ilman leakagea: 3 startia, 0 voittoa → 0.0
+        assert val == pytest.approx(0.0, abs=1e-6), (
+            f"track_condition_win_rate = {val}, odotettiin 0.0 (tulevaisuus vuosi)"
+        )
+
+    def test_c5_cols_present_in_build_feature_matrix(self):
+        """build_feature_matrix() tuottaa kaikki C5-piirresarakkeet."""
+        runners = _runners(
+            {"race_id": 1, "horse_id": 1, "race_date": "2024-05-01",
+             "finish_position": 1, "driver": "Arto", "trainer": "Matti",
+             "start_number": 2, "handicap_meters": 0},
+            {"race_id": 1, "horse_id": 2, "race_date": "2024-05-01",
+             "finish_position": 2, "driver": "Teppo", "trainer": "Matti",
+             "start_number": 4, "handicap_meters": 0},
+        )
+        races = _races(
+            {"race_id": 1, "track": "Solvalla", "distance": 2140,
+             "start_method": "auto", "track_condition": "light"},
+        )
+        hs = _horse_starts_v7(
+            {"horse_id": 1, "race_date": "2024-01-01", "kilometer_time_seconds": 90.0,
+             "prize_won": 500, "track_condition": "n", "finish_position": 2},
+            {"horse_id": 1, "race_date": "2024-02-01", "kilometer_time_seconds": 89.0,
+             "prize_won": 1000, "track_condition": "n", "finish_position": 1},
+            {"horse_id": 1, "race_date": "2024-03-01", "kilometer_time_seconds": 88.0,
+             "prize_won": 1500, "track_condition": "n", "finish_position": 1},
+            {"horse_id": 2, "race_date": "2024-01-01", "kilometer_time_seconds": 92.0,
+             "prize_won": 0, "track_condition": "n", "finish_position": 3},
+        )
+        result = build_feature_matrix(runners, races, horse_starts=hs)
+        for col in ("km_time_trend", "prize_money_trend", "track_condition_win_rate"):
+            assert col in result.columns, (
+                f"C5-piirre '{col}' puuttuu build_feature_matrix()-tuloksesta. "
+                f"Löydetyt sarakkeet: {sorted(result.columns.tolist())}"
+            )

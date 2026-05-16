@@ -128,6 +128,10 @@ FEATURE_COLS: list[str] = [
     "start_method_win_rate_diff",  # auto_win_rate - volte_win_rate per hevonen (C3)
     "driver_track_win_rate_60d",   # kuski×rata voitto-% 60d (C4)
     "trainer_track_win_rate_60d",  # valmentaja×rata voitto-% 60d (C4)
+    # --- C5: Trendit ja rataolot-preferenssi (build_features, C5) ---
+    "km_time_trend",            # km-ajan suuntaus: neg=nopeutuu, pos=hidastuu (C5)
+    "prize_money_trend",        # palkintorahan suuntaus: pos=nousee luokkaa (C5)
+    "track_condition_win_rate", # voitto-% samassa normalisoidussa rataolossa (C5)
     # --- D: Ratarakenne (build_features.track_structure_features) ---
     # Vaatii tracks-taulun tracks-parametrina build_feature_matrix():lle.
     # NaN jos rata puuttuu taulusta (gallop-radat, manuaaliset stub-rivit).

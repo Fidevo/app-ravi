@@ -45,6 +45,35 @@ _FORM_OUT_COLS = [
     "form_avg_finish_5_same_method", "form_avg_finish_5_same_dist",
 ]
 
+# Normalisointitaulu rataolot-koodit: Travsport + ATG → kanoninen muoto.
+# Travsport käyttää lyhenteitä ("n"/"v"/"s"/"t"), ATG käyttää englantia.
+# Taulun arvo on LightGBM:n näkemä kategorinen taso (track_condition_win_rate).
+_TRACK_COND_NORM: dict[str, str] = {
+    # Travsport-koodit (horse_starts.track_condition)
+    "n": "light", "N": "light",
+    "v": "heavy", "V": "heavy",
+    "s": "winter", "S": "winter",
+    "t": "winter", "T": "winter",
+    # ATG-arvot (races.track_condition) — passthrough-normalisaatio
+    "light": "light", "good": "light", "dead": "light",
+    "heavy": "heavy", "winter": "winter",
+}
+
+
+def _linear_slope(vals: "np.ndarray") -> float:
+    """Palauttaa lineaariregressiosuoran kulmakertoimen arvoille.
+
+    x = järjestysindeksi 0..n-1, y = vals.
+    Palauttaa NaN jos alle 2 validia havaintoa.
+    """
+    mask = ~np.isnan(vals)
+    n = int(mask.sum())
+    if n < 2:
+        return np.nan
+    x = np.arange(len(vals), dtype=float)[mask]
+    y = vals[mask]
+    return float(np.polyfit(x, y, 1)[0])
+
 
 # ----------------------------------------------------------------------
 # 1. Hevosen muoto
@@ -1078,6 +1107,234 @@ def driver_trainer_track_features(
 
 
 # ----------------------------------------------------------------------
+# 12. C5 — Vaihe 7: km_time_trend, prize_money_trend, track_condition_win_rate
+# ----------------------------------------------------------------------
+
+def km_time_trend_features(
+    runners_df: pd.DataFrame,
+    horse_starts_df: pd.DataFrame,
+    n_last: int = 8,
+) -> pd.DataFrame:
+    """Laske km-ajan lineaarinen trendi per runner (viim. n_last startista).
+
+    Negatiivinen arvo = hevonen nopeutuu (parantuva muoto).
+    Positiivinen arvo = hevonen hidastuu (heikkeneva muoto).
+
+    Point-in-time: vain startit ennen race_date (< ei <=).
+
+    Args:
+        runners_df: vaaditut sarakkeet: race_id, horse_id, race_date
+        horse_starts_df: vaaditut sarakkeet: horse_id, race_date,
+                         kilometer_time_seconds
+        n_last: viimeiset N starttia trendiä varten (oletus 8)
+
+    Returns:
+        DataFrame sarakkeilla [race_id, horse_id, km_time_trend]
+        NaN jos alle 2 validia havaintoa.
+    """
+    runners_df = runners_df.copy()
+    runners_df["race_date"] = pd.to_datetime(runners_df["race_date"])
+    runners_df["horse_id"] = runners_df["horse_id"].astype(str)
+
+    hs = horse_starts_df.copy()
+    hs["race_date"] = pd.to_datetime(hs["race_date"])
+    hs["horse_id"] = hs["horse_id"].astype(str)
+
+    if "kilometer_time_seconds" not in hs.columns:
+        out = runners_df[["race_id", "horse_id"]].copy()
+        out["km_time_trend"] = np.nan
+        return out
+
+    # Merge runners × horse_starts per horse_id
+    merged = runners_df[["race_id", "horse_id", "race_date"]].merge(
+        hs[["horse_id", "race_date", "kilometer_time_seconds"]],
+        on="horse_id",
+        suffixes=("_runner", "_hist"),
+        how="left",
+    )
+    # Point-in-time
+    merged = merged[merged["race_date_hist"] < merged["race_date_runner"]].copy()
+    # Viimeiset n_last startit per (race_id, horse_id), ajallisesti järjestettynä
+    merged = merged.sort_values(["race_id", "horse_id", "race_date_hist"])
+    merged = merged.groupby(["race_id", "horse_id"]).tail(n_last)
+
+    slopes = (
+        merged.groupby(["race_id", "horse_id"])["kilometer_time_seconds"]
+        .apply(lambda s: _linear_slope(s.values.astype(float)))
+        .reset_index(name="km_time_trend")
+    )
+
+    out = runners_df[["race_id", "horse_id"]].copy()
+    out["race_id"] = out["race_id"].astype(str)
+    slopes["race_id"] = slopes["race_id"].astype(str)
+    out = out.merge(slopes, on=["race_id", "horse_id"], how="left")
+    return out
+
+
+def prize_money_trend_features(
+    runners_df: pd.DataFrame,
+    horse_starts_df: pd.DataFrame,
+    n_last: int = 8,
+) -> pd.DataFrame:
+    """Laske palkintorahan lineaarinen trendi per runner (viim. n_last startista).
+
+    Positiivinen arvo = hevonen nousee luokkatasoa (enemmän rahaa).
+    Negatiivinen arvo = hevonen laskee luokkatasoa (vähemmän rahaa).
+
+    Point-in-time: vain startit ennen race_date (< ei <=).
+
+    Args:
+        runners_df: vaaditut sarakkeet: race_id, horse_id, race_date
+        horse_starts_df: vaaditut sarakkeet: horse_id, race_date, prize_won
+        n_last: viimeiset N starttia trendiä varten (oletus 8)
+
+    Returns:
+        DataFrame sarakkeilla [race_id, horse_id, prize_money_trend]
+        NaN jos alle 2 validia havaintoa tai prize_won-sarake puuttuu.
+    """
+    runners_df = runners_df.copy()
+    runners_df["race_date"] = pd.to_datetime(runners_df["race_date"])
+    runners_df["horse_id"] = runners_df["horse_id"].astype(str)
+
+    hs = horse_starts_df.copy()
+    hs["race_date"] = pd.to_datetime(hs["race_date"])
+    hs["horse_id"] = hs["horse_id"].astype(str)
+
+    if "prize_won" not in hs.columns:
+        out = runners_df[["race_id", "horse_id"]].copy()
+        out["prize_money_trend"] = np.nan
+        return out
+
+    merged = runners_df[["race_id", "horse_id", "race_date"]].merge(
+        hs[["horse_id", "race_date", "prize_won"]],
+        on="horse_id",
+        suffixes=("_runner", "_hist"),
+        how="left",
+    )
+    merged = merged[merged["race_date_hist"] < merged["race_date_runner"]].copy()
+    merged = merged.sort_values(["race_id", "horse_id", "race_date_hist"])
+    merged = merged.groupby(["race_id", "horse_id"]).tail(n_last)
+
+    slopes = (
+        merged.groupby(["race_id", "horse_id"])["prize_won"]
+        .apply(lambda s: _linear_slope(s.values.astype(float)))
+        .reset_index(name="prize_money_trend")
+    )
+
+    out = runners_df[["race_id", "horse_id"]].copy()
+    out["race_id"] = out["race_id"].astype(str)
+    slopes["race_id"] = slopes["race_id"].astype(str)
+    out = out.merge(slopes, on=["race_id", "horse_id"], how="left")
+    return out
+
+
+def track_condition_win_rate_features(
+    runners_df: pd.DataFrame,
+    horse_starts_df: pd.DataFrame,
+    races_df: pd.DataFrame,
+    min_starts: int = 3,
+) -> pd.DataFrame:
+    """Laske voitto-% per hevonen normalisoidussa rataolossa.
+
+    Normalisoi rataolot sekä horse_starts:sta ("n","v","s","t") että
+    races:sta ("light","heavy","winter") _TRACK_COND_NORM-taulun avulla
+    ennen vertailua. Näin Travsport-historia ja ATG-lähdöt vertautuvat oikein.
+
+    Point-in-time: vain startit ennen race_date (< ei <=).
+
+    Args:
+        runners_df: vaaditut sarakkeet: race_id, horse_id, race_date
+        horse_starts_df: vaaditut sarakkeet: horse_id, race_date,
+                         track_condition, finish_position
+        races_df: vaaditut sarakkeet: race_id, track_condition
+        min_starts: min. startit samassa olosuhteessa — alle → NaN (oletus 3)
+
+    Returns:
+        DataFrame sarakkeilla [race_id, horse_id, track_condition_win_rate]
+        NaN jos track_condition puuttuu tai alle min_starts havaintoa.
+    """
+    runners_df = runners_df.copy()
+    runners_df["race_date"] = pd.to_datetime(runners_df["race_date"])
+    runners_df["horse_id"] = runners_df["horse_id"].astype(str)
+
+    # Tarkista sarakkeet — palauta NaN-sarake jos tieto puuttuu
+    if (
+        "track_condition" not in horse_starts_df.columns
+        or "track_condition" not in races_df.columns
+    ):
+        out = runners_df[["race_id", "horse_id"]].copy()
+        out["track_condition_win_rate"] = np.nan
+        return out
+
+    hs = horse_starts_df.copy()
+    hs["race_date"] = pd.to_datetime(hs["race_date"])
+    hs["horse_id"] = hs["horse_id"].astype(str)
+    hs["is_win"] = (hs["finish_position"] == 1).astype(float)
+    # Normalisoi Travsport-koodit kanonisiksi rataolo-arvoiksi
+    hs["_cond_norm"] = hs["track_condition"].map(
+        lambda c: _TRACK_COND_NORM.get(str(c), None)
+        if c is not None and not (isinstance(c, float) and np.isnan(c))
+        else None
+    )
+
+    # Hae nykyisen lähdön normalisoitu rataolo races-taulusta
+    race_cond = races_df[["race_id", "track_condition"]].drop_duplicates("race_id").copy()
+    race_cond["race_id"] = race_cond["race_id"].astype(str)
+    race_cond["_current_cond"] = race_cond["track_condition"].map(
+        lambda c: _TRACK_COND_NORM.get(str(c), None)
+        if c is not None and not (isinstance(c, float) and np.isnan(c))
+        else None
+    )
+
+    runners_with_cond = runners_df[["race_id", "horse_id", "race_date"]].copy()
+    runners_with_cond["race_id"] = runners_with_cond["race_id"].astype(str)
+    runners_with_cond = runners_with_cond.merge(
+        race_cond[["race_id", "_current_cond"]], on="race_id", how="left"
+    )
+
+    # Merge runners × horse_starts per horse_id
+    merged = runners_with_cond.merge(
+        hs[["horse_id", "race_date", "_cond_norm", "is_win"]],
+        on="horse_id",
+        suffixes=("_runner", "_hist"),
+        how="left",
+    )
+    # Point-in-time filter
+    merged = merged[merged["race_date_hist"] < merged["race_date_runner"]].copy()
+    # Suodata vain samat normalisoidut rataolot (molemmat NotNone ja yhtä suuret)
+    merged = merged[
+        merged["_cond_norm"].notna()
+        & merged["_current_cond"].notna()
+        & (merged["_cond_norm"] == merged["_current_cond"])
+    ]
+
+    # Aggregoi per (race_id, horse_id)
+    agg = (
+        merged.groupby(["race_id", "horse_id"])
+        .agg(
+            _n=("is_win", "count"),
+            _wins=("is_win", "sum"),
+        )
+        .reset_index()
+    )
+    agg["track_condition_win_rate"] = np.where(
+        agg["_n"] >= min_starts,
+        agg["_wins"] / agg["_n"],
+        np.nan,
+    )
+
+    out = runners_df[["race_id", "horse_id"]].copy()
+    out["race_id"] = out["race_id"].astype(str)
+    agg["race_id"] = agg["race_id"].astype(str)
+    out = out.merge(
+        agg[["race_id", "horse_id", "track_condition_win_rate"]],
+        on=["race_id", "horse_id"],
+        how="left",
+    )
+    return out
+
+
+# ----------------------------------------------------------------------
 # Yhdistäjä
 # ----------------------------------------------------------------------
 
@@ -1198,6 +1455,27 @@ def build_feature_matrix(
         df = df.merge(dtr_feat, on=["race_id", "horse_id"], how="left")
     else:
         for col in _dtr_cols:
+            df[col] = np.nan
+
+    # C5: Vaihe 7 — trendit ja rataolot-preferenssi
+    _c5_cols = ["km_time_trend", "prize_money_trend", "track_condition_win_rate"]
+    if horse_starts is not None and len(horse_starts) > 0:
+        km_feat = km_time_trend_features(df, horse_starts)
+        km_feat["race_id"] = km_feat["race_id"].astype(df["race_id"].dtype)
+        km_feat["horse_id"] = km_feat["horse_id"].astype(df["horse_id"].dtype)
+        df = df.merge(km_feat, on=["race_id", "horse_id"], how="left")
+
+        prize_feat = prize_money_trend_features(df, horse_starts)
+        prize_feat["race_id"] = prize_feat["race_id"].astype(df["race_id"].dtype)
+        prize_feat["horse_id"] = prize_feat["horse_id"].astype(df["horse_id"].dtype)
+        df = df.merge(prize_feat, on=["race_id", "horse_id"], how="left")
+
+        cond_feat = track_condition_win_rate_features(df, horse_starts, races)
+        cond_feat["race_id"] = cond_feat["race_id"].astype(df["race_id"].dtype)
+        cond_feat["horse_id"] = cond_feat["horse_id"].astype(df["horse_id"].dtype)
+        df = df.merge(cond_feat, on=["race_id", "horse_id"], how="left")
+    else:
+        for col in _c5_cols:
             df[col] = np.nan
 
     # B2: sukutaulupiirteet — vaatii sekä horse_starts että horses-parametrin
