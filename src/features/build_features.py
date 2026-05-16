@@ -356,37 +356,54 @@ def driver_trainer_hs_features(
         # Valmistele historia-DataFrame: vain tarpeelliset sarakkeet
         hist = hs[["race_date", role, "is_win", "is_top3"]].copy()
 
-        # Merge: yhdistä runners_df × hist roolisarakkeen mukaan
-        # Jokaiselle runner-riville löydetään kaikki historian rivit
-        # joilla sama driver/trainer.
-        merged = runners_df[["race_id", "horse_id", "race_date", role]].merge(
-            hist,
-            on=role,
-            suffixes=("_runner", "_hist"),
-            how="left",
-        )
+        # MUISTIOPTIMISAATIO: yksittäinen runners_df × hist -merge räjäyttää
+        # väliaikaisen DataFramen kymmeniin miljooniin riveihin kun nimet
+        # matchaavat oikein (n_runners × n_hist_per_role → OOM 3+ GB).
+        # Korjaus: iteroidaan yksittäisten roolin arvojen (driver/trainer) yli
+        # jolloin kunkin iteraation intermediate on pieni.
+        role_vals = runners_df[role].dropna().unique()
+        hist_by_role = {v: grp for v, grp in hist.groupby(role)}
 
-        # Point-in-time filter: vain startit ennen kyseistä lähtöpäivää
-        # JA ikkunan sisällä
-        cutoff_early = (
-            merged["race_date_hist"] < merged["race_date_runner"]
-        )
-        cutoff_late = (
-            merged["race_date_hist"]
-            >= merged["race_date_runner"] - pd.Timedelta(days=lookback_days)
-        )
-        in_window = merged[cutoff_early & cutoff_late].copy()
+        role_agg_parts: list[pd.DataFrame] = []
+        runners_cols = runners_df[["race_id", "horse_id", "race_date", role]].copy()
 
-        # Aggregoi per (race_id, horse_id)
-        agg = (
-            in_window.groupby(["race_id", "horse_id"])
-            .agg(
-                _n_starts=("is_win", "count"),
-                _wins=("is_win", "sum"),
-                _top3=("is_top3", "sum"),
+        for rval in role_vals:
+            rval_runners = runners_cols[runners_cols[role] == rval]
+            rval_hist    = hist_by_role.get(rval)
+            if rval_hist is None or rval_hist.empty:
+                continue  # Ei historiaa — jätetään pois, lopussa LEFT-join tuottaa NaN
+
+            merged = rval_runners.merge(
+                rval_hist,
+                on=role,
+                suffixes=("_runner", "_hist"),
+                how="left",
             )
-            .reset_index()
-        )
+            # Point-in-time filter + aikaikkuna
+            cutoff_early = merged["race_date_hist"] < merged["race_date_runner"]
+            cutoff_late  = (
+                merged["race_date_hist"]
+                >= merged["race_date_runner"] - pd.Timedelta(days=lookback_days)
+            )
+            in_window = merged[cutoff_early & cutoff_late]
+            if in_window.empty:
+                continue
+
+            grp = (
+                in_window.groupby(["race_id", "horse_id"])
+                .agg(
+                    _n_starts=("is_win", "count"),
+                    _wins=("is_win", "sum"),
+                    _top3=("is_top3", "sum"),
+                )
+                .reset_index()
+            )
+            role_agg_parts.append(grp)
+
+        if role_agg_parts:
+            agg = pd.concat(role_agg_parts, ignore_index=True)
+        else:
+            agg = pd.DataFrame(columns=["race_id", "horse_id", "_n_starts", "_wins", "_top3"])
 
         # win_rate / top3_rate — NaN jos alle min_starts
         agg[win_col] = np.where(
@@ -1103,30 +1120,45 @@ def driver_trainer_track_features(
 
         hist = hs[["race_date", role, "track", "is_win"]].dropna(subset=["track"]).copy()
 
-        # Merge: runners × hist per (role, track)
-        merged = runners_with_track[["race_id", "horse_id", "race_date", role, "track"]].merge(
-            hist,
-            on=[role, "track"],
-            suffixes=("_runner", "_hist"),
-            how="left",
-        )
+        # MUISTIOPTIMISAATIO: iteroidaan per (role_val, track) -pari kuten
+        # driver_trainer_hs_features():ssä — vältetään OOM-räjähdys.
+        runners_cols_t = runners_with_track[
+            ["race_id", "horse_id", "race_date", role, "track"]
+        ].copy()
+        hist_by_role_track = {k: grp for k, grp in hist.groupby([role, "track"])}
 
-        # Point-in-time filter + aikaikkuna
-        cutoff_early = merged["race_date_hist"] < merged["race_date_runner"]
-        cutoff_late = (
-            merged["race_date_hist"]
-            >= merged["race_date_runner"] - pd.Timedelta(days=lookback_days)
-        )
-        in_window = merged[cutoff_early & cutoff_late].copy()
+        role_agg_parts_t: list[pd.DataFrame] = []
+        for (rval, tval), runner_grp in runners_cols_t.groupby([role, "track"], sort=False):
+            hist_grp = hist_by_role_track.get((rval, tval))
+            if hist_grp is None or hist_grp.empty:
+                continue
 
-        agg = (
-            in_window.groupby(["race_id", "horse_id"])
-            .agg(
-                _n_starts=("is_win", "count"),
-                _wins=("is_win", "sum"),
+            merged = runner_grp.merge(
+                hist_grp,
+                on=[role, "track"],
+                suffixes=("_runner", "_hist"),
+                how="left",
             )
-            .reset_index()
-        )
+            cutoff_early = merged["race_date_hist"] < merged["race_date_runner"]
+            cutoff_late  = (
+                merged["race_date_hist"]
+                >= merged["race_date_runner"] - pd.Timedelta(days=lookback_days)
+            )
+            in_window = merged[cutoff_early & cutoff_late]
+            if in_window.empty:
+                continue
+
+            grp = (
+                in_window.groupby(["race_id", "horse_id"])
+                .agg(_n_starts=("is_win", "count"), _wins=("is_win", "sum"))
+                .reset_index()
+            )
+            role_agg_parts_t.append(grp)
+
+        if role_agg_parts_t:
+            agg = pd.concat(role_agg_parts_t, ignore_index=True)
+        else:
+            agg = pd.DataFrame(columns=["race_id", "horse_id", "_n_starts", "_wins"])
 
         agg[win_col] = np.where(
             agg["_n_starts"] >= min_starts,
