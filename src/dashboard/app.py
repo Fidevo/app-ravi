@@ -46,7 +46,7 @@ def load_model() -> lgb.Booster | None:
     return lgb.Booster(model_file=str(models[-1]))
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
     """Lataa runners + features + ennusteet annetulle päivälle."""
     try:
@@ -205,6 +205,9 @@ def main() -> None:
         )
         show_shap = st.checkbox("Näytä SHAP-analyysi", value=False)
         st.divider()
+        if st.button("🔄 Päivitä nyt", help="Tyhjentää välimuistin ja hakee tuoreimman datan"):
+            st.cache_data.clear()
+            st.rerun()
         st.caption("⚠️ Tutkimuskäyttöön. Älä käytä rahapelipäätöksiin.")
 
     db_path = str(DB_PATH)
