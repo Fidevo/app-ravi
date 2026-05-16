@@ -29,6 +29,65 @@ korrelaatiosäätöä. Oikea toteutus: `[r * total_prob for r in raw]`.
 
 ---
 
+## Avoimet — korjattava ennen seuraavaa uudelleentreenauksia
+
+### #15 · Kuski/valmentaja-nimiformaatti ei täsmää: ATG "Etunimi Sukunimi" vs. Travsport "Sukunimi Etunimi"
+
+**Havainto (16.5.2026):** `driver_win_rate_60d`, `driver_top3_rate_60d`, `trainer_win_rate_60d`,
+`trainer_top3_rate_60d`, `driver_track_win_rate_60d`, `trainer_track_win_rate_60d` — kaikki
+**0,0 % kattavuus** ja gain=0 pipeline_20260516.py-ajon jälkeen.
+
+**Syy:**
+```
+ATG runners.driver_name:     "Adam Ivarsson"    (Etunimi Sukunimi)
+Travsport horse_starts.driver: "Kontio Jorma"   (Sukunimi Etunimi)
+```
+`driver_trainer_hs_features()` tekee mergen `df["driver_name"] == hs["driver"]` — koska
+nimiformaatit ovat eri järjestyksessä, lähes kaikki matchaukset epäonnistuvat.
+
+**Korjaus:** normalisoi Travsport-nimet ATG-formaattiin ennen mergeä:
+```python
+# src/features/build_features.py, driver_trainer_hs_features()
+def _normalize_name(name: str) -> str:
+    """Sukunimi Etunimi → Etunimi Sukunimi"""
+    parts = str(name).strip().split()
+    return " ".join(parts[1:] + parts[:1]) if len(parts) >= 2 else name
+
+hs = hs.copy()
+hs["driver"] = hs["driver"].map(_normalize_name)
+hs["trainer"] = hs["trainer"].map(_normalize_name)
+```
+
+**Vaikutus:** 6 piirrettä on tällä hetkellä täysin hyödyttömiä. Korjaus lisäisi
+merkittävää signaalia kuski- ja valmentajatilastoihin.
+
+**Prioriteetti:** korkea — korjaa ennen seuraavaa uudelleentreenauksia (~26.5.).
+
+---
+
+### #16 · `horse_starts`-SQL-suodatin jättää NULL finish_position -rivit pois
+
+**Tiedosto:** `scripts/pipeline_20260516.py` + kaikki muut scriptit jotka lukevat horse_starts
+
+```sql
+SELECT * FROM horse_starts WHERE withdrawn != 1 AND finish_position != 99
+```
+
+SQLite:ssä `NULL != 99` evaluoituu NULL:ksi (ei trueksi) → rivit joilla `finish_position IS NULL`
+suodatetaan pois. Tämä vähentää horse_starts:n 131 891 → 78 435 riviin (28 040 rivi katoaa).
+
+**Vaikutus:** driver/trainer-tilastot lasketaan pienemmästä aineistosta → heikompi kattavuus.
+
+**Korjaus:**
+```sql
+WHERE (withdrawn IS NULL OR withdrawn != 1)
+  AND (finish_position IS NULL OR finish_position != 99)
+```
+
+**Prioriteetti:** korkea — korjaa ennen seuraavaa uudelleentreenauksia.
+
+---
+
 ## Avoimet — koodihygienia (ei tuotantovaikutusta)
 
 ### #2 · `_km_seconds` ei validoi arvoaluetta

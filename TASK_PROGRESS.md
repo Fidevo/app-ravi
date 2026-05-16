@@ -3,7 +3,7 @@
 > **Tarkoitus:** projektin tämänhetkinen tila + seuraavat avoimet tehtävät.
 > Yksityiskohtainen historia (auditoinnit, koodariraportit, päätökset
 > 10.–14.5.2026) on arkistossa: [`docs/archive/TASK_PROGRESS_2026-05_history.md`](docs/archive/TASK_PROGRESS_2026-05_history.md).
-> Päivitetty: 16.5.2026 (dashboard ✅, backfill käynnissä, 4 uutta piirrettä ✅, test-infrakorjaus ✅).
+> Päivitetty: 16.5.2026 illalla (C5-piirteet ✅, backtest-bugi #wf korjattu ✅, pipeline 20260516 ajettu ✅, 376 testiä passing).
 
 ---
 
@@ -24,6 +24,7 @@
 | **Vaihe D3 — Streamlit-dashboard** | ✅ **valmis** | 16.5.2026 |
 | **Vaihe D4 — Historiallinen backfill (2023→)** | 🟡 **KÄYNNISSÄ** Hetznerillä | ~26.5.2026 valmis |
 | **Vaihe D5 — 4 uutta piirrettä (horse_starts-pohj.)** | ✅ **valmis** | 16.5.2026 |
+| **Vaihe C5 — 3 trendipiirrettä (km_time/prize/track_cond)** | ✅ **valmis** | 16.5.2026 |
 | Vaihe 4 — Backtest + paperitestaus | ⏸ odottaa backfilliä + lisädataa | ~3.6.2026 |
 | Vaihe 5 — Päätöspiste | ⏸ vaatii 8+ viikkoa dataa | ~7.7.2026 |
 
@@ -31,23 +32,38 @@
 
 ---
 
-## Mallin nykytila (14.5.2026)
+## Mallin nykytila (16.5.2026 illalla — pipeline_20260516.py)
 
 | Mittari | Arvo | Selitys |
 |---|---|---|
-| Treenidata | 2 966 runneria, 281 lähtöä | Apr 27 – May 7 (11 vrk) |
-| Testidata | 1 872 runneria, 174 lähtöä | May 8 – May 14 (7 vrk) |
-| Brier-score (rs=42) | **0.0818** | Uniform-baseline 0.0843 |
-| **Voittosignaali vs. uniform** | **0.0025** | Pieni mutta positiivinen |
-| Kalibrointi (0–16 % alue) | Erinomainen | Juuri value-pelien alue |
-| FEATURE_COLS määrä | **45** aktiivista | Sire (4) + K1-pollutoidut (5) + TR (10) kommentoitu pois |
+| Treenidata | 139 302 runneria, 12 375 lähtöä | Jan 2023 – May 8, 2026 |
+| Testidata | 1 918 runneria, 172 lähtöä | May 9–16, 2026 (7 vrk) |
+| Brier (kaikki lähdöt) | **0.0778** | Naive-baseline 0.0817 |
+| Brier (V-pelilähdöt) | **0.0757** | NLL=127.8 (65 lähtöä, 691 runneria) |
+| **Voittosignaali vs. naiivi** | **dBrier=+0.0039** | PAREMPI ✅ |
+| NLL kaikki lähdöt | **367.4** | 172 lähtöä, 1 918 runneria |
+| FEATURE_COLS | **48** aktiivista | +3 C5-piirrettä (km_time, prize, track_cond) |
 | CATEGORICAL_COLS | 6 aktiivista | dist/method/rest_days/age/condition/sulky |
-| Testejä | **363** passing | Lokaali + Hetzner (test_travsport.py korjattu 16.5.) |
-| Top-3 piirrettä | `form_market_avg_5`, `atg_lifetime_top3_rate`, `form_avg_finish_5` | |
+| Testejä | **376** passing | Lokaali + Hetzner, 13 uutta C5-testiä |
+| Top-3 piirrettä | `start_position_win_rate` (1185), `form_market_avg_5` (1090), `atg_lifetime_top3_rate` (739) | |
+| C5-piirteet sijoituksina | `prize_money_trend` #4 (689), `km_time_trend` #8 (559) | ✅ oppinut |
+| Gain=0-piirteet (8) | `driver/trainer_*_60d` (6), `barfota_law_active`, `race_age_group` | Ks. alla |
+| Malli tallennettu | `data/model_baseline_20260516.lgb` | Dashboard lataa automaattisesti |
+| Walk-forward | **Ei mahdollinen vielä** | Vain ~5 000 labeloitua riviä (20 vrk), tarvitaan 90+ vrk |
 
-**Tärkein johtopäätös:** malli on terve mutta voittosignaali on **pieni**.
-Lisäksi datan määrä (455 lähtöä / 17 vrk) on liian vähän tuotantopäätökselle.
-Odota 8+ viikkoa ennen stop/go-päätöstä (C2-vaatimus).
+**Gain=0-piirteet — syy:** `driver/trainer_*_60d` ja `driver/trainer_track_*_60d` ovat 0 %
+kattavuudella koska ATG tallentaa kuski/valmentaja-nimet muodossa "Etunimi Sukunimi" mutta
+Travsport horse_starts:ssa ne ovat "Sukunimi Etunimi". Nimiformat ei täsmää — ks. KNOWN_ISSUES #15.
+
+**Walk-forward-tila:** `rolling_walk_forward` kaaatui aiemmin koska `train_ranker()`:n
+sisäinen `dropna(finish_position)` tyhjensi treenisetin (features-DataFrame sisälsi
+pääasiassa pre-race rivejä ilman labelia). **Korjattu commitissa `1d14bd2`**: funktio
+suodattaa nyt labeloidut rivit ennen ikkunointia. DB:ssä on vain ~5 000 labeloitua riviä
+(2026-04-27–2026-05-16) → `train_window_days=90` ei täyty → palautuu tyhjänä puhtaasti.
+
+**Tärkein johtopäätös:** malli on terve, 48 piirrettä, C5-trendit oppivat hyvin.
+Odota backfillin valmistuminen (~26.5.) ennen seuraavaa uudelleentreenauksia.
+Walk-forward on mahdollinen n. kesäkuun alussa kun on 42+ vrk labeloitua dataa.
 
 ---
 
