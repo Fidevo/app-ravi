@@ -59,6 +59,7 @@ def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
             JOIN races ra ON r.race_id = ra.race_id
             LEFT JOIN horses h ON r.horse_id = h.horse_id
             WHERE ra.race_date = ?
+              AND (r.withdrawn IS NULL OR r.withdrawn != 1)
         """, con, params=(str(target_date),))
         if len(runners) == 0:
             con.close()
@@ -222,10 +223,14 @@ def main() -> None:
         data = v_data if len(v_data) > 0 else data
 
     # Edge-% laskenta (win_odds_final jos saatavilla)
+    # TÄRKEÄ: lasketaan VAIN kun kerroin on olemassa — fillna(1.0) antaisi
+    # harhaajohtavan -99% kun kertoimia ei ole vielä saatavilla.
     odds_col: Optional[str] = "win_odds_final" if "win_odds_final" in data.columns else None
     data = data.copy()
     if odds_col and "win_prob" in data.columns:
-        data["edge_pct"] = (data["win_prob"] * data[odds_col].fillna(1.0) - 1.0) * 100
+        data["edge_pct"] = (
+            (data["win_prob"] * data[odds_col] - 1.0) * 100
+        ).where(data[odds_col].notna(), other=float("nan"))
     else:
         data["edge_pct"] = float("nan")
 
