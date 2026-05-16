@@ -89,6 +89,12 @@ class Runner(Base):
     driver = Column(String, index=True)
     trainer = Column(String, index=True)
 
+    # Lähdöstä poistuminen (scratched / withdrawn)
+    # True = hevonen poistunut lähdöstä ennen starttia.
+    # Päivitetään scheduler.py:n _upsert_runner (scratchedAt-kenttä)
+    # ja capture_odds_snapshot (ei kertoimia T-2min) -toiminnoissa.
+    withdrawn = Column(Boolean, default=False)
+
     # Tulokset (täytetään lähdön jälkeen)
     finish_position = Column(Integer)     # 1 = voitto, NULL = ei tullut maaliin
     kilometer_time_seconds = Column(Float)  # esim. 73.4 = 1.13.4

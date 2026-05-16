@@ -490,6 +490,9 @@ def _upsert_runner(
     obj.race_id = str(race["id"])
     obj.horse_id = str(horse["id"])
     obj.start_number = start.get("number")
+    # Scratch-tarkistus: ATG asettaa scratchedAt-aikaleiman poistuneille hevosille.
+    # Jos kenttää ei ole (tai on None), hevonen on mukana lähdössä.
+    obj.withdrawn = bool(start.get("scratchedAt"))
     handicap = (start.get("distance") or 0) - (race.get("distance") or 0)
     # A4-korjaus (M1-symmetria): käytä _set_if_not_none ATG-aggregaateille,
     # ohjastaja/valmentaja-aggregaateille ja kenkä/sulky-kentille.
@@ -538,6 +541,28 @@ def _ensure_runner_exists(session: Session, race: dict, start: dict) -> None:
 
 def _engine(db_path: str = DB_PATH):
     return create_engine(f"sqlite:///{db_path}")
+
+
+def _migrate_schema(db_path: str = DB_PATH) -> None:
+    """Aja puuttuvat schema-migraatiot olemassa olevaan DB:hen.
+
+    Idempotentti — turvallista ajaa useaan kertaan. SQLite ei tue
+    IF NOT EXISTS ALTER TABLE -syntaksia, joten käytetään try/except.
+    """
+    from sqlalchemy import text
+    engine = _engine(db_path)
+    migrations = [
+        # Migraatio 1: withdrawn-sarake runners-tauluun (2026-05-16)
+        "ALTER TABLE runners ADD COLUMN withdrawn INTEGER DEFAULT 0",
+    ]
+    with engine.connect() as conn:
+        for sql in migrations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+                logger.info("Migration applied: %s", sql[:60])
+            except Exception:
+                pass  # Sarake on jo olemassa — OK
 
 
 def _upsert_horse_starts(
@@ -1217,6 +1242,23 @@ def capture_odds_snapshot(
                     existing.vig_pct = vig
                     existing.source = "atg_pari_mutuel"
                     stats["snapshots_updated"] += 1
+
+            # Scratch-tunnistus T-2min / T-5min -snapshotissa:
+            # Jos runner on mukana pelissä mutta sillä ei ole kertoimia,
+            # se on poistunut lähdöstä (scratched). Merkitään withdrawn=True.
+            # T-15min / T-10min jätetään rauhaan — kertoimet eivät ole
+            # välttämättä auki vielä niin aikaisin.
+            if snapshot_label in ("T-2min", "T-5min"):
+                for runner_id, raw in per_runner:
+                    if raw is not None and raw > 1.0:
+                        continue  # Kerroin OK — ei scratched
+                    runner_obj = session.get(Runner, runner_id)
+                    if runner_obj is not None and not runner_obj.withdrawn:
+                        runner_obj.withdrawn = True
+                        logger.info(
+                            "Scratched detected: %s (no pool odds at %s)",
+                            runner_id, snapshot_label,
+                        )
             session.commit()
     except Exception as exc:  # noqa: BLE001
         stats["errors"].append(str(exc))
@@ -1485,6 +1527,7 @@ def run_once(target_date: date | None = None, db_path: str = DB_PATH) -> dict:
     """Aja päivä kerran: hae lähdöt + hae tulokset niistä jotka ovat jo
     juostu (start_time + 30min < now). Ei ajasta snapshotteja - tämä on
     manuaalitesti, scheduler-instanssin scope ei ulotu paluun yli."""
+    _migrate_schema(db_path)  # Idempotentti schema-migraatio
     from src.data.scrapers.travsport import TravsportAPIClient
 
     target = target_date or date.today()
@@ -1608,6 +1651,7 @@ def run_forever(db_path: str = DB_PATH) -> None:
     elinkaaren ajan. Cache (7pv) estää turhat uudelleenhaut, rate limit
     (1 req/sec) suojelee API:a.
     """
+    _migrate_schema(db_path)  # Idempotentti schema-migraatio
     from src.data.scrapers.travsport import TravsportAPIClient
 
     scheduler = BlockingScheduler(timezone=timezone.utc)

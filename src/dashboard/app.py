@@ -69,6 +69,7 @@ def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
             JOIN races ra ON r.race_id = ra.race_id
             LEFT JOIN horses h ON r.horse_id = h.horse_id
             WHERE ra.race_date = ?
+              AND (r.withdrawn IS NULL OR r.withdrawn = 0)
         """, con, params=(str(target_date),))
         if len(runners) == 0:
             con.close()
