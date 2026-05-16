@@ -22,7 +22,7 @@ from src.data.scrapers.travsport import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SAMPLE_DIR = REPO_ROOT / "data" / "raw" / "travsport"
+SAMPLE_DIR = REPO_ROOT / "tests" / "fixtures" / "travsport"
 SAMPLE_HORSE_ID = 792729
 
 
