@@ -56,7 +56,12 @@ runners = pd.read_sql(
 )
 races = pd.read_sql("SELECT * FROM races", con)
 horse_starts = pd.read_sql(
-    "SELECT * FROM horse_starts WHERE withdrawn != 1 AND finish_position != 99",
+    # KNOWN_ISSUES #16: NULL != 99 evaluoituu NULLiksi SQLite:ssä (ei trueksi),
+    # joten "finish_position != 99" jättää myös NULL-rivit pois. Korjattu:
+    # NULL-finish_position = tulos tuntematon (ei DNF/scratch) → sisällytetään.
+    "SELECT * FROM horse_starts "
+    "WHERE (withdrawn IS NULL OR withdrawn != 1) "
+    "  AND (finish_position IS NULL OR finish_position != 99)",
     con,
 )
 horses = pd.read_sql("SELECT * FROM horses", con)

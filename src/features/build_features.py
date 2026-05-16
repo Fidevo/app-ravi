@@ -75,6 +75,26 @@ def _linear_slope(vals: "np.ndarray") -> float:
     return float(np.polyfit(x, y, 1)[0])
 
 
+def _normalize_driver_name(name: str) -> str:
+    """Normalisoi Travsport-nimiformaatti ATG-nimiformaatiksi.
+
+    Travsport tallentaa kuski/valmentaja-nimet muodossa "Sukunimi Etunimi"
+    (esim. "Kontio Jorma"), mutta ATG käyttää muotoa "Etunimi Sukunimi"
+    (esim. "Jorma Kontio"). Tämä funktio kääntää yksisanaisen tai kaksi-
+    (tai useampi)osaisen Travsport-nimen ATG-järjestykseen.
+
+    Esimerkit:
+        "Kontio Jorma"        → "Jorma Kontio"
+        "Van Der Berg Pieter" → "Pieter Van Der Berg"
+        "Madonna"             → "Madonna"  (yksiosainen, ei muutosta)
+    """
+    parts = str(name).strip().split()
+    if len(parts) < 2:
+        return name
+    # Oletus: viimeinen sana on etunimi (Travsport: Sukunimi [Sukunimi2] Etunimi)
+    return " ".join(parts[-1:] + parts[:-1])
+
+
 # ----------------------------------------------------------------------
 # 1. Hevosen muoto
 # ----------------------------------------------------------------------
@@ -310,6 +330,15 @@ def driver_trainer_hs_features(
     hs["race_date"] = pd.to_datetime(hs["race_date"])
     hs["is_win"]  = (hs["finish_position"] == 1).astype(float)
     hs["is_top3"] = (hs["finish_position"] <= 3).astype(float)
+
+    # KNOWN_ISSUES #15: Travsport tallentaa nimet "Sukunimi Etunimi" -järjestyksessä,
+    # ATG käyttää "Etunimi Sukunimi" -järjestystä. Normalisoidaan horse_starts-nimet
+    # ATG-formaattiin ennen mergeä jotta matchit löytyvät.
+    for _col in ("driver", "trainer"):
+        if _col in hs.columns:
+            hs[_col] = hs[_col].map(
+                lambda n: _normalize_driver_name(n) if isinstance(n, str) else n
+            )
 
     suffix = f"{lookback_days}d"
     results = []
@@ -1035,6 +1064,13 @@ def driver_trainer_track_features(
     hs = horse_starts_df.copy()
     hs["race_date"] = pd.to_datetime(hs["race_date"])
     hs["is_win"] = (hs["finish_position"] == 1).astype(float)
+
+    # KNOWN_ISSUES #15: normalisoi Travsport-nimet ATG-formaattiin
+    for _col in ("driver", "trainer"):
+        if _col in hs.columns:
+            hs[_col] = hs[_col].map(
+                lambda n: _normalize_driver_name(n) if isinstance(n, str) else n
+            )
 
     # Normalisoi Travsport-ratakoodit ATG-nimiksi
     if "track" in hs.columns:

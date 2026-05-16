@@ -125,7 +125,9 @@ def main() -> int:
     )
     races = pd.read_sql("SELECT * FROM races", con)
     horse_starts = pd.read_sql(
-        "SELECT * FROM horse_starts WHERE withdrawn != 1 AND finish_position != 99",
+        "SELECT * FROM horse_starts "
+        "WHERE (withdrawn IS NULL OR withdrawn != 1) "
+        "  AND (finish_position IS NULL OR finish_position != 99)",
         con,
     )
     horses = pd.read_sql("SELECT * FROM horses", con)

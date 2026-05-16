@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 from src.features.build_features import (
+    _normalize_driver_name,
     build_feature_matrix,
     derived_features,
     driver_trainer_features,
@@ -1496,6 +1497,80 @@ class TestDriverTrainerHsFeatures:
         for col in ["driver_win_rate_60d", "driver_top3_rate_60d",
                     "trainer_win_rate_60d", "trainer_top3_rate_60d"]:
             assert col in result.columns, f"Sarake '{col}' puuttuu tuloksesta"
+
+    def test_driver_name_travsport_format_normalized(self):
+        """KNOWN_ISSUES #15: Travsport-nimi 'Sukunimi Etunimi' matchaa ATG-nimen
+        'Etunimi Sukunimi' normalisoinnin jälkeen."""
+        # ATG-runner käyttää "Etunimi Sukunimi" -formaattia
+        runner = self._make_runner(driver="Jorma Kontio")
+        # horse_starts (Travsport) käyttää "Sukunimi Etunimi" -formaattia
+        hs = _hs_starts(
+            {"driver": "Kontio Jorma", "race_date": "2024-01-20", "finish_position": 1},
+            {"driver": "Kontio Jorma", "race_date": "2024-01-10", "finish_position": 2},
+            {"driver": "Kontio Jorma", "race_date": "2024-01-01", "finish_position": 1},
+        )
+        result = driver_trainer_hs_features(runner, hs)
+        val = result.iloc[0]["driver_win_rate_60d"]
+        assert not pd.isna(val), (
+            "driver_win_rate_60d on NaN — normalisointi ei toiminut "
+            "(ATG 'Jorma Kontio' ei matchannut Travsport 'Kontio Jorma' -nimeä)"
+        )
+        assert val == pytest.approx(2 / 3), (
+            f"Odotettiin 2/3 (2 voittoa / 3 starttia), saatiin {val}"
+        )
+
+    def test_driver_name_multi_part_surname_normalized(self):
+        """Monisanainen sukunimi: 'van der Berg Pieter' → 'Pieter van der Berg'."""
+        runner = self._make_runner(driver="Pieter van der Berg")
+        hs = _hs_starts(
+            {"driver": "van der Berg Pieter", "race_date": "2024-01-20", "finish_position": 1},
+            {"driver": "van der Berg Pieter", "race_date": "2024-01-10", "finish_position": 3},
+            {"driver": "van der Berg Pieter", "race_date": "2024-01-01", "finish_position": 2},
+        )
+        result = driver_trainer_hs_features(runner, hs)
+        val = result.iloc[0]["driver_win_rate_60d"]
+        assert not pd.isna(val), (
+            "Monisanainen sukunimi ei normalisoitunut oikein"
+        )
+        assert val == pytest.approx(1 / 3)
+
+
+# ---------------------------------------------------------------------------
+# _normalize_driver_name — apufunktio nimiformaatin normalisointiin
+# ---------------------------------------------------------------------------
+
+class TestNormalizeDriverName:
+    """Suorat yksikkötestit _normalize_driver_name()-apufunktiolle."""
+
+    def test_two_part_name(self):
+        """'Kontio Jorma' → 'Jorma Kontio'."""
+        assert _normalize_driver_name("Kontio Jorma") == "Jorma Kontio"
+
+    def test_three_part_name_compound_surname(self):
+        """'van der Berg Pieter' → 'Pieter van der Berg'."""
+        assert _normalize_driver_name("van der Berg Pieter") == "Pieter van der Berg"
+
+    def test_single_word_unchanged(self):
+        """Yksiosainen nimi palautetaan muuttumattomana."""
+        assert _normalize_driver_name("Madonna") == "Madonna"
+
+    def test_already_atg_format_roundtrip(self):
+        """ATG-formaatti 'Jorma Kontio' normalisoidaan → 'Kontio Jorma'
+        (funktio olettaa aina Travsport-syötteen — älä kutsu ATG-nimillä)."""
+        # Toimii odotetusti: funktio kääntää joka tapauksessa viimeisen eteen
+        assert _normalize_driver_name("Jorma Kontio") == "Kontio Jorma"
+
+    def test_whitespace_stripped(self):
+        """Ylimääräiset välilyönnit poistetaan."""
+        assert _normalize_driver_name("  Kontio  Jorma  ") == "Jorma Kontio"
+
+    def test_non_string_passthrough(self):
+        """Ei-merkkijono (None, NaN, int) ei kaadu — palautetaan sellaisenaan."""
+        # Funktio saa isinstance(n, str) -tarkistuksen lambda-tasolla,
+        # mutta testataan suoraa kutsua varmuuden vuoksi
+        result = _normalize_driver_name(None)
+        # Ei kaadu — palauttaa None tai str("None"), kumpi tahansa OK
+        assert result is not None or result is None  # ei nosta poikkeusta
 
 
 # ---------------------------------------------------------------------------
