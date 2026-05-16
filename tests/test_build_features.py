@@ -19,6 +19,7 @@ from src.features.build_features import (
     build_feature_matrix,
     derived_features,
     driver_trainer_features,
+    driver_trainer_hs_features,
     fill_finish_positions,
     form_features,
     race_setup_features,
@@ -1305,3 +1306,185 @@ class TestBuildFeatureMatrixWithTracks:
         assert not missing, (
             f"FEATURE_COLS:in track-rakenne-sarakkeet puuttuvat tuloksesta: {missing}"
         )
+
+
+# ---------------------------------------------------------------------------
+# driver_trainer_hs_features — horse_starts-pohjaiset 60d-tilastot
+# ---------------------------------------------------------------------------
+
+def _hs_starts(*rows: dict) -> pd.DataFrame:
+    """Luo minimaalisen horse_starts-DataFramen driver_trainer_hs_features-testeille.
+
+    Vaaditut sarakkeet: driver, trainer, finish_position, race_date.
+    """
+    defaults: dict = {
+        "horse_id": "h1",
+        "race_date": "2024-01-01",
+        "driver": "Arto",
+        "trainer": "Matti",
+        "finish_position": 2,
+        "kilometer_time_seconds": 90.0,
+        "win_odds_final": 5.0,
+    }
+    return pd.DataFrame([{**defaults, **r} for r in rows])
+
+
+class TestDriverTrainerHsFeatures:
+    """Testit driver_trainer_hs_features()-funktiolle.
+
+    Varmistaa:
+      - Perustapaus: oikea win%/top3% lasketaan 60d-ikkunasta
+      - Point-in-time: saman päivän startit EI tule mukaan (< eikä <=)
+      - Liian vähän starteja → NaN (alle min_starts=3)
+      - Valmentaja-tilastot vastaavasti oikein
+    """
+
+    def _make_runner(
+        self,
+        race_date: str = "2024-03-01",
+        driver: str = "Arto",
+        trainer: str = "Matti",
+        race_id: int = 99,
+        horse_id: str = "h99",
+    ) -> pd.DataFrame:
+        return pd.DataFrame([{
+            "race_id": race_id,
+            "horse_id": horse_id,
+            "race_date": race_date,
+            "driver": driver,
+            "trainer": trainer,
+            "finish_position": None,
+        }])
+
+    def test_driver_win_rate_60d_basic(self):
+        """5 starttia, 2 voittoa → driver_win_rate_60d = 0.40 (40%)."""
+        runner = self._make_runner(race_date="2024-03-01", driver="Arto")
+        hs = _hs_starts(
+            # 5 starttia ikkunassa (kaikki < 2024-03-01 ja >= 2024-01-01)
+            {"driver": "Arto", "race_date": "2024-02-20", "finish_position": 1},
+            {"driver": "Arto", "race_date": "2024-02-10", "finish_position": 2},
+            {"driver": "Arto", "race_date": "2024-01-25", "finish_position": 1},
+            {"driver": "Arto", "race_date": "2024-01-15", "finish_position": 3},
+            {"driver": "Arto", "race_date": "2024-01-05", "finish_position": 4},
+        )
+        result = driver_trainer_hs_features(runner, hs)
+        assert "driver_win_rate_60d" in result.columns
+        val = result.iloc[0]["driver_win_rate_60d"]
+        assert val == pytest.approx(2 / 5), (
+            f"driver_win_rate_60d = {val}, odotettiin 0.40 (2 voittoa / 5 starttia)"
+        )
+
+    def test_driver_win_rate_60d_excludes_same_race_day(self):
+        """Saman päivän startit EI saa tulla mukaan (käytetään <, ei <=)."""
+        runner = self._make_runner(race_date="2024-03-01", driver="Arto")
+        hs = _hs_starts(
+            # 3 starttia ikkunassa ennen race_date
+            {"driver": "Arto", "race_date": "2024-02-25", "finish_position": 1},
+            {"driver": "Arto", "race_date": "2024-02-15", "finish_position": 2},
+            {"driver": "Arto", "race_date": "2024-01-20", "finish_position": 3},
+            # Sama päivä kuin runner — EI saa tulla mukaan
+            {"driver": "Arto", "race_date": "2024-03-01", "finish_position": 1},
+        )
+        result = driver_trainer_hs_features(runner, hs)
+        val = result.iloc[0]["driver_win_rate_60d"]
+        # Vain 3 hyväksyttyä starttia: 1 voitto / 3 = 0.333...
+        assert val == pytest.approx(1 / 3, abs=1e-6), (
+            f"driver_win_rate_60d = {val}, odotettiin ~0.333. "
+            "Saman päivän startti vuotaa mukaan (käytä < eikä <=)."
+        )
+
+    def test_driver_win_rate_60d_too_few_starts(self):
+        """Alle 3 starttia ikkunassa → NaN (ei luotettava estimaatti)."""
+        runner = self._make_runner(race_date="2024-03-01", driver="Arto")
+        hs = _hs_starts(
+            # Vain 2 starttia — alle min_starts=3
+            {"driver": "Arto", "race_date": "2024-02-20", "finish_position": 1},
+            {"driver": "Arto", "race_date": "2024-02-10", "finish_position": 2},
+        )
+        result = driver_trainer_hs_features(runner, hs)
+        val = result.iloc[0]["driver_win_rate_60d"]
+        assert pd.isna(val), (
+            f"driver_win_rate_60d = {val}, odotettiin NaN (alle 3 starttia)."
+        )
+
+    def test_driver_top3_rate_60d_basic(self):
+        """driver_top3_rate_60d lasketaan samalla logiikalla kuin win_rate."""
+        runner = self._make_runner(race_date="2024-03-01", driver="Arto")
+        hs = _hs_starts(
+            # 4 starttia: 3 top3 (pos 1, 2, 3) ja 1 ei (pos 5)
+            {"driver": "Arto", "race_date": "2024-02-20", "finish_position": 1},
+            {"driver": "Arto", "race_date": "2024-02-10", "finish_position": 2},
+            {"driver": "Arto", "race_date": "2024-01-25", "finish_position": 3},
+            {"driver": "Arto", "race_date": "2024-01-15", "finish_position": 5},
+        )
+        result = driver_trainer_hs_features(runner, hs)
+        val = result.iloc[0]["driver_top3_rate_60d"]
+        assert val == pytest.approx(3 / 4), (
+            f"driver_top3_rate_60d = {val}, odotettiin 0.75 (3 top3 / 4 starttia)"
+        )
+
+    def test_trainer_win_rate_60d_basic(self):
+        """Vastaava testi valmentajalle: 4 starttia, 1 voitto → 25%."""
+        runner = self._make_runner(race_date="2024-03-01", trainer="Matti")
+        hs = _hs_starts(
+            {"trainer": "Matti", "race_date": "2024-02-20", "finish_position": 1},
+            {"trainer": "Matti", "race_date": "2024-02-10", "finish_position": 2},
+            {"trainer": "Matti", "race_date": "2024-01-25", "finish_position": 4},
+            {"trainer": "Matti", "race_date": "2024-01-15", "finish_position": 5},
+        )
+        result = driver_trainer_hs_features(runner, hs)
+        val = result.iloc[0]["trainer_win_rate_60d"]
+        assert val == pytest.approx(1 / 4), (
+            f"trainer_win_rate_60d = {val}, odotettiin 0.25 (1 voitto / 4 starttia)"
+        )
+
+    def test_window_excludes_starts_older_than_60d(self):
+        """Startit jotka ovat yli 60 päivää vanhoja ei lasketa mukaan."""
+        runner = self._make_runner(race_date="2024-03-01", driver="Arto")
+        hs = _hs_starts(
+            # 3 starttia ikkunassa
+            {"driver": "Arto", "race_date": "2024-02-20", "finish_position": 1},
+            {"driver": "Arto", "race_date": "2024-02-10", "finish_position": 1},
+            {"driver": "Arto", "race_date": "2024-01-15", "finish_position": 1},
+            # Tämä startti on yli 60 päivää ennen 2024-03-01 (= 2024-01-01)
+            # 2024-03-01 - 60d = 2024-01-01 → 2023-12-31 on liian vanha
+            {"driver": "Arto", "race_date": "2023-12-31", "finish_position": 5},
+        )
+        result = driver_trainer_hs_features(runner, hs)
+        val = result.iloc[0]["driver_win_rate_60d"]
+        # Vain 3 hyväksyttyä: 3 voittoa / 3 = 1.0
+        assert val == pytest.approx(1.0), (
+            f"driver_win_rate_60d = {val}, odotettiin 1.0 "
+            "(vain 3 ikkunan sisäistä starttia, kaikki voittoja)"
+        )
+
+    def test_row_count_preserved(self):
+        """Funktio ei saa muuttaa runner-rivien määrää."""
+        runners = pd.DataFrame([
+            {"race_id": 1, "horse_id": "h1", "race_date": "2024-03-01",
+             "driver": "Arto", "trainer": "Matti", "finish_position": None},
+            {"race_id": 1, "horse_id": "h2", "race_date": "2024-03-01",
+             "driver": "Pekka", "trainer": "Juha", "finish_position": None},
+        ])
+        hs = _hs_starts(
+            {"driver": "Arto", "trainer": "Matti", "race_date": "2024-02-15", "finish_position": 1},
+            {"driver": "Arto", "trainer": "Matti", "race_date": "2024-02-05", "finish_position": 2},
+            {"driver": "Arto", "trainer": "Matti", "race_date": "2024-01-20", "finish_position": 3},
+        )
+        result = driver_trainer_hs_features(runners, hs)
+        assert len(result) == 2, (
+            f"Rivimäärä muuttui: syöte 2 → tulos {len(result)}"
+        )
+
+    def test_output_columns_present(self):
+        """Kaikki 4 piirresaraketta löytyvät tuloksesta."""
+        runner = self._make_runner()
+        hs = _hs_starts(
+            {"driver": "Arto", "race_date": "2024-02-01", "finish_position": 1},
+            {"driver": "Arto", "race_date": "2024-01-15", "finish_position": 2},
+            {"driver": "Arto", "race_date": "2024-01-05", "finish_position": 3},
+        )
+        result = driver_trainer_hs_features(runner, hs)
+        for col in ["driver_win_rate_60d", "driver_top3_rate_60d",
+                    "trainer_win_rate_60d", "trainer_top3_rate_60d"]:
+            assert col in result.columns, f"Sarake '{col}' puuttuu tuloksesta"

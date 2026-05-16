@@ -244,6 +244,122 @@ def driver_trainer_features(
 
 
 # ----------------------------------------------------------------------
+# 2b. Ohjastaja- ja valmentajatilastot horse_starts-taulusta (60d)
+# ----------------------------------------------------------------------
+
+def driver_trainer_hs_features(
+    runners_df: pd.DataFrame,
+    horse_starts_df: pd.DataFrame,
+    lookback_days: int = 60,
+    min_starts: int = 3,
+) -> pd.DataFrame:
+    """Laske kuljettajan ja valmentajan win%/top3% horse_starts-taulusta.
+
+    Point-in-time: käytetään vain starteja joiden race_date < runner.race_date
+    (EI <=) jotta saman päivän startit eivät vuoda.
+
+    Ikkuna: viimeiset lookback_days päivää ennen kyseistä lähtöä.
+
+    Args:
+        runners_df: DataFrame jossa sarakkeet race_id, horse_id, driver, trainer,
+                    race_date — yksi rivi per runner jota ennustetaan.
+        horse_starts_df: koko horse_starts-taulu (Travsport-historia).
+                         Vaaditut sarakkeet: driver, trainer, finish_position, race_date.
+        lookback_days: aikaikkuna päivinä (oletus 60).
+        min_starts: vähimmäisstarttimäärä — alle tämän → NaN (oletus 3).
+
+    Returns:
+        DataFrame sarakkeilla [race_id, horse_id,
+            driver_win_rate_60d, driver_top3_rate_60d,
+            trainer_win_rate_60d, trainer_top3_rate_60d].
+        NaN jos alle min_starts starttia ikkunassa.
+    """
+    runners_df = runners_df.copy()
+    runners_df["race_date"] = pd.to_datetime(runners_df["race_date"])
+
+    hs = horse_starts_df.copy()
+    hs["race_date"] = pd.to_datetime(hs["race_date"])
+    hs["is_win"]  = (hs["finish_position"] == 1).astype(float)
+    hs["is_top3"] = (hs["finish_position"] <= 3).astype(float)
+
+    suffix = f"{lookback_days}d"
+    results = []
+
+    for role in ("driver", "trainer"):
+        win_col  = f"{role}_win_rate_{suffix}"
+        top3_col = f"{role}_top3_rate_{suffix}"
+
+        if role not in runners_df.columns or role not in hs.columns:
+            # Sarake puuttuu — tuota NaN-sarakkeet
+            runners_df[win_col]  = np.nan
+            runners_df[top3_col] = np.nan
+            continue
+
+        # Valmistele historia-DataFrame: vain tarpeelliset sarakkeet
+        hist = hs[["race_date", role, "is_win", "is_top3"]].copy()
+
+        # Merge: yhdistä runners_df × hist roolisarakkeen mukaan
+        # Jokaiselle runner-riville löydetään kaikki historian rivit
+        # joilla sama driver/trainer.
+        merged = runners_df[["race_id", "horse_id", "race_date", role]].merge(
+            hist,
+            on=role,
+            suffixes=("_runner", "_hist"),
+            how="left",
+        )
+
+        # Point-in-time filter: vain startit ennen kyseistä lähtöpäivää
+        # JA ikkunan sisällä
+        cutoff_early = (
+            merged["race_date_hist"] < merged["race_date_runner"]
+        )
+        cutoff_late = (
+            merged["race_date_hist"]
+            >= merged["race_date_runner"] - pd.Timedelta(days=lookback_days)
+        )
+        in_window = merged[cutoff_early & cutoff_late].copy()
+
+        # Aggregoi per (race_id, horse_id)
+        agg = (
+            in_window.groupby(["race_id", "horse_id"])
+            .agg(
+                _n_starts=("is_win", "count"),
+                _wins=("is_win", "sum"),
+                _top3=("is_top3", "sum"),
+            )
+            .reset_index()
+        )
+
+        # win_rate / top3_rate — NaN jos alle min_starts
+        agg[win_col] = np.where(
+            agg["_n_starts"] >= min_starts,
+            agg["_wins"] / agg["_n_starts"],
+            np.nan,
+        )
+        agg[top3_col] = np.where(
+            agg["_n_starts"] >= min_starts,
+            agg["_top3"] / agg["_n_starts"],
+            np.nan,
+        )
+
+        results.append(agg[["race_id", "horse_id", win_col, top3_col]])
+
+    # Liitä tulokset runners_df:ään
+    out = runners_df[["race_id", "horse_id"]].copy()
+    for agg_df in results:
+        out = out.merge(agg_df, on=["race_id", "horse_id"], how="left")
+
+    # Varmista että kaikki sarakkeet ovat olemassa (vaikka role puuttuisi)
+    for role in ("driver", "trainer"):
+        for metric in ("win_rate", "top3_rate"):
+            col = f"{role}_{metric}_{suffix}"
+            if col not in out.columns:
+                out[col] = np.nan
+
+    return out
+
+
+# ----------------------------------------------------------------------
 # 3. Lähtöasetelma: rata, lähtörata, kilometriaika-konteksti
 # ----------------------------------------------------------------------
 
@@ -715,6 +831,20 @@ def build_feature_matrix(
 
     df = form_features(runners_with_meta, horse_starts=horse_starts)
     df = driver_trainer_features(df)
+
+    # horse_starts-pohjainen 60d driver/trainer-tilasto (ei ATG K1-bugista)
+    _hs_cols = [
+        "driver_win_rate_60d", "driver_top3_rate_60d",
+        "trainer_win_rate_60d", "trainer_top3_rate_60d",
+    ]
+    if horse_starts is not None and len(horse_starts) > 0:
+        hs_feat = driver_trainer_hs_features(df, horse_starts)
+        df = df.merge(hs_feat, on=["race_id", "horse_id"], how="left")
+    else:
+        # Sarakkeet syntyvät aina (NaN) jotta FEATURE_COLS pysyy yhtenäisenä
+        for col in _hs_cols:
+            df[col] = np.nan
+
     df = race_setup_features(df, races, horse_starts=horse_starts)  # B1: track-historia
 
     # D: ratarakenne — track-sarake on saatavilla race_setup_features():n jälkeen

@@ -66,6 +66,11 @@ FEATURE_COLS: list[str] = [
     "driver_top3_rate_365d",
     "trainer_win_rate_365d",
     "trainer_top3_rate_365d",
+    # --- horse_starts-pohjaiset 60d-tilastot (ei ATG K1-bugista) ---
+    "driver_win_rate_60d",
+    "driver_top3_rate_60d",
+    "trainer_win_rate_60d",
+    "trainer_top3_rate_60d",
     # --- Lähtöasetelma (build_features.race_setup_features) ---
     "inside_post",
     "back_row",
