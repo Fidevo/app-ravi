@@ -220,6 +220,20 @@ def train_ranker(
     """
     df = train_df.dropna(subset=["finish_position"]).copy()
 
+    # Suodata pois Travsport-erikoiskoodit (99=DNF/DQ, 104=muut statukset).
+    # LightGBM LambdaRank vaatii label < 31 (oletusarvo). Kelvollinen sijoitus
+    # on 1–20 (ravilähdöissä tyypillisesti 6–14 hevosta, max ~20).
+    _MAX_VALID_POS = 30
+    invalid_mask = ~df["finish_position"].between(1, _MAX_VALID_POS)
+    if invalid_mask.any():
+        logger.warning(
+            "train_ranker: suodatettu %d riviä joilla finish_position ei ole 1–%d "
+            "(erikoiskoodit kuten 99=DNF, 104=DQ)",
+            invalid_mask.sum(),
+            _MAX_VALID_POS,
+        )
+        df = df[~invalid_mask].copy()
+
     # Bugi #1 -korjaus (15.5.2026): LightGBM LambdaRank vaatii että rivit ovat
     # ryhmiteltynä race_id:n mukaan ja group_sizes vastaa peräkkäisten ryhmien
     # kokoja. Ilman sortausta groupby-järjestys (aakkos) ja DataFrame-järjestys
