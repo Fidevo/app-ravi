@@ -805,36 +805,51 @@ def fill_finish_positions(runners: pd.DataFrame) -> pd.DataFrame:
         Kopio DataFramesta jossa finish_position täytetty kaikille riveille
         joissa lähtö on ajettu. Rivimäärä ei muutu.
     """
-    # Kopio jota muokataan suoraan .loc:lla — vältetään groupby().apply()
-    # -sarakkeen katoamisongelma eri pandas-versioissa.
+    # Vektorisoitu toteutus — vältetään rivittäinen df.loc-silmukka joka on
+    # O(n×m) 284k+ riviä × 25k+ lähtöä -skaalalla.
     df = runners.copy()
+    df["finish_position"] = df["finish_position"].astype(float)
 
-    for _race_id, group in df.groupby("race_id"):
-        # Jos kaikki NULL → lähtöä ei ole ajettu vielä, ei muutoksia
-        if group["finish_position"].isna().all():
-            continue
+    # Vain lähdöt joissa on JOTAIN sijoituksia mutta ei kaikkia (partial races).
+    race_max = df.groupby("race_id")["finish_position"].transform("max")
+    needs_fill_mask = race_max.notna() & df["finish_position"].isna()
 
-        next_pos = int(group["finish_position"].max()) + 1
+    if not needs_fill_mask.any():
+        return df
 
-        # Ajoi mutta ei sijoitusta: järjestä km_ajan mukaan (nopein ensin)
-        ran_mask = (
-            group["finish_position"].isna()
-            & group["kilometer_time_seconds"].notna()
+    needs = df[needs_fill_mask].copy()
+    needs["_race_max"] = race_max[needs_fill_mask]
+
+    # Erottele km_aika-hevoset vs. vetäytyneet
+    has_km = needs["kilometer_time_seconds"].notna()
+    km_runners = needs[has_km].copy()
+    withdrawn = needs[~has_km].copy()
+
+    # km_aika-hevoset: järjestä nousevasti per lähtö → sijoitus = race_max + rank
+    if not km_runners.empty:
+        km_runners["_rank"] = km_runners.groupby("race_id")[
+            "kilometer_time_seconds"
+        ].rank(method="first", ascending=True)
+        km_runners["finish_position"] = km_runners["_race_max"] + km_runners["_rank"]
+
+    # Vetäytyneet: sijoitetaan km_aika-hevosten jälkeen
+    if not withdrawn.empty:
+        km_count = (
+            km_runners.groupby("race_id").size().rename("_km_count")
+            if not km_runners.empty
+            else pd.Series(dtype=int)
         )
-        if ran_mask.any():
-            for idx in group[ran_mask].sort_values("kilometer_time_seconds").index:
-                df.loc[idx, "finish_position"] = next_pos
-                next_pos += 1
-
-        # Vetäytyneet (ei km_aikaa eikä sijoitusta): viimeiset
-        withdrawn_mask = (
-            group["finish_position"].isna()
-            & group["kilometer_time_seconds"].isna()
+        withdrawn["_km_count"] = withdrawn["race_id"].map(km_count).fillna(0)
+        withdrawn["_w_rank"] = withdrawn.groupby("race_id").cumcount() + 1
+        withdrawn["finish_position"] = (
+            withdrawn["_race_max"] + withdrawn["_km_count"] + withdrawn["_w_rank"]
         )
-        if withdrawn_mask.any():
-            for idx in group[withdrawn_mask].index:
-                df.loc[idx, "finish_position"] = next_pos
-                next_pos += 1
+
+    # Päivitä df yhdellä sijoituksella
+    filled = pd.concat(
+        [x[["finish_position"]] for x in [km_runners, withdrawn] if not x.empty]
+    )
+    df.loc[filled.index, "finish_position"] = filled["finish_position"]
 
     return df
 
