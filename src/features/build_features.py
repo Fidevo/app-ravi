@@ -1470,6 +1470,66 @@ def track_condition_win_rate_features(
 
 
 # ----------------------------------------------------------------------
+# M1: Markkinaodds-todennäköisyys
+# ----------------------------------------------------------------------
+
+def market_odds_feature(runners_df: pd.DataFrame) -> pd.DataFrame:
+    """Laske devigoitu markkinatodennäköisyys ATG closing-line kertoimesta.
+
+    Käyttää runners-taulun win_odds_final-saraketta joka edustaa ATG:n
+    viimeistä pari-mutuel-kerrointa ennen lähtöä. Devigointi poistaa
+    bookmakerin marginaalin: 1/odds-summa per lähtö on tyypillisesti ~1.15,
+    ja jakamalla tällä saadaan todelliset todennäköisyydet jotka summautuvat
+    1.0:aan per lähtö.
+
+    Treenauksessa (historiallinen data): win_odds_final saatavilla → piirre
+    laskettu kaikille runnereille.
+
+    Ennustuksessa (päivän lähdöt): win_odds_final=NULL → market_implied_prob=NaN.
+    Dashboard täyttää NaN:t live-kertoimilla odds_snapshots-taulusta
+    (_inject_live_market_odds, app.py) ennen mallikutsua.
+
+    Args:
+        runners_df: DataFrame jossa vähintään race_id, horse_id.
+            Valinnaisesti win_odds_final (Float) — jos puuttuu, kaikki NaN.
+
+    Returns:
+        DataFrame sarakkeilla [race_id, horse_id, market_implied_prob].
+    """
+    df = runners_df[["race_id", "horse_id"]].copy()
+    df["market_implied_prob"] = float("nan")
+
+    if "win_odds_final" not in runners_df.columns:
+        return df
+
+    work = runners_df[["race_id", "horse_id", "win_odds_final"]].copy()
+    valid = work[work["win_odds_final"] > 1.0].copy()
+
+    if valid.empty:
+        return df
+
+    # 1/odds = raaka implisiittinen todennäköisyys (sisältää vigin)
+    valid["raw_prob"] = 1.0 / valid["win_odds_final"]
+
+    # Devig per lähtö: jaa jokaisen runnerin raw_prob lähdön vig-kertoimella
+    race_vig = (
+        valid.groupby("race_id")["raw_prob"]
+        .sum()
+        .rename("race_vig")
+        .reset_index()
+    )
+    valid = valid.merge(race_vig, on="race_id", how="left")
+    valid["market_implied_prob"] = valid["raw_prob"] / valid["race_vig"]
+
+    df = df.merge(
+        valid[["race_id", "horse_id", "market_implied_prob"]],
+        on=["race_id", "horse_id"],
+        how="left",
+    )
+    return df
+
+
+# ----------------------------------------------------------------------
 # Yhdistäjä
 # ----------------------------------------------------------------------
 
@@ -1616,5 +1676,14 @@ def build_feature_matrix(
     # B2: sukutaulupiirteet — vaatii sekä horse_starts että horses-parametrin
     if horse_starts is not None and horses is not None:
         df = sire_features(df, horses, horse_starts)
+
+    # M1: Markkinaodds-todennäköisyys (win_odds_final → devigoitu implied prob)
+    # Treenauksessa: win_odds_final saatavilla → feature lasketaan.
+    # Ennustuksessa: win_odds_final=NULL → NaN → dashboardissa täytetään
+    # live-kertoimilla (ks. app.py _inject_live_market_odds).
+    mkt = market_odds_feature(df)
+    mkt["race_id"] = mkt["race_id"].astype(df["race_id"].dtype)
+    mkt["horse_id"] = mkt["horse_id"].astype(df["horse_id"].dtype)
+    df = df.merge(mkt, on=["race_id", "horse_id"], how="left")
 
     return df

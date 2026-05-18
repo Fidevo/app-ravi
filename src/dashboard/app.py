@@ -103,6 +103,12 @@ def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
         st.warning("Mallia ei löydy data/-hakemistosta.")
         return None
 
+    # M1: Täytä market_implied_prob live-kertoimilla niille lähdöille
+    # joilla win_odds_final=NULL (päivän tulevat lähdöt).
+    # Treenidata käyttää closing-line win_odds_final:ia, ennustuksessa
+    # käytetään odds_snapshots-taulun live-kertoimia.
+    features = _inject_live_market_odds(features, db_path)
+
     try:
         preds = predict_win_probabilities(model, features)
         return features.merge(
@@ -199,6 +205,90 @@ def render_shap_section(model: lgb.Booster, rdf: pd.DataFrame) -> None:
             )
     except Exception as e:
         st.warning(f"SHAP-laskenta epäonnistui: {e}")
+
+
+# ---------------------------------------------------------------------------
+# M1: Live-market-odds injektio ennusteputkeen
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT_PRIORITY_MAP = {label: i for i, label in enumerate(_SNAPSHOT_PRIORITY)}
+
+
+def _inject_live_market_odds(features: pd.DataFrame, db_path: str) -> pd.DataFrame:
+    """Täytä market_implied_prob live-kertoimilla niille runnereille joilla se on NaN.
+
+    Treenidata: win_odds_final saatavilla → market_implied_prob laskettu build_features:ssa.
+    Ennustus (päivän lähdöt): win_odds_final=NULL → NaN → tämä funktio täyttää
+    odds_snapshots-taulun live-kertoimilla (T-2min > T-5min > T-10min > T-15min).
+
+    Devig lasketaan per lähtö jotta todennäköisyydet summautuvat 1.0:aan.
+    Epäonnistuminen (ei kertoimia, ei saraketta) on hiljainen — malli käyttää NaN:ia.
+    """
+    if "market_implied_prob" not in features.columns:
+        return features
+    if not features["market_implied_prob"].isna().any():
+        return features  # Kaikilla on jo arvo (esim. historiallinen data)
+
+    try:
+        con = sqlite3.connect(db_path)
+        odds_df = pd.read_sql("""
+            SELECT runner_id,
+                   COALESCE(devigged_win_odds, win_odds) AS raw_odds,
+                   snapshot_label
+            FROM odds_snapshots
+            WHERE snapshot_label IN ('T-2min', 'T-5min', 'T-10min', 'T-15min')
+        """, con)
+        con.close()
+    except Exception:
+        return features
+
+    if odds_df.empty:
+        return features
+
+    # Pura race_id ja start_number runner_id:stä (format: "{race_id}_{start_number}")
+    split = odds_df["runner_id"].str.rsplit("_", n=1, expand=True)
+    odds_df["_race_id"] = split[0]
+    odds_df["_start_number"] = split[1]
+
+    # Suodata vain päivän lähdöt
+    day_race_ids = features["race_id"].astype(str).unique()
+    odds_df = odds_df[odds_df["_race_id"].isin(day_race_ids)]
+
+    if odds_df.empty:
+        return features
+
+    # Paras snapshot per runner (T-2min > T-5min > T-10min > T-15min)
+    odds_df["_priority"] = odds_df["snapshot_label"].map(_SNAPSHOT_PRIORITY_MAP).fillna(99).astype(int)
+    best = (
+        odds_df[odds_df["raw_odds"] > 1.0]
+        .sort_values("_priority")
+        .drop_duplicates("runner_id", keep="first")
+        .copy()
+    )
+
+    if best.empty:
+        return features
+
+    # Devig per lähtö
+    best["_raw_prob"] = 1.0 / best["raw_odds"]
+    race_vig = best.groupby("_race_id")["_raw_prob"].sum().rename("_race_vig").reset_index()
+    best = best.merge(race_vig, on="_race_id", how="left")
+    best["_live_mip"] = best["_raw_prob"] / best["_race_vig"]
+
+    # Merge features ← best via (race_id, start_number)
+    features = features.copy()
+    features["_race_id_str"] = features["race_id"].astype(str)
+    features["_start_number_str"] = features["start_number"].astype(str)
+
+    lookup = best.set_index(["_race_id", "_start_number"])["_live_mip"]
+
+    mask = features["market_implied_prob"].isna()
+    keys = list(zip(features.loc[mask, "_race_id_str"], features.loc[mask, "_start_number_str"]))
+    live_values = [lookup.get(k, float("nan")) for k in keys]
+    features.loc[mask, "market_implied_prob"] = live_values
+
+    features = features.drop(columns=["_race_id_str", "_start_number_str"])
+    return features
 
 
 # ---------------------------------------------------------------------------

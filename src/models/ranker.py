@@ -41,6 +41,7 @@ FEATURE_COLS: list[str] = [
     "form_avg_km_time_5",
     "form_best_km_time_5",
     "form_market_avg_5",
+    "market_implied_prob",      # M1: devigoitu markkinatodennäköisyys (closing line / live)
     "form_days_since_last",
     # B2: segmentoidut muotopiirteet — vain sama starttimuoto / matkaluokka
     "form_avg_finish_5_same_method",
