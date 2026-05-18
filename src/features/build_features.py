@@ -1470,6 +1470,140 @@ def track_condition_win_rate_features(
 
 
 # ----------------------------------------------------------------------
+# 13. Muutospiirteet: ohjastajan vaihto ja matkamuutos
+# ----------------------------------------------------------------------
+
+def change_features(
+    runners_df: pd.DataFrame,
+    horse_starts_df: pd.DataFrame,
+    races_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Laske muutospiirteet edelliseen starttiin verrattuna.
+
+    driver_changed (float 0.0/1.0):
+      1.0 jos nykyisen lähdön kuski on eri kuin hevosen viimeisin kuski
+      horse_starts-historiassa. 0.0 jos sama. NaN jos ei historiaa tai
+      kuskin nimi puuttuu.
+
+    distance_change_m (float):
+      Nykyinen matka (metreissä) - edellinen matka.
+      Positiivinen = pidempi matka nyt. NaN jos ei historiaa.
+
+    Point-in-time: vain horse_starts joiden race_date < runner.race_date
+    (EI <=) jotta saman päivän startit eivät vuoda.
+
+    Niminormalisointi: Travsport tallentaa "Sukunimi Etunimi" → muunnetaan
+    ATG-formaattiin "Etunimi Sukunimi" ennen vertailua.
+
+    Args:
+        runners_df: vaaditut sarakkeet: race_id, horse_id, race_date.
+            Valinnaisesti driver (nykyinen kuski), distance (nykyinen matka).
+        horse_starts_df: vaaditut sarakkeet: horse_id, race_date.
+            Valinnaisesti driver, distance.
+        races_df: käytetään vain jos distance puuttuu runners_df:stä.
+            Vaadittu sarake: race_id, distance.
+
+    Returns:
+        DataFrame sarakkeilla [race_id, horse_id, driver_changed, distance_change_m].
+        NaN jos ei historiaa tai tarvittava sarake puuttuu.
+    """
+    runners_df = runners_df.copy()
+    runners_df["race_date"] = pd.to_datetime(runners_df["race_date"])
+    runners_df["horse_id"] = runners_df["horse_id"].astype(str)
+
+    hs = horse_starts_df.copy()
+    hs["race_date"] = pd.to_datetime(hs["race_date"])
+    hs["horse_id"] = hs["horse_id"].astype(str)
+
+    # Normalisoi Travsport-nimet ATG-formaattiin (Sukunimi Etunimi → Etunimi Sukunimi)
+    if "driver" in hs.columns:
+        hs["driver"] = hs["driver"].map(
+            lambda n: _normalize_driver_name(n) if isinstance(n, str) else n
+        )
+
+    # Rakenna runners-työ-DataFrame nykyisillä arvoilla
+    runners_work = runners_df[["race_id", "horse_id", "race_date"]].copy()
+    runners_work["race_id"] = runners_work["race_id"].astype(str)
+
+    # Nykyinen kuski runners_df:stä
+    has_curr_driver = "driver" in runners_df.columns
+    if has_curr_driver:
+        runners_work["curr_driver"] = runners_df["driver"].values
+
+    # Nykyinen matka: runners_df > races_df
+    if "distance" in runners_df.columns:
+        runners_work["curr_distance"] = runners_df["distance"].values
+    elif "distance" in races_df.columns:
+        dist_map = (
+            races_df[["race_id", "distance"]]
+            .drop_duplicates("race_id")
+            .copy()
+        )
+        dist_map["race_id"] = dist_map["race_id"].astype(str)
+        runners_work = runners_work.merge(
+            dist_map.rename(columns={"distance": "curr_distance"}),
+            on="race_id",
+            how="left",
+        )
+
+    # horse_starts-osa: vain tarvittavat sarakkeet, nimetään konfliktin estämiseksi
+    hs_cols_src: dict[str, str] = {
+        "horse_id": "horse_id",
+        "race_date": "hist_date",
+    }
+    has_hist_driver = "driver" in hs.columns
+    has_hist_distance = "distance" in hs.columns
+    if has_hist_driver:
+        hs_cols_src["driver"] = "hist_driver"
+    if has_hist_distance:
+        hs_cols_src["distance"] = "hist_distance"
+
+    hs_sub = hs[[c for c in hs_cols_src]].rename(columns=hs_cols_src)
+
+    # Merge: runners × horse_starts per horse_id, sitten point-in-time-suodatus
+    merged = runners_work.merge(hs_sub, on="horse_id", how="left")
+    merged = merged[merged["hist_date"] < merged["race_date"]].copy()
+
+    # Viimeisin start per (race_id, horse_id) = suurin hist_date
+    merged = merged.sort_values(["race_id", "horse_id", "hist_date"])
+    last = merged.groupby(["race_id", "horse_id"]).last().reset_index()
+    last["race_id"] = last["race_id"].astype(str)
+
+    # driver_changed: 1.0 jos eri kuski, 0.0 jos sama, NaN jos tieto puuttuu
+    if has_curr_driver and has_hist_driver and "curr_driver" in last.columns and "hist_driver" in last.columns:
+        last["driver_changed"] = np.where(
+            last["curr_driver"].isna() | last["hist_driver"].isna(),
+            np.nan,
+            (last["curr_driver"] != last["hist_driver"]).astype(float),
+        )
+    else:
+        last["driver_changed"] = np.nan
+
+    # distance_change_m: nykyinen - edellinen matka
+    if "curr_distance" in last.columns and has_hist_distance and "hist_distance" in last.columns:
+        last["distance_change_m"] = (
+            last["curr_distance"].astype(float) - last["hist_distance"].astype(float)
+        )
+    else:
+        last["distance_change_m"] = np.nan
+
+    out = runners_df[["race_id", "horse_id"]].copy()
+    out["race_id"] = out["race_id"].astype(str)
+    out = out.merge(
+        last[["race_id", "horse_id", "driver_changed", "distance_change_m"]],
+        on=["race_id", "horse_id"],
+        how="left",
+    )
+
+    # Varmista sarakkeet olemassa (tyhjä horse_starts → NaN)
+    for col in ("driver_changed", "distance_change_m"):
+        if col not in out.columns:
+            out[col] = np.nan
+
+    return out
+
+
+# ----------------------------------------------------------------------
 # M1: Markkinaodds-todennäköisyys
 # ----------------------------------------------------------------------
 
@@ -1676,6 +1810,19 @@ def build_feature_matrix(
     # B2: sukutaulupiirteet — vaatii sekä horse_starts että horses-parametrin
     if horse_starts is not None and horses is not None:
         df = sire_features(df, horses, horse_starts)
+
+    # 13: Muutospiirteet — ohjastajan vaihto ja matkamuutos edelliseen starttiin
+    # driver_changed: 1 jos eri kuski kuin viimeisin horse_starts-startti (point-in-time)
+    # distance_change_m: nykyinen matka - edellinen matka (metreinä)
+    _chg_cols = ["driver_changed", "distance_change_m"]
+    if horse_starts is not None and len(horse_starts) > 0:
+        chg_feat = change_features(df, horse_starts, races)
+        chg_feat["race_id"] = chg_feat["race_id"].astype(df["race_id"].dtype)
+        chg_feat["horse_id"] = chg_feat["horse_id"].astype(df["horse_id"].dtype)
+        df = df.merge(chg_feat, on=["race_id", "horse_id"], how="left")
+    else:
+        for col in _chg_cols:
+            df[col] = np.nan
 
     # M1: Markkinaodds-todennäköisyys (win_odds_final → devigoitu implied prob)
     # Treenauksessa: win_odds_final saatavilla → feature lasketaan.

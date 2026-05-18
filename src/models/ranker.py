@@ -133,6 +133,9 @@ FEATURE_COLS: list[str] = [
     "km_time_trend",            # km-ajan suuntaus: neg=nopeutuu, pos=hidastuu (C5)
     "prize_money_trend",        # palkintorahan suuntaus: pos=nousee luokkaa (C5)
     "track_condition_win_rate", # voitto-% samassa normalisoidussa rataolossa (C5)
+    # --- Muutospiirteet (build_features.change_features) ---
+    "driver_changed",           # 1 jos eri kuski kuin edellisessä startissa (signaali)
+    "distance_change_m",        # matkamuutos metreinä (pos=pidempi, neg=lyhyempi)
     # --- D: Ratarakenne (build_features.track_structure_features) ---
     # Vaatii tracks-taulun tracks-parametrina build_feature_matrix():lle.
     # NaN jos rata puuttuu taulusta (gallop-radat, manuaaliset stub-rivit).
@@ -195,7 +198,7 @@ def train_ranker(
     train_df: pd.DataFrame,
     feature_cols: Sequence[str] = FEATURE_COLS,
     categorical_cols: Sequence[str] = CATEGORICAL_COLS,
-    num_boost_round: int = 500,
+    num_boost_round: int = 700,
     random_state: int | None = None,
 ) -> lgb.Booster:
     """Treenaa LightGBM lambdarank-objectivella.
@@ -253,11 +256,12 @@ def train_ranker(
         "metric": "ndcg",
         "ndcg_at": [1, 3],
         "learning_rate": 0.05,
-        "num_leaves": 31,
-        "min_data_in_leaf": 20,
+        "num_leaves": 63,        # 31→63: enemmän kapasiteettia uusille piirteille
+        "min_data_in_leaf": 30,  # 20→30: ehkäisee ylisovittumista suuremmalla puulla
         "feature_fraction": 0.8,
         "bagging_fraction": 0.8,
         "bagging_freq": 5,
+        "lambda_l1": 0.05,       # Lievä L1-regularisointi — karsii nollakertoimiset piirteet
         "verbose": -1,
     }
     if random_state is not None:

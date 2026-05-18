@@ -7,6 +7,7 @@ Taydellinen pipeline 2026-05-16
   5. Feature importance top-15 (gain)
   6. Tallenna malli -> dashboard poimii automaattisesti
 """
+import json
 import sys
 import time
 sys.path.insert(0, "/home/ravi/app-ravi")
@@ -20,6 +21,7 @@ from src.models.ranker import (
     FEATURE_COLS,
     train_ranker,
     predict_win_probabilities,
+    calibrate_temperature,
     compute_nll,
 )
 from src.models.backtest import rolling_walk_forward
@@ -131,10 +133,44 @@ print(f"  Treenaus valmis ({time.time() - t_train:.0f}s). Tallennettu: {OUT_PATH
 print(f"  Mallin piirteet: {len(model.feature_name())}")
 
 # ------------------------------------------------------------------
+# 3b. Kalibrointi — temperature scaling (test-setillä)
+# ------------------------------------------------------------------
+hr("3b/5  Temperature scaling -kalibrointi")
+# Ennusta raw-pisteet test-setille kalibrointia varten (temperature=1.0)
+preds_raw = predict_win_probabilities(model, test_df, temperature=1.0)
+# Yhdistä finish_position kalibrointia varten
+calib_df = preds_raw.merge(
+    test_df[["race_id", "horse_id", "finish_position"]],
+    on=["race_id", "horse_id"],
+    how="left",
+)
+T_opt = calibrate_temperature(calib_df)
+print(f"  Optimaalinen lämpötila T = {T_opt:.4f}")
+if T_opt < 1.0:
+    print("  Tulkinta: T < 1 → terävöittää jakaumaa (suosikit enemmän esiin)")
+elif T_opt > 1.0:
+    print("  Tulkinta: T > 1 → tasoittaa jakaumaa (tasaisempi kilpailu)")
+else:
+    print("  Tulkinta: T ≈ 1 → ei kalibrointivaikutusta")
+
+# Tallenna T ja muut metatiedot mallin viereen (.lgb → _meta.json)
+META_PATH = OUT_PATH.replace(".lgb", "_meta.json")
+meta = {
+    "temperature": T_opt,
+    "split_date": SPLIT_DATE,
+    "today": TODAY,
+    "num_features": len(model.feature_name()),
+    "feature_names": model.feature_name(),
+}
+with open(META_PATH, "w") as _f:
+    json.dump(meta, _f, indent=2)
+print(f"  Meta tallennettu: {META_PATH}")
+
+# ------------------------------------------------------------------
 # 4. Evaluoi test-setilla
 # ------------------------------------------------------------------
 hr("4/5  Evaluointi test-setilla")
-preds  = predict_win_probabilities(model, test_df)
+preds  = predict_win_probabilities(model, test_df, temperature=T_opt)
 merged = test_df.merge(
     preds[["race_id", "horse_id", "win_prob"]], on=["race_id", "horse_id"]
 )

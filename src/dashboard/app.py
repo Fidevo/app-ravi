@@ -13,6 +13,7 @@ Ominaisuudet:
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -39,18 +40,34 @@ st.set_page_config(page_title="Ravit Edge", layout="wide", page_icon="🏇")
 # ---------------------------------------------------------------------------
 
 @st.cache_data
-def _load_model_cached(model_path: str, _mtime: float) -> lgb.Booster:
-    """Välimuistitettu malli — invalidoituu automaattisesti kun tiedosto muuttuu."""
-    return lgb.Booster(model_file=model_path)
+def _load_model_cached(model_path: str, _mtime: float) -> tuple[lgb.Booster, float]:
+    """Välimuistitettu malli — invalidoituu automaattisesti kun tiedosto muuttuu.
+
+    Palauttaa (model, temperature) -tuplen. Lukee temperature pipeline-ajon
+    tallentamasta _meta.json-tiedostosta. Jos metaa ei löydy, T=1.0 (ei skaalausta).
+    """
+    booster = lgb.Booster(model_file=model_path)
+    meta_path = model_path.replace(".lgb", "_meta.json")
+    temperature = 1.0
+    try:
+        with open(meta_path) as _f:
+            meta = json.load(_f)
+            temperature = float(meta.get("temperature", 1.0))
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass  # Vanha malli ilman meta-tiedostoa — käytä T=1.0
+    return booster, temperature
 
 
-def load_model() -> lgb.Booster | None:
+def load_model() -> tuple[lgb.Booster, float] | tuple[None, float]:
     """Lataa uusin malli data/-hakemistosta. Käyttää mtime-pohjaista välimuistia:
     jos model-tiedosto päivitetään (uusi treeni), uusi malli ladataan automaattisesti
-    ilman palvelimen uudelleenkäynnistystä."""
+    ilman palvelimen uudelleenkäynnistystä.
+
+    Palauttaa (model, temperature) -tuplen. temperature=1.0 jos ei meta-tiedostoa.
+    """
     models = sorted(Path(".").glob(_MODEL_GLOB))
     if not models:
-        return None
+        return None, 1.0
     path = str(models[-1])
     mtime = models[-1].stat().st_mtime
     return _load_model_cached(path, mtime)
@@ -98,7 +115,7 @@ def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
         st.error(f"Feature-virhe: {e}")
         return None
 
-    model = load_model()
+    model, temperature = load_model()
     if model is None:
         st.warning("Mallia ei löydy data/-hakemistosta.")
         return None
@@ -110,7 +127,7 @@ def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
     features = _inject_live_market_odds(features, db_path)
 
     try:
-        preds = predict_win_probabilities(model, features)
+        preds = predict_win_probabilities(model, features, temperature=temperature)
         return features.merge(
             preds[["race_id", "horse_id", "win_prob"]],
             on=["race_id", "horse_id"],
@@ -355,7 +372,7 @@ def main() -> None:
     else:
         tracks_sorted = ["(tuntematon)"]
 
-    model = load_model()
+    model, _temperature = load_model()
 
     for track_name in tracks_sorted:
         if track_col:
