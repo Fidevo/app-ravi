@@ -1581,9 +1581,15 @@ class TestStartPositionFeatures:
     """Testit start_position_features()-funktiolle."""
 
     def test_start_position_win_rate_basic(self):
-        """Starttirata 1 voittaa 3/5 → win_rate = 0.60."""
+        """Point-in-time: lähtö joka näkee 5 aiempaa lähtöä saa win_rate = 0.60 (3/5).
+
+        Vanha testi odotti globaalia aggregaattia (race_id=1 → 0.60). Korjattu
+        18.5.2026 auditoinnin yhteydessä: point-in-time tarkoittaa että race_id=1
+        ei näe omaa tulostaan → NaN. Race_id=6 (päivä kaikkien jälkeen) näkee
+        5 aiempaa lähtöä → 3/5 = 0.60.
+        """
         runners = _runners(
-            # Historiadata: 5 lähtöä, starttirata 1, Solvalla
+            # 5 historiallista lähtöä (muodostavat historiadatan)
             {"race_id": 1, "horse_id": 1, "race_date": "2024-01-01",
              "start_number": 1, "finish_position": 1},
             {"race_id": 2, "horse_id": 2, "race_date": "2024-01-08",
@@ -1594,6 +1600,9 @@ class TestStartPositionFeatures:
              "start_number": 1, "finish_position": 2},
             {"race_id": 5, "horse_id": 5, "race_date": "2024-01-29",
              "start_number": 1, "finish_position": 3},
+            # Ennustettava lähtö — race_date kaikkien 5 jälkeen → näkee 3/5 voittoa
+            {"race_id": 6, "horse_id": 6, "race_date": "2024-02-05",
+             "start_number": 1, "finish_position": 2},
         )
         races = _races(
             {"race_id": 1, "track": "Solvalla"},
@@ -1601,11 +1610,18 @@ class TestStartPositionFeatures:
             {"race_id": 3, "track": "Solvalla"},
             {"race_id": 4, "track": "Solvalla"},
             {"race_id": 5, "track": "Solvalla"},
+            {"race_id": 6, "track": "Solvalla"},
         )
         result = start_position_features(runners, races, min_samples=5)
-        val = result[result["race_id"].astype(str) == "1"]["start_position_win_rate"].iloc[0]
+        # race_id=6 näkee kaikki 5 aiempaa → 3 voittoa / 5 = 0.60
+        val = result[result["race_id"].astype(str) == "6"]["start_position_win_rate"].iloc[0]
         assert val == pytest.approx(3 / 5), (
             f"start_position_win_rate = {val}, odotettiin 0.60 (3/5 voittoa)"
+        )
+        # Point-in-time: race_id=1 ei näe omaa tulostaan → alle min_samples → NaN
+        val_first = result[result["race_id"].astype(str) == "1"]["start_position_win_rate"].iloc[0]
+        assert pd.isna(val_first), (
+            f"race_id=1:llä ei saa olla point-in-time-historiaa, saatiin {val_first}"
         )
 
     def test_start_position_win_rate_nan_below_min_samples(self):

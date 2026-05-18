@@ -41,7 +41,14 @@ FEATURE_COLS: list[str] = [
     "form_avg_km_time_5",
     "form_best_km_time_5",
     "form_market_avg_5",
-    "market_implied_prob",      # M1: devigoitu markkinatodennäköisyys (closing line / live)
+    # market_implied_prob on POISTETTU FEATURE_COLS:ista (18.5.2026, auditoijan suositus).
+    # Perustelut: Copycat-ansa — malli joka kopioi markkinaa tuottaa edge ≈ 0.
+    # Arvo: edge = mallin_riippumaton_prob × markkinakerroin − 1.
+    # Riippumaton ennuste vs. markkina = aito signaali.
+    # Piirre lasketaan edelleen feature-matriisiin (build_features.market_odds_feature)
+    # ja injektoidaan live-kertoimilla dashboardissa (_inject_live_market_odds)
+    # vertaisusarakkeena — mutta EI syötetä mallille.
+    # Aktivointiehto: aja ROI-ablation (ei Brier) — vain ROI paljastaa Copycat-ansan.
     "form_days_since_last",
     # B2: segmentoidut muotopiirteet — vain sama starttimuoto / matkaluokka
     "form_avg_finish_5_same_method",

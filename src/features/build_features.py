@@ -1564,9 +1564,12 @@ def change_features(
     merged = runners_work.merge(hs_sub, on="horse_id", how="left")
     merged = merged[merged["hist_date"] < merged["race_date"]].copy()
 
-    # Viimeisin start per (race_id, horse_id) = suurin hist_date
+    # Viimeisin start per (race_id, horse_id) = suurin hist_date.
+    # D-korjaus (18.5.2026): groupby().last() ottaa viimeisen EI-NaN-arvon PER SARAKE
+    # erikseen — eri startien arvot sekoittuvat jos joillakin on NaN.
+    # Ratkaisu: .tail(1) ottaa todellisen viimeisen RIVIN koko DataFrame-järjestyksessä.
     merged = merged.sort_values(["race_id", "horse_id", "hist_date"])
-    last = merged.groupby(["race_id", "horse_id"]).last().reset_index()
+    last = merged.groupby(["race_id", "horse_id"], sort=False).tail(1).copy()
     last["race_id"] = last["race_id"].astype(str)
 
     # driver_changed: 1.0 jos eri kuski, 0.0 jos sama, NaN jos tieto puuttuu
@@ -1655,6 +1658,11 @@ def market_odds_feature(runners_df: pd.DataFrame) -> pd.DataFrame:
     valid = valid.merge(race_vig, on="race_id", how="left")
     valid["market_implied_prob"] = valid["raw_prob"] / valid["race_vig"]
 
+    # B-korjaus (18.5.2026): df:ssä on jo market_implied_prob=NaN (alustus alussa).
+    # Jos mergettaisiin suoraan, syntyisi market_implied_prob_x ja _x/_y -konflikti.
+    # Ratkaisu: poistetaan NaN-alustus ennen mergeä. Left join tuottaa NaN:t
+    # automaattisesti runnerille jotka eivät ole valid-joukossa (odds ≤ 1.0 tai NULL).
+    df = df.drop(columns=["market_implied_prob"])
     df = df.merge(
         valid[["race_id", "horse_id", "market_implied_prob"]],
         on=["race_id", "horse_id"],
