@@ -625,3 +625,147 @@ python3 scripts/pipeline_20260516.py
 | E — Lounasravien ansa (Bugi #4) | 🟠 Auki | Ennen 3.6.2026 |
 | I — Backtest isotonic-kalibrointi | 🟡 TODO kirjattu | Kun 90+ vrk dataa |
 | H — Bugi #6 docstring (apply_rule_4) | 🟡 Kosmeettinen | Milloin tahansa |
+
+---
+
+# 📬 KEHITTÄJÄN LISÄPÄIVITYS — 19.5.2026
+
+> Pipeline-ajojen yhteydessä löytyi kolme uutta ongelmaa joita ei ollut
+> tiedossa A–D-korjausvaiheessa. Kaikki korjattu. Alla dokumentaatio.
+
+## 🔍 Juurisyyanalyysi: miksi muoto-piirteet olivat 4.9 % kattavuudella
+
+Ensimmäinen pipeline-ajo (A–D-korjausten jälkeen) näytti dashboardissa
+kaikkien hevosten todennäköisyydet lähes tasaisina (6–19 %). Selvitimme syyn.
+
+### Löydös: runners.finish_position oli 98.8 % NULL
+
+```
+runners yhteensä:               284 647
+finish_position NOT NULL ennen:   3 481  (1.2 %)
+finish_position NULL:           281 166  (98.8 %)
+```
+
+`form_features()` laskee muoto-piirteet runners- ja horse_starts-taulujen
+yhdistelmästä. Koska runners:ssa ei ollut tuloksia, malli toimi käytännössä
+sokkona 95 %:lle hevosista. horse_starts kattaa vain 4 377/19 052 hevosta
+(23 %) — loput ovat ratoja joista Travsport-scraperia ei ole ajettu.
+
+**Ratkaisu:** päivitettiin runners.finish_position horse_starts:sta
+matchaamalla (horse_id, race_date):
+
+```sql
+UPDATE runners
+SET finish_position = (
+    SELECT hs.finish_position FROM horse_starts hs
+    JOIN races ra ON runners.race_id = ra.race_id
+    WHERE hs.horse_id = runners.horse_id
+      AND hs.race_date = ra.race_date
+      AND hs.finish_position IS NOT NULL
+    LIMIT 1
+)
+WHERE runners.finish_position IS NULL AND EXISTS (...)
+```
+
+Tulos: **3 481 → 81 173** runners:ia joilla finish_position (1 % → 28 %).
+
+**Huomio auditoijalle:** Track-nimifornamaatit eivät täsmää suoraan
+(horse_starts: `Bs`, `G`, `Ro` — races: `Bergsåker`, `Göteborg`...).
+Join onnistui horse_id + race_date -yhdistelmällä ilman track-filteriä.
+Näin tuplat ovat teoriassa mahdollisia jos hevonen kilpaili kahdessa
+lähdössä samana päivänä — raviurheilussa äärimmäisen harvinaista,
+mutta `LIMIT 1` ottaa tässä tapauksessa satunnaisen rivin. **TODO:**
+lisätään race_number tai travsport_race_id tarkemmaksi avaimeksi.
+
+## 🐛 Bugi: Travsport-erikoiskoodit rikkovat LambdaRankin
+
+Kun finish_position kopioitiin horse_starts:sta, mukaan tuli
+Travsport-statuskoodeja:
+- `99` = DNF / diskvalifioitu
+- `104` = muu Travsport-statuskoodi
+
+LightGBM LambdaRank laskee `relevance = max_pos - finish_position + 1`.
+Lähdössä jossa yksi hevonen sai koodin 104: voittajan relevance = 104 →
+LightGBM kaatui: `Label 104 is not less than the number of label mappings (31)`.
+
+**Korjaus 1 — DB:** nollattu virheelliset arvot:
+```sql
+UPDATE runners SET finish_position = NULL
+WHERE finish_position > 30 OR finish_position < 1
+-- Nollattu: 19 461 riviä
+```
+
+**Korjaus 2 — train_ranker() suodatin** (`src/models/ranker.py`, commit `875336a`):
+```python
+_MAX_VALID_POS = 30
+invalid_mask = ~df["finish_position"].between(1, _MAX_VALID_POS)
+if invalid_mask.any():
+    logger.warning("train_ranker: suodatettu %d riviä...", invalid_mask.sum())
+    df = df[~invalid_mask].copy()
+```
+
+Kaksikerroksinen suojaus: DB on siivottu, mutta koodisuodatin estää
+kaatumisen myös tulevilla horse_starts-päivityksillä.
+
+## ⚡ Suorituskykykorjaus: fill_finish_positions() vektorisointi
+
+`fill_finish_positions()` täyttää puuttuvat sijoitukset lähdöissä joissa
+osa hevosista on kirjattu mutta osa ei. Vanha toteutus käytti
+`df.loc[idx] = arvo` rivittäin for-silmukassa — O(n×m) 284k runneria
+× 25k lähtöä -skaalalla. Kun DB-päivityksen jälkeen huomattavasti
+useammassa lähdössä on osittainen data, funktio jumiutui.
+
+**Korjaus** (`src/features/build_features.py`, commit `abf701d`):
+Korvattu `groupby().rank()` + yksittäisellä `df.loc`-batch-päivityksellä.
+
+## ✅ Lopullinen mallitulos (19.5.2026, kolmas ajo)
+
+```
+runners finish_position NOT NULL:  81 173  (vs. 3 481 aiemmin)
+form_avg_finish_5 kattavuus:       nousi yli 15 % -kynnyksen (ei enää varoituksissa)
+
+Temperature T:   0.6587   (vs. 1.9070 aiemmin)
+Tulkinta:        T < 1 → suosikit erottuvat selvästi (oikea käytös)
+
+Brier (kaikki):  0.0739   (vs. 0.0775 aiemmin)
+Brier (V-pelit): 0.0752
+Naive baseline:  0.0816
+dBrier:         +0.0077   (vs. +0.0043 aiemmin — lähes 2× parannus)
+```
+
+### Top-5 piirrettä (gain) — dramaattinen muutos
+
+| # | Piirre | Gain | Huomio |
+|---|---|---|---|
+| 1 | `distance_change_m` | 230 294 | Uusi piirre — ylivoimaisesti tärkein |
+| 2 | `driver_changed` | 52 918 | Uusi piirre — toimii erinomaisesti |
+| 3 | `inside_post` | 33 736 | Starttiasema |
+| 4 | `form_best_km_time_5` | 25 241 | Muoto-piirre — **toimii nyt** |
+| 5 | `form_avg_km_time_5` | 22 491 | Muoto-piirre — **toimii nyt** |
+
+Aiemmassa mallissa `prize_money_trend` oli #1 (gain 1 034) koska malli
+ei saanut muoto-dataa. Nyt se on pudonnut #9:ksi (gain 9 652) —
+hierarkia on oikea kun oikea data on saatavilla. Temperature T kääntyi
+1.9→0.66 eli malli on nyt aidosti differentioiva eikä tasoittava.
+
+### Walk-forward
+
+Walk-forward keskeytettiin — se treenasi useita täysimittaisia malleja
+(`num_boost_round=700`) 30 päivän ikkunoissa koko 2023–2026 aineistolla.
+Tämä on laskennallisesti liian raskas nykyisellä arkkitehtuurilla
+(~10 min per ikkuna × kymmeniä ikkunoita). **TODO:** rajoita
+walk-forward käyttämään kevyempää `num_boost_round` tai lyhyempää
+ikkunaa evaluointitarkoituksiin.
+
+## 📋 Päivitetty tilannetaulukko
+
+| Kohta | Tila |
+|---|---|
+| A–D (auditoijan kriittiset) | ✅ Korjattu |
+| runners.finish_position backfill | ✅ Korjattu |
+| Travsport erikoiskoodit (99, 104) | ✅ Korjattu |
+| fill_finish_positions() suorituskyky | ✅ Korjattu |
+| E — Lounasravien ansa (Bugi #4) | 🟠 Auki — ennen 3.6.2026 |
+| Walk-forward raskauden optimointi | 🟠 Auki |
+| horse_starts kattavuus (23 % hevosista) | 🟠 Rakenteellinen rajoite — lisää scrapaus tarvitaan |
+| I — Backtest isotonic | 🟡 TODO — kun 90+ vrk dataa |
