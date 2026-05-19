@@ -49,6 +49,7 @@ ATG_TZ = ZoneInfo("Europe/Stockholm")
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -922,10 +923,12 @@ def fetch_daily_races(
         # Aiemmin: yksi earliest_start_dt koko päivälle → lounas-rata ajasti refreshin
         # niin aikaisin että iltaratojen (V86/V64) shoes/sulky ei ollut vielä lukittu.
         "track_first_races": {},  # track_name → datetime (aikaisin lähtö per rata)
+        "track_last_races": {},   # track_name → datetime (myöhäisin lähtö per rata)
     }
     # Kerää uniikki horse_id:t Travsport-hakua varten
     horse_ids_seen: set[str] = set()
     track_first_race: dict[str, datetime] = {}
+    track_last_race: dict[str, datetime] = {}
     try:
         cal = client.get_calendar_day(target)
         with Session_() as session:
@@ -961,11 +964,17 @@ def fetch_daily_races(
                         race_start_dt = _parse_atg_datetime(race.get("startTime"))
                         if race_start_dt is not None:
                             tname = _track_name(race)
-                            if tname and (
-                                tname not in track_first_race
-                                or race_start_dt < track_first_race[tname]
-                            ):
-                                track_first_race[tname] = race_start_dt
+                            if tname:
+                                if (
+                                    tname not in track_first_race
+                                    or race_start_dt < track_first_race[tname]
+                                ):
+                                    track_first_race[tname] = race_start_dt
+                                if (
+                                    tname not in track_last_race
+                                    or race_start_dt > track_last_race[tname]
+                                ):
+                                    track_last_race[tname] = race_start_dt
 
                         if scheduler is not None:
                             start_dt = race_start_dt
@@ -1033,6 +1042,8 @@ def fetch_daily_races(
 
     if track_first_race:
         stats["track_first_races"] = track_first_race
+    if track_last_race:
+        stats["track_last_races"] = track_last_race
 
     logger.info(
         "fetch_daily_races: %d races, +%d new, ~%d upd, %d errors",
@@ -1408,53 +1419,63 @@ def refresh_day_runners(
     return fetch_daily_races(target, db_path=db_path, atg=atg, scheduler=None, travsport=None)
 
 
-def _schedule_first_race_refresh(
+_TRACK_REFRESH_INTERVAL_MIN = 45  # Scratch-tunnistus: hae radan runners 45 min välein
+
+
+def _schedule_periodic_track_refresh(
     scheduler: BlockingScheduler,
     target_date: date,
     first_race_start_utc: datetime,
+    last_race_start_utc: datetime,
     db_path: str = DB_PATH,
     track_name: str = "",
 ) -> int:
-    """Ajasta refresh_day_runners radan 1. lähdön - 10min hetkellä.
+    """Ajasta toistuva refresh_day_runners 45 min välein per rata.
 
-    Bugi #4 -korjaus (15.5.2026): track_name tekee job-id:stä uniikin per
-    rata. Näin Åby-lounas (12:10) ja Solvalla-ilta (18:10) saavat kumpikin
-    oman refresh-jobinsa eikä lounas-refresh korvaa ilta-refreshiä.
+    Käynnistyy 10 min ennen radan ensimmäistä lähtöä (tai heti jos se on
+    jo mennyt) ja pyörii viimeisen lähdön alkamisaikaan asti. Näin
+    myöhäistenkin lähtöjen scratch-muutokset havaitaan enintään 45 min
+    viiveellä eikä vain kerran aamulla.
 
     Args:
-        track_name: radan nimi (esim. "Åby", "Solvalla") — käytetään
-            job-id:ssä. Tyhjä string = fallback vanhaan käyttäytymiseen.
+        first_race_start_utc: aikaisin lähtö radalla (IntervalTriggerin alku)
+        last_race_start_utc:  myöhäisin lähtö radalla (IntervalTriggerin loppu)
+        track_name: radan nimi job-id:tä varten
 
-    Returns: 1 jos ajastettiin, 0 jos jo mennyt (esim. iltapäivärestart).
+    Returns: 1 jos ajastettiin, 0 jos kaikki lähdöt jo menneet.
     """
-    refresh_at = first_race_start_utc - timedelta(minutes=10)
-    if refresh_at < datetime.now(timezone.utc):
+    now = datetime.now(timezone.utc)
+    start_at = max(now, first_race_start_utc - timedelta(minutes=10))
+    end_at = last_race_start_utc + timedelta(minutes=5)  # hieman yli viimeisen
+
+    if end_at < now:
         logger.info(
-            "_schedule_first_race_refresh: target=%s track=%r, first race - 10min "
-            "(%s) is in the past, skipping",
-            target_date.isoformat(),
+            "_schedule_periodic_track_refresh: track=%r, kaikki lähdöt menneet, skip",
             track_name,
-            refresh_at.isoformat(timespec="minutes"),
         )
         return 0
-    # Job-id uniikki per rata + päivä (Bugi #4)
+
     track_slug = track_name.lower().replace(" ", "_") if track_name else "all"
     job_id = f"refresh_runners_{target_date.isoformat()}_{track_slug}"
     scheduler.add_job(
         refresh_day_runners,
-        trigger=DateTrigger(run_date=refresh_at),
+        trigger=IntervalTrigger(
+            minutes=_TRACK_REFRESH_INTERVAL_MIN,
+            start_date=start_at,
+            end_date=end_at,
+            timezone=timezone.utc,
+        ),
         args=[target_date, db_path],
         id=job_id,
         replace_existing=True,
-        misfire_grace_time=300,  # 5min - jos hetken viive
+        misfire_grace_time=300,
     )
     logger.info(
-        "_schedule_first_race_refresh: target=%s track=%r, scheduled at %s "
-        "(first race %s - 10min)",
-        target_date.isoformat(),
+        "_schedule_periodic_track_refresh: track=%r, %d min välein %s → %s",
         track_name,
-        refresh_at.isoformat(timespec="minutes"),
-        first_race_start_utc.isoformat(timespec="minutes"),
+        _TRACK_REFRESH_INTERVAL_MIN,
+        start_at.isoformat(timespec="minutes"),
+        end_at.isoformat(timespec="minutes"),
     )
     return 1
 
@@ -1579,14 +1600,16 @@ def _setup_for_date(
         stats = fetch_daily_races(
             target, db_path=db_path, scheduler=scheduler, travsport=travsport
         )
-        # Bugi #4 -korjaus: ajasta refresh-jobi PER RATA 1. lähdön - 10min
-        # hetkellä. Jokainen rata saa oman jobinsa jotta iltaratojen
-        # (V86/V64) shoes/sulky on jo lukittu kun refresh ajetaan.
+        # Ajasta toistuva refresh PER RATA 45 min välein ensimmäisestä
+        # viimeiseen lähtöön. Scratch-muutokset havaitaan enintään 45 min
+        # viiveellä koko päivän ajan (ei vain ennen ensimmäistä lähtöä).
         track_first_races = stats.get("track_first_races", {})
+        track_last_races = stats.get("track_last_races", {})
         n_refresh = 0
         for tname, first_dt in track_first_races.items():
-            n_refresh += _schedule_first_race_refresh(
-                scheduler, target, first_dt, db_path, track_name=tname
+            last_dt = track_last_races.get(tname, first_dt)
+            n_refresh += _schedule_periodic_track_refresh(
+                scheduler, target, first_dt, last_dt, db_path, track_name=tname
             )
         stats["refresh_jobs"] = n_refresh
     except Exception as exc:  # noqa: BLE001
