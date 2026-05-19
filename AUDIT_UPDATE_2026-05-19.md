@@ -183,14 +183,18 @@ antaisi rehellisemmän kuvan. Lisätty TODO-listaan.
 
 ## 4. Avoimet asiat
 
-### 🔴 Tarkistettava heti
+### ✅ Tarkistettu: race_min_earnings / race_max_earnings toimivat
 
-| Asia | Tila |
-|---|---|
-| `race_min_earnings` / `race_max_earnings` NULL-tilanne serverillä | ❓ Tarkistamatta |
+Auditoija raportoi nämä 100 % NULL:iksi. **Tarkistettiin serveriltä:**
 
-Auditoija raportoi nämä tyhjiksi. Jos tosi: poistetaan FEATURE_COLS:ista
-tai ajetaan `backfill_race_class()` uudelleen.
+```
+races yhteensä:              25 561
+race_min_earnings NOT NULL:  23 734  (92.9 %)
+race_max_earnings NOT NULL:  22 056  (86.3 %)
+```
+
+Molemmat toimivat. Auditoijan havainto perustui vanhentuneeseen
+paikalliseen DB:hen — sama kontekstivirhe kuin lähtömäärässä (236 vs. 25 561).
 
 ### 🟠 Ennen paperitestausta (3.6.2026)
 
