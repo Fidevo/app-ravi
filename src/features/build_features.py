@@ -164,8 +164,15 @@ def form_features(
     combined = combined.sort_values(["horse_id", "race_date"]).reset_index(drop=True)
 
     # --- Apusarakkeet laskentaan (float jotta NaN toimii oikein) ---
-    combined["_is_win"] = (combined["finish_position"] == 1).astype(float)
-    combined["_is_top3"] = (combined["finish_position"] <= 3).astype(float)
+    # B-10: NaN finish_position (vetäytyneet / tulevat hevoset) pitää jättää pois
+    # rolling-laskennasta. .where(notna) tuottaa NaN vähäisissä riveissä niin
+    # että pandas rolling mean ohittaa ne eikä laske niitä 0-voittoina.
+    combined["_is_win"] = (combined["finish_position"] == 1).where(
+        combined["finish_position"].notna()
+    )
+    combined["_is_top3"] = (combined["finish_position"] <= 3).where(
+        combined["finish_position"].notna()
+    )
     combined["_market_prob"] = 1.0 / combined["win_odds_final"].replace(0, np.nan)
 
     # shift(1) jotta nykyinen lähtö ei vuoda piirteisiin
@@ -258,8 +265,12 @@ def driver_trainer_features(
     """
     df = runners.sort_values("race_date").copy()
     df["race_date"] = pd.to_datetime(df["race_date"])
-    df["is_win"] = (df["finish_position"] == 1).astype(int)
-    df["is_top3"] = (df["finish_position"] <= 3).astype(int)
+    # B-7: NaN finish_position (vetäytyneet / tulevat hevoset) pitää jättää pois
+    # laskennasta. Käytetään .where(notna) jotta NaN-rivit eivät kasvata
+    # laskuria mutta eivät voittoja → win_rate ei aliarvioidz.
+    _fp_notna = df["finish_position"].notna()
+    df["is_win"] = (df["finish_position"] == 1).where(_fp_notna).astype("float")
+    df["is_top3"] = (df["finish_position"] <= 3).where(_fp_notna).astype("float")
 
     for role in ("driver", "trainer"):
         # Rolling-aggregaatti per rooli aikaindeksillä, closed="left" = ei leakagea
@@ -1112,12 +1123,13 @@ def rest_days_bucket_features(df: pd.DataFrame) -> pd.DataFrame:
 
     conditions = [
         days.isna(),
+        days.notna() & (days < 0),   # B-11: negatiiviset lepopäivät = datavirhe
         days > 60,
         (days >= 22) & (days <= 60),
         (days >= 6) & (days <= 21),
         days < 6,
     ]
-    choices = ["very_long", "very_long", "long", "optimal", "short"]
+    choices = ["very_long", "unknown", "very_long", "long", "optimal", "short"]
 
     df["rest_days_bucket"] = np.select(conditions, choices, default="very_long")
     return df

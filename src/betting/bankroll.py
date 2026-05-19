@@ -111,28 +111,43 @@ def can_place_bet(
 
 def correlated_kelly_adjust(
     bets_in_race: list[tuple[float, float]],
+    bankroll: float,
     config: BankrollConfig,
 ) -> list[float]:
     """Säädä Kelly-panokset jos pelaat useaa hevosta samasta lähdöstä.
 
     bets_in_race: lista (win_prob, odds) -tupleja
+    bankroll: nykyinen pankkikoko (kruunuissa)
     Yksinkertainen approksimaatio: jaa kunkin pelin Kelly suhteessa
     yhteenlaskettuun voittotodennäköisyyteen (vain yksi voi voittaa).
     """
     if len(bets_in_race) <= 1:
         return [
-            kelly_stake(p, o, 1.0, config)
+            kelly_stake(p, o, bankroll, config)
             for p, o in bets_in_race
         ]
 
     # Jaa Kelly suhteessa kokonaistodennäköisyyteen
     total_prob = sum(p for p, _ in bets_in_race)
-    raw = [kelly_stake(p, o, 1.0, config) for p, o in bets_in_race]
+    raw = [kelly_stake(p, o, bankroll, config) for p, o in bets_in_race]
 
     if total_prob >= 1.0:
         # Pelaat käytännössä kentän - vähennä rajusti
         return [r * 0.5 for r in raw]
     return raw
+
+
+def place_bet(
+    state: BankrollState,
+    stake: float,
+    bet_date: date,
+) -> None:
+    """Rekisteröi hyväksytty panos — päivitä daily_staked.
+
+    Kutsu tätä heti kun can_place_bet palauttaa (True, "OK"),
+    ennen kuin panos menee peliin.
+    """
+    state.daily_staked[bet_date] = state.daily_staked.get(bet_date, 0.0) + stake
 
 
 def update_after_settlement(
@@ -146,7 +161,7 @@ def update_after_settlement(
     week_key = bet_date.strftime("%Y-W%V")
     state.weekly_pnl[week_key] = state.weekly_pnl.get(week_key, 0.0) + pnl
 
-    threshold = state.config.starting_bankroll * state.config.weekly_stop_loss_pct
+    threshold = state.current_bankroll * state.config.weekly_stop_loss_pct
     if state.weekly_pnl[week_key] < -threshold:
         state.locked_until = bet_date + timedelta(
             days=state.config.stop_loss_cooldown_days

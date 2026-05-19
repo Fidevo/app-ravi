@@ -1243,21 +1243,32 @@ def capture_odds_snapshot(
                     existing.source = "atg_pari_mutuel"
                     stats["snapshots_updated"] += 1
 
-            # Scratch-tunnistus T-2min / T-5min -snapshotissa:
-            # Jos runner on mukana pelissä mutta sillä ei ole kertoimia,
-            # se on poistunut lähdöstä (scratched). Merkitään withdrawn=True.
-            # T-15min / T-10min jätetään rauhaan — kertoimet eivät ole
-            # välttämättä auki vielä niin aikaisin.
+            # Scratch-tunnistus pool-kertoimen perusteella:
+            # T-2min: jos kerroin puuttuu/virheellinen → withdrawn=True.
+            #   Tässä pisteessä vinnare-pool on aina auki kaikilla radoilla,
+            #   joten puuttuva kerroin tarkoittaa oikeasti scratchia.
+            # T-5min: vinnare-pool ei ole aina auki pienemmillä radoilla.
+            #   Kirjataan varoitus lokiin mutta EI koskaan aseteta withdrawn=True.
+            # T-15min / T-10min: jätetään kokonaan rauhaan.
             if snapshot_label in ("T-2min", "T-5min"):
                 for runner_id, raw in per_runner:
                     if raw is not None and raw > 1.0:
                         continue  # Kerroin OK — ei scratched
                     runner_obj = session.get(Runner, runner_id)
-                    if runner_obj is not None and not runner_obj.withdrawn:
+                    if runner_obj is None or runner_obj.withdrawn:
+                        continue
+                    if snapshot_label == "T-2min":
                         runner_obj.withdrawn = True
                         logger.info(
                             "Scratched detected: %s (no pool odds at %s)",
                             runner_id, snapshot_label,
+                        )
+                    else:
+                        # T-5min: pool ei välttämättä auki — varoitus, ei withdrawn
+                        logger.warning(
+                            "No pool odds at %s for %s — pool may not be open yet, "
+                            "NOT marking withdrawn",
+                            snapshot_label, runner_id,
                         )
             session.commit()
     except Exception as exc:  # noqa: BLE001

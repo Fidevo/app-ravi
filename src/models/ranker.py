@@ -245,8 +245,7 @@ def train_ranker(
     avail_feat, avail_cat = _resolve_cols(df, feature_cols, categorical_cols)
 
     # Ranker-target: käännetään sijoitus pisteeksi (1. -> korkein)
-    max_pos = df.groupby("race_id")["finish_position"].transform("max")
-    df["relevance"] = (max_pos - df["finish_position"] + 1).astype(int)
+    df["relevance"] = (6 - df["finish_position"]).clip(lower=1).astype(int)
 
     # Ryhmäkoot per lähtö (lambdarankin vaatimus).
     # sort=False: df on jo sortattu → ei uudelleensortausta, järjestys säilyy.
