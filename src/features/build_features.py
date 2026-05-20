@@ -141,11 +141,20 @@ def form_features(
 
     # B2: sisällytä start_method ja distance pooliin jos saatavilla
     seg_cols_avail = [c for c in _POOL_COLS_SEGMENTED if c in df.columns]
-    opt_cols_avail = [c for c in _POOL_COLS_OPTIONAL if c in df.columns]
+    # Valinnaiset sarakkeet: otetaan mukaan jos löytyy df:stä TAI horse_starts:sta.
+    # had_gallop on vain horse_starts-taulussa — runners saa oletusarvon False.
+    hs_cols_set = set(horse_starts.columns) if horse_starts is not None else set()
+    opt_cols_avail = [
+        c for c in _POOL_COLS_OPTIONAL if c in df.columns or c in hs_cols_set
+    ]
     pool_cols_full = _POOL_COLS + seg_cols_avail + opt_cols_avail
 
     # --- Rakenna pool: runners + valinnainen horse_starts-historia ---
-    current = df[pool_cols_full].copy()
+    current = df[[c for c in pool_cols_full if c in df.columns]].copy()
+    # Täytä puuttuvat optionaaliset sarakkeet oletusarvoilla
+    for c in opt_cols_avail:
+        if c not in current.columns:
+            current[c] = False
     current["_is_runner"] = True
 
     if horse_starts is not None and len(horse_starts) > 0:
@@ -209,8 +218,9 @@ def form_features(
         lambda s: s.shift(1).rolling(n_last, min_periods=1).min()
     )
     # Recency-painotettu km-aika: viimeisin startti painaa enemmän (span=n_last)
+    # adjust=False → O(n) muistivaatimus per ryhmä (adjust=True olisi O(n²))
     combined["form_ewm_km_time"] = grouped["_km_clean"].transform(
-        lambda s: s.shift(1).ewm(span=n_last, min_periods=1).mean()
+        lambda s: s.shift(1).ewm(span=n_last, min_periods=1, adjust=False).mean()
     )
     combined["form_market_avg_5"] = grouped["_market_prob"].transform(
         lambda s: s.shift(1).rolling(n_last, min_periods=1).mean()
