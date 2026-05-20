@@ -343,8 +343,8 @@ _DQ_WEIGHTS: dict[str, float] = {
     "form_avg_finish_5_same_method":0.25,
     "trainer_top3_rate_365d":       0.24,
     "form_avg_finish_5_same_dist":  0.23,
-    "driver_win_pct_365d":          0.18,
-    "form_last_km_time":            0.16,
+    "driver_top3_rate_365d":         0.18,
+    "track_horse_win_rate":         0.16,
 }
 _DQ_MAX = sum(_DQ_WEIGHTS.values())
 
