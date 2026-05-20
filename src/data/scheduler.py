@@ -956,6 +956,9 @@ def _fetch_travronden_v_races(
     )
 
     target_str = target_date.isoformat()
+    # Travrondenspel julkaisee V-pelitililaukset joskus seuraavana kalenteripäivänä
+    # (esim. V86 ke-illalla → round_date=to), vaikka ATG käyttää oikeaa race_date:a.
+    next_day_str = (target_date + timedelta(days=1)).isoformat()
     last_known = _read_tr_last_round()
     scan_start = max(_TR_SCAN_BASE, last_known - 5)
 
@@ -974,9 +977,9 @@ def _fetch_travronden_v_races(
             continue
 
         rd_date = rd.get("round_date", "")
-        if rd_date and rd_date > target_str:
-            break  # tulevaisuuden kierros — lopeta skannaus
-        if rd_date != target_str:
+        if rd_date and rd_date > next_day_str:
+            break  # yli huomisen — lopeta skannaus
+        if rd_date not in (target_str, next_day_str):
             continue
 
         rounds_found += 1
