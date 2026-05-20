@@ -329,6 +329,44 @@ def _inject_live_market_odds(features: pd.DataFrame, db_path: str) -> pd.DataFra
 
 
 # ---------------------------------------------------------------------------
+# Datan laatu -pisteytysjärjestelmä
+# ---------------------------------------------------------------------------
+
+# Piirteet järjestetty laskevaan tärkeydenjärjestykseen (feature importance
+# 20260520-mallista). Nämä ovat tyypillisimmin NULL uusilla tai harvoilla lähdöillä.
+_DQ_WEIGHTS: dict[str, float] = {
+    "form_avg_finish_5":            0.63,
+    "form_avg_km_time_5":           0.53,
+    "form_best_km_time_5":          0.49,
+    "form_market_avg_5":            0.41,
+    "atg_best_km_for_this_setup":   0.32,
+    "form_avg_finish_5_same_method":0.25,
+    "trainer_top3_rate_365d":       0.24,
+    "form_avg_finish_5_same_dist":  0.23,
+    "driver_win_pct_365d":          0.18,
+    "form_last_km_time":            0.16,
+}
+_DQ_MAX = sum(_DQ_WEIGHTS.values())
+
+
+def _data_quality_label(row: pd.Series) -> str:
+    """Palauttaa datan luotettavuustason hevoselle (0–100 %, 5 tasoa)."""
+    score = sum(
+        w for feat, w in _DQ_WEIGHTS.items()
+        if feat in row.index and pd.notna(row[feat])
+    ) / _DQ_MAX
+    if score >= 0.80:
+        return "✅ Vahva"
+    if score >= 0.55:
+        return "🟢 Hyvä"
+    if score >= 0.30:
+        return "🟡 Kohtalainen"
+    if score >= 0.10:
+        return "🔴 Heikko"
+    return "⚫ Ei dataa"
+
+
+# ---------------------------------------------------------------------------
 # Pääohjelma
 # ---------------------------------------------------------------------------
 
@@ -362,6 +400,9 @@ def main() -> None:
         if v_ids:
             v_data = data[data["race_id"].isin(v_ids)]
             data = v_data if len(v_data) > 0 else data
+
+    # Datan laatu per hevonen
+    data["data_quality"] = data.apply(_data_quality_label, axis=1)
 
     # Edge-% laskenta (win_odds_final jos saatavilla)
     # TÄRKEÄ: lasketaan VAIN kun kerroin on olemassa — fillna(1.0) antaisi
@@ -471,6 +512,7 @@ def main() -> None:
                 if odds_col:
                     show_cols.append(odds_col)
                 show_cols.append("edge_pct")
+                show_cols.append("data_quality")
 
                 disp = rdf[[c for c in show_cols if c in rdf.columns]].copy()
                 disp = disp.sort_values("start_number", na_position="last")
@@ -499,6 +541,7 @@ def main() -> None:
                     "win_prob": "P(win)",
                     "live_odds": "Live-kerroin",
                     "edge_pct": "Edge",
+                    "data_quality": "Data",
                 }
                 if odds_col:
                     rename_map[odds_col] = "Odds (final)"
