@@ -92,8 +92,9 @@ GALLOP_TRACKS: frozenset[str] = frozenset({
 # epäsäännöllisesti ~100-300 per kierros. Skannausikkuna 250 kattaa
 # ~kuukauden eteen. Kaikki 404-vastaukset cachettuvat (30pv) → toistuvat
 # skannaukset ovat nopeita (tiedostolukuja ei HTTP-pyyntöjä).
-_TR_SCAN_BASE = 171800   # konservatiivinen lattia; state-tiedosto päivittää
-_TR_SCAN_WINDOW = 250    # enintään 250 ID:tä per skannauskierros
+_TR_SCAN_BASE = 171920   # viimeisin tunnettu ID (171922 = 11.5.2026) miinus pieni marginaali
+_TR_SCAN_WINDOW = 800    # enintään 800 ID:tä per skannauskierros (~13 min ensimmäisellä kerralla,
+                         # sen jälkeen nopea — kaikki 404-vastaukset cachettuvat 30 pv)
 
 logger = logging.getLogger("ravit_edge.scheduler")
 
