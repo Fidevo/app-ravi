@@ -551,7 +551,10 @@ def _ensure_runner_exists(session: Session, race: dict, start: dict) -> None:
 
 
 def _engine(db_path: str = DB_PATH):
-    return create_engine(f"sqlite:///{db_path}")
+    return create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"timeout": 30},
+    )
 
 
 def _migrate_schema(db_path: str = DB_PATH) -> None:
@@ -665,7 +668,7 @@ def backfill_track_condition(
     if cache_dir is None:
         cache_dir = _RAW_DIR_ABS / "travsport"
     cache_dir = _Path(cache_dir)
-    engine = create_engine(f"sqlite:///{db_path}")
+    engine = _engine(db_path)
     Session_ = sessionmaker(bind=engine)
 
     updated = 0
@@ -746,7 +749,7 @@ def backfill_race_class(
     Returns:
         dict: {updated, skipped, errors, total_races}
     """
-    engine = create_engine(f"sqlite:///{db_path}")
+    engine = _engine(db_path)
     Session_ = sessionmaker(bind=engine)
 
     # Hae kaikki race_id:t
@@ -822,7 +825,7 @@ def backfill_dam_sire(
     Returns:
         dict: {updated, skipped, errors, total_horses}
     """
-    engine = create_engine(f"sqlite:///{db_path}")
+    engine = _engine(db_path)
     Session_ = sessionmaker(bind=engine)
 
     # Hae horse_id:t joilta dam_sire puuttuu + yksi race_id per hevonen
