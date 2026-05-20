@@ -19,6 +19,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import lightgbm as lgb
 import pandas as pd
 import streamlit as st
@@ -29,8 +30,27 @@ from src.paths import DB_PATH
 
 _MODEL_GLOB = "data/model_*.lgb"
 _DEFAULT_EDGE_THRESHOLD = 5.0
-_ATG_URL = "https://www.atg.se/hp/startlista/hast/{horse_id}"
+_ATG_URL = "https://www.atg.se/travochgalopp/hast/{horse_id}"
 _SNAPSHOT_PRIORITY = ["T-2min", "T-5min", "T-10min", "T-15min"]
+_V_GAME_TYPES = {"V75", "V86", "V64", "V65", "V5", "V4", "V3"}
+_ATG_CALENDAR_URL = "https://www.atg.se/services/racinginfo/v1/api/calendar/day/{date}"
+
+
+@st.cache_data(ttl=300)
+def get_v_race_ids(target_date: date) -> set[str]:
+    """Hae V-pelilähtöjen race_id:t ATG-kalenterista."""
+    try:
+        url = _ATG_CALENDAR_URL.format(date=target_date.isoformat())
+        r = httpx.get(url, timeout=10)
+        games = r.json().get("games", {})
+        v_ids: set[str] = set()
+        for game_type, game_list in games.items():
+            if game_type in _V_GAME_TYPES:
+                for game in game_list:
+                    v_ids.update(game.get("races", []))
+        return v_ids
+    except Exception:
+        return set()
 
 st.set_page_config(page_title="Ravit Edge", layout="wide", page_icon="🏇")
 
@@ -336,10 +356,12 @@ def main() -> None:
         st.info(f"Ei dataa päivälle {selected_date}.")
         return
 
-    # V-race-suodatus
-    if only_v_races and "is_v_race" in data.columns:
-        v_data = data[data["is_v_race"] == 1]
-        data = v_data if len(v_data) > 0 else data
+    # V-race-suodatus: hae race_id:t ATG-kalenterista
+    if only_v_races:
+        v_ids = get_v_race_ids(selected_date)
+        if v_ids:
+            v_data = data[data["race_id"].isin(v_ids)]
+            data = v_data if len(v_data) > 0 else data
 
     # Edge-% laskenta (win_odds_final jos saatavilla)
     # TÄRKEÄ: lasketaan VAIN kun kerroin on olemassa — fillna(1.0) antaisi

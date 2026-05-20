@@ -490,6 +490,188 @@ mahdollisesti Copycat-piirteellä.
 
 ---
 
+# 🔬 AUDITOIJAN DIAGNOOSI — 19.5.2026: tasaiset todennäköisyydet + epäilyttävä top-15
+
+> Käyttäjän havainto: "prosentit ovat lähes jokaisessa lähdössä erittäin
+> tasaisia hevosille" + epäily top-15-piirrelistasta. **Käyttäjän epäily on
+> oikea.** Tutkin empiirisesti — alla diagnoosi.
+
+## Lyhyt vastaus
+
+Malli on **ylisovittunut**. Tasaiset todennäköisyydet + yhden jatkuvan
+piirteen gain-dominanssi (`distance_change_m` 230 294, 4.3× yli #2) ovat
+**klassinen ylisovittumisen oirepari**. Syyt järjestyksessä:
+
+1. **`num_leaves=63` + `num_boost_round=700` + 51 piirrettä + ~250 lähtöä**
+   — malli on rajusti yliparametrisoitu
+2. **Gain-importance on harhainen** — se suosii korkeakardinaliteettisia
+   jatkuvia piirteitä; `distance_change_m`:n #1-sija EI tarkoita että se on
+   hyvä piirre
+3. **`distance_change_m`-piirrettä häiritsee `.last()`-bugi** (yhä korjaamatta)
+4. **2 piirrettä on 100 % NULL** — `race_min_earnings`, `race_max_earnings`
+
+## 1. Miksi todennäköisyydet ovat tasaisia — ylisovittuminen
+
+LambdaRank tuottaa raakapisteet → softmax → todennäköisyydet. Kun pisteiden
+varianssi on **pieni**, softmax antaa lähes tasaisen ~1/N per hevonen.
+
+Pisteiden varianssi romahtaa kun malli **ei yleisty**: se opettelee
+treenidatan ulkoa, mutta testidatassa pisteet ovat lähellä satunnaista →
+tasainen softmax.
+
+**Yliparametrisoinnin mitat tässä projektissa:**
+
+| Tekijä | Arvo | Ongelma |
+|---|---|---|
+| `num_leaves` | 63 | Erittäin syvät puut — muistaa treenidatan |
+| `num_boost_round` | 700 | Paljon iteraatioita ylisovittumiseen |
+| FEATURE_COLS | 51 | Liikaa piirteitä |
+| Treenilähtöjä | ~250 | LambdaRankin todelliset yksiköt = lähdöt, ei rivit |
+
+**Nyrkkisääntö:** mallin kapasiteetin pitää olla huomattavasti pienempi kuin
+datan määrä. 63-lehtinen puu, 700 kierrosta, 51 piirrettä **250 lähdöstä** on
+kuin opettaisi 51-ulotteista mallia 250 esimerkillä. Malli muistaa kohinaa.
+
+Edellisessä auditoinnissa (15.5.) varoitin: *"num_leaves 31→63 on
+ylisovittumis­altis pienellä datalla — älä oleta, aja A/B-vertailu."*
+Hyperparametri nostettiin silti. **Nyt näemme oireen.**
+
+## 2. Miksi `distance_change_m` on #1 — gain-importance on harhainen
+
+`distance_change_m`:n gain 230 294 vs. #2 `driver_changed` 52 918 **ei
+tarkoita** että `distance_change_m` olisi 4× tärkeämpi.
+
+**LightGBM:n gain-importance suosii rakenteellisesti korkeakardinaliteettisia
+jatkuvia piirteitä.** Empiirinen tarkistus tuotantodatasta:
+
+- `distance_change_m`: **72 uniikkia arvoa** (jatkuva, väli −1540…+1500)
+- `driver_changed`: **2 arvoa** (binäärinen 0/1)
+- `inside_post`: **2 arvoa** (binäärinen)
+
+Jatkuva piirre tarjoaa ~71 mahdollista jakopistettä per puu; binäärinen
+tarjoaa yhden. LightGBM voi siis jakaa `distance_change_m`:n yhä uudelleen
+joka puussa → gain kertyy. `driver_changed` voi jakaa kerran → gain katossa.
+
+**Tämä on tunnettu LightGBM-sudenkuoppa.** Gain-importance ≠ ennustearvo.
+`distance_change_m`, `form_best_km_time_5`, `form_avg_km_time_5`,
+`km_time_trend`, `prize_money_trend` ovat kaikki jatkuvia → ne kerääntyvät
+listan kärkeen kardinaliteetin takia, eivät välttämättä ennustearvon.
+
+**Korjaus tulkintaan:** käytä `model.feature_importance(importance_type="split")`
+(jakojen lukumäärä) TAI **SHAP-arvoja** (`shap.TreeExplainer`). Nämä antavat
+rehellisemmän kuvan. Gain-lista on harhaanjohtava.
+
+## 3. `distance_change_m`-piirrettä häiritsee yhä korjaamaton `.last()`-bugi
+
+Aiemmin (kohta D) flagasin: `change_features` käyttää `groupby().last()`
+joka ottaa **viimeisen ei-NaN-arvon per sarake erikseen** → voi sekoittaa
+kahden eri startin arvot. Jos hevosen viimeisimmässä startissa `hist_distance`
+on NaN, `.last()` ottaa matkan vanhemmasta startista → `distance_change_m`
+lasketaan väärää edellistä lähtöä vasten.
+
+**Lopputulos:** `distance_change_m` sisältää kohinaa joillain riveillä.
+Kohinainen piirre + ylisovittuva malli (num_leaves=63) = malli jakaa
+kohinan varaan → keinotekoisen korkea gain.
+
+Bugi on yhä korjaamatta (kohta D korjauslistalla). **Korjaa se ennen
+seuraavaa treenausta.**
+
+## 4. Kaksi piirrettä on 100 % NULL — regressio
+
+Empiirinen tarkistus: `races`-taulussa `race_min_earnings` ja
+`race_max_earnings` ovat **NULL kaikilla 236 rivillä**.
+
+Molemmat ovat `FEATURE_COLS`:issa. Aiemmin (Vaihe 2, ROADMAP) ne täytettiin
+`backfill_race_class()`-funktiolla joka parsii ATG:n `terms`-kentän. Nyt ne
+ovat tyhjiä — joko DB on rakennettu uudelleen eikä backfilliä ajettu, tai
+keräys ei enää parsia terms-kenttää.
+
+**Vaikutus:**
+- 2 kuollutta piirrettä FEATURE_COLS:issa (LightGBM kestää NaN:n, mutta turhaa)
+- `object`-dtype (kaikki-NULL-sarake) — voi kaataa `lgb.train`:n jos
+  `train_ranker` ei coercaa tyyppiä. Tarkista tämä.
+
+**Korjaus:** aja `backfill_race_class()` uudelleen TAI poista kentät
+FEATURE_COLS:ista kunnes ne on täytetty.
+
+## 5. Lisähuomio: DB on 236 lähtöä, ei 455
+
+Aiemmissa raporteissa (15.5.) puhuttiin 455 lähdöstä. Nykyisessä DB:ssä on
+**236 lähtöä**. DB on ilmeisesti rakennettu uudelleen jossain välissä.
+
+Tämä ei ole bugi sinänsä, mutta **olennainen konteksti**: kaikki aiemmat
+Brier-luvut (0.0743, 0.0820, jne.) on mitattu eri datajoukolla kuin nykyinen.
+Niitä ei voi suoraan verrata. **Raportoi aina lähtömäärä mittarin yhteydessä.**
+
+## 📋 Korjaussuositukset (prioriteettijärjestys)
+
+### Mallikapasiteetti — tärkein
+
+Pienennä mallin kapasiteettia rajusti. 250 lähtöä vaatii **pienen** mallin:
+
+```python
+params = {
+    "objective": "lambdarank",
+    "num_leaves": 15,          # 63 → 15 (pieni puu pienelle datalle)
+    "min_data_in_leaf": 30,    # pidä
+    "learning_rate": 0.05,
+    "lambda_l1": 0.1,          # 0.05 → 0.1 (vahvempi regularisointi)
+    "lambda_l2": 0.1,          # lisää L2
+    "feature_fraction": 0.7,
+    "bagging_fraction": 0.7,
+}
+# num_boost_round: 700 → käytä early_stopping validointijoukolla,
+# tyypillisesti pysähtyy 100-250 kierroksen kohdalla
+```
+
+Aja **A/B-vertailu**: num_leaves 15 vs. 31 vs. 63, kiinnitetty `random_state=42`,
+mittarina **per-lähtö win_prob -keskihajonta** (tasaisuus) JA test-Brier.
+Pieni puu pitäisi antaa **terävämmät** todennäköisyydet.
+
+### Piirteiden karsinta
+
+51 piirrettä on liikaa 250 lähdölle. Karsi:
+- `race_min_earnings`, `race_max_earnings` — kuolleet (100 % NULL)
+- Aja SHAP-analyysi → poista piirteet joiden SHAP ≈ 0
+- Tavoite: ~20–25 piirrettä kunnes dataa on enemmän
+
+### Korjaa `.last()`-bugi (kohta D)
+
+`change_features`: `.groupby().last()` → `.groupby(as_index=False).tail(1)`.
+Tämä poistaa kohinan `distance_change_m`:stä ja `driver_changed`:stä.
+
+### Tulkitse importance oikein
+
+Älä luota gain-listaan. Aja:
+```python
+import shap
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_test)
+shap.summary_plot(shap_values, X_test)
+```
+SHAP kertoo todellisen vaikutuksen — gain on harhainen.
+
+## Yhteenveto käyttäjälle
+
+**Epäilysi oli oikea kummassakin kohdassa.** Tasaiset todennäköisyydet ovat
+ylisovittumisen oire, ja top-15-gain-lista on harhaanjohtava (kardinaliteetti­
+vinouma). `distance_change_m` #1 ei ole "paras piirre" — se on korkeakardinali­
+teettisin jatkuva piirre jota ylisovittuva 63-lehtinen malli jakaa kohinan varaan.
+
+**Perimmäinen ongelma ei ole piirteissä eikä koodissa — se on datassa.**
+250 lähtöä on liian vähän 51 piirteelle. Mikään hyperparametri ei korjaa
+sitä. Oikea toimenpide:
+
+1. **Pienennä malli** (num_leaves 15, early stopping) → terävämmät ennusteet
+2. **Karsi piirteet** (~20–25) → vähemmän ylisovittumista
+3. **Korjaa `.last()`-bugi** → vähemmän kohinaa
+4. **Odota dataa** — ~7.7.2026 (8 vk) malli voi käyttää enemmän kapasiteettia
+
+Älä lisää uusia piirteitä. Projekti on lisännyt piirteitä ja kapasiteettia
+nopeammin kuin dataa kertyy. **Stop. Pienennä. Odota dataa.**
+
+---
+
 # 📬 KEHITTÄJÄN VASTAUS — 18.5.2026 (saman päivän korjaukset)
 
 > Auditoijan löydöksiin vastattu samana päivänä. Kaikki punaiset (A–D)

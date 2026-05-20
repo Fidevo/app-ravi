@@ -86,6 +86,15 @@ GALLOP_TRACKS: frozenset[str] = frozenset({
     "Jägersro Galopp", # Malmö-alue
 })
 
+# Travronden round-ID-skannauskonfiguraatio.
+# Pilottidatasta (15.5.2026) viimeisin tunnettu ID oli 171922.
+# V86/V75 kierrokset tulevat noin 1-2 per viikko, ID:t kasvavat
+# epäsäännöllisesti ~100-300 per kierros. Skannausikkuna 250 kattaa
+# ~kuukauden eteen. Kaikki 404-vastaukset cachettuvat (30pv) → toistuvat
+# skannaukset ovat nopeita (tiedostolukuja ei HTTP-pyyntöjä).
+_TR_SCAN_BASE = 171800   # konservatiivinen lattia; state-tiedosto päivittää
+_TR_SCAN_WINDOW = 250    # enintään 250 ID:tä per skannauskierros
+
 logger = logging.getLogger("ravit_edge.scheduler")
 
 
@@ -491,9 +500,9 @@ def _upsert_runner(
     obj.race_id = str(race["id"])
     obj.horse_id = str(horse["id"])
     obj.start_number = start.get("number")
-    # Scratch-tarkistus: ATG asettaa scratchedAt-aikaleiman poistuneille hevosille.
-    # Jos kenttää ei ole (tai on None), hevonen on mukana lähdössä.
-    obj.withdrawn = bool(start.get("scratchedAt"))
+    # Scratch-tarkistus: ATG käyttää joko scratchedAt (aikaleima) tai
+    # scratched (boolean) riippuen lähdön tilasta. Tarkistetaan molemmat.
+    obj.withdrawn = bool(start.get("scratchedAt") or start.get("scratched"))
     handicap = (start.get("distance") or 0) - (race.get("distance") or 0)
     # A4-korjaus (M1-symmetria): käytä _set_if_not_none ATG-aggregaateille,
     # ohjastaja/valmentaja-aggregaateille ja kenkä/sulky-kentille.
@@ -901,12 +910,138 @@ def backfill_dam_sire(
     }
 
 
+# ---------------------------------------------------------------------------
+# Travronden V-peli-piirteiden keräys
+# ---------------------------------------------------------------------------
+
+def _tr_state_path() -> Path:
+    return _RAW_DIR_ABS / "travronden" / "last_round_id.txt"
+
+
+def _read_tr_last_round() -> int:
+    """Palauta viimeksi löydetty Travronden round_id (tai lattia-arvo)."""
+    try:
+        return int(_tr_state_path().read_text().strip())
+    except Exception:
+        return _TR_SCAN_BASE
+
+
+def _write_tr_last_round(round_id: int) -> None:
+    """Tallenna viimeksi löydetty round_id seuraavaa skannausta varten."""
+    try:
+        _tr_state_path().parent.mkdir(parents=True, exist_ok=True)
+        _tr_state_path().write_text(str(round_id))
+    except Exception as exc:
+        logger.warning("Travronden state-tiedoston kirjoitus epäonnistui: %s", exc)
+
+
+def _fetch_travronden_v_races(
+    target_date: date,
+    session: Session,
+    travronden: Any,
+) -> dict:
+    """Hae Travronden tr_*-piirteet päivän V-pelilähdöille ja päivitä runners-taulu.
+
+    Skannaa round_id:t viimeksi tunnetusta eteenpäin etsien target_date:n
+    kierroksia. Kaikki 404-vastaukset cachettuvat 30 pv → toistuvat
+    skannaukset ovat nopeita. Päivittää runners.tr_*-sarakkeet ja
+    is_v_race=True kaikille matchaaville runnereille.
+
+    Yhdistys: horse_id (Travronden horse.atg_id = ATG horse_id) + race_date.
+    """
+    from src.features.travronden_features import (
+        TRAVRONDEN_FEATURE_COLS,
+        parse_travronden_race,
+    )
+
+    target_str = target_date.isoformat()
+    last_known = _read_tr_last_round()
+    scan_start = max(_TR_SCAN_BASE, last_known - 5)
+
+    rounds_found = 0
+    runners_updated = 0
+    latest_rid = 0
+
+    for rid in range(scan_start, scan_start + _TR_SCAN_WINDOW):
+        try:
+            rd = travronden.get_round(rid)
+        except Exception as exc:
+            logger.debug("Travronden round %d: %s", rid, exc)
+            continue
+
+        if not rd:
+            continue
+
+        rd_date = rd.get("round_date", "")
+        if rd_date and rd_date > target_str:
+            break  # tulevaisuuden kierros — lopeta skannaus
+        if rd_date != target_str:
+            continue
+
+        rounds_found += 1
+        latest_rid = max(latest_rid, rid)
+        status = rd.get("status", "?")
+        legs = rd.get("legs") or []
+        logger.info(
+            "Travronden: round %d (%s %s) status=%s, %d legiä",
+            rid, rd_date, rd.get("game_type", "?"), status, len(legs),
+        )
+
+        for leg in legs:
+            race_id = leg.get("race")
+            if not race_id:
+                continue
+            try:
+                # force_refresh=True elleivät tulokset ole lopulliset
+                force = status not in ("finished",)
+                race_data = travronden.get_race(race_id, force_refresh=force)
+                tr_df = parse_travronden_race(race_data)
+            except Exception as exc:
+                logger.warning("Travronden race %s: %s", race_id, exc)
+                continue
+
+            for _, row in tr_df.iterrows():
+                horse_id = str(row["horse_id"])
+                params: dict[str, Any] = {
+                    "horse_id": horse_id,
+                    "race_date": target_str,
+                }
+                set_clauses = ["is_v_race = 1"]
+                for col in TRAVRONDEN_FEATURE_COLS:
+                    val = row.get(col)
+                    # NaN → None (float NaN != float NaN on Pythonissa tosi)
+                    if isinstance(val, float) and val != val:
+                        val = None
+                    params[col] = val
+                    set_clauses.append(f"{col} = :{col}")
+
+                sql = (
+                    f"UPDATE runners SET {', '.join(set_clauses)} "
+                    f"WHERE horse_id = :horse_id "
+                    f"AND race_id IN ("
+                    f"  SELECT race_id FROM races WHERE race_date = :race_date"
+                    f")"
+                )
+                result = session.execute(text(sql), params)
+                runners_updated += result.rowcount
+
+    if latest_rid > 0:
+        _write_tr_last_round(latest_rid)
+
+    logger.info(
+        "Travronden: %d kierrosta löytyi, %d runneria päivitetty (target=%s)",
+        rounds_found, runners_updated, target_str,
+    )
+    return {"rounds_found": rounds_found, "runners_updated": runners_updated}
+
+
 def fetch_daily_races(
     target_date: date | None = None,
     db_path: str = DB_PATH,
     atg: ATGClient | None = None,
     scheduler: BlockingScheduler | None = None,
     travsport: Any | None = None,
+    travronden: Any | None = None,
 ) -> dict:
     target = target_date or date.today()
     logger.info("fetch_daily_races: target=%s", target.isoformat())
@@ -1036,6 +1171,21 @@ def fetch_daily_races(
                     hs_inserted,
                     hs_errors,
                 )
+
+            # --- Travronden V-peli-piirteet (tr_start_interval_group jne.) ---
+            # Ajetaan ATG- ja Travsport-haun jälkeen. Päivittää is_v_race ja
+            # tr_*-sarakkeet runners-tauluun. Analyysitiedot julkaistaan
+            # ~12-24 h ennen lähtöä → saatavilla jo aamuyön hausta.
+            # Toinen päivitysmahdollisuus: refresh_day_runners (T-10min).
+            if travronden is not None:
+                try:
+                    with Session_() as tr_session:
+                        tr_stats = _fetch_travronden_v_races(target, tr_session, travronden)
+                        tr_session.commit()
+                    stats["travronden_rounds"] = tr_stats["rounds_found"]
+                    stats["travronden_runners"] = tr_stats["runners_updated"]
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Travronden V-peli-fetch epäonnistui: %s", exc)
     finally:
         if own_client:
             client.close()
@@ -1396,6 +1546,7 @@ def refresh_day_runners(
     target_date: date | None = None,
     db_path: str = DB_PATH,
     atg: ATGClient | None = None,
+    travronden: Any | None = None,
 ) -> dict:
     """Hae päivän kalenteri uudelleen ja päivitä runner-tiedot lopulliseksi.
 
@@ -1416,7 +1567,19 @@ def refresh_day_runners(
     """
     target = target_date or date.today()
     logger.info("refresh_day_runners: target=%s", target.isoformat())
-    return fetch_daily_races(target, db_path=db_path, atg=atg, scheduler=None, travsport=None)
+    if travronden is not None:
+        return fetch_daily_races(
+            target, db_path=db_path, atg=atg, scheduler=None,
+            travsport=None, travronden=travronden,
+        )
+    # APScheduler-jobi kutsuu tätä ilman travronden-parametria →
+    # luodaan väliaikainen client (cache estää turhat HTTP-pyynnöt).
+    from src.data.scrapers.travronden import TravrondenAPIClient
+    with TravrondenAPIClient() as tr_client:
+        return fetch_daily_races(
+            target, db_path=db_path, atg=atg, scheduler=None,
+            travsport=None, travronden=tr_client,
+        )
 
 
 _TRACK_REFRESH_INTERVAL_MIN = 45  # Scratch-tunnistus: hae radan runners 45 min välein
@@ -1445,7 +1608,11 @@ def _schedule_periodic_track_refresh(
     Returns: 1 jos ajastettiin, 0 jos kaikki lähdöt jo menneet.
     """
     now = datetime.now(timezone.utc)
-    start_at = max(now, first_race_start_utc - timedelta(minutes=10))
+    # Aloita klo 11:00 paikallista aikaa (09:00 UTC) tai heti jos myöhemmin —
+    # näin aamuiset scratcht (ilmoitetaan tyypillisesti klo 9-12) havaitaan
+    # ennen kuin varsinainen race-window alkaa.
+    morning_start = first_race_start_utc.replace(hour=9, minute=0, second=0, microsecond=0)
+    start_at = max(now, min(morning_start, first_race_start_utc - timedelta(minutes=10)))
     end_at = last_race_start_utc + timedelta(minutes=5)  # hieman yli viimeisen
 
     if end_at < now:
@@ -1561,10 +1728,11 @@ def run_once(target_date: date | None = None, db_path: str = DB_PATH) -> dict:
     manuaalitesti, scheduler-instanssin scope ei ulotu paluun yli."""
     _migrate_schema(db_path)  # Idempotentti schema-migraatio
     from src.data.scrapers.travsport import TravsportAPIClient
+    from src.data.scrapers.travronden import TravrondenAPIClient
 
     target = target_date or date.today()
-    with TravsportAPIClient() as ts:
-        daily = fetch_daily_races(target, db_path=db_path, travsport=ts)
+    with TravsportAPIClient() as ts, TravrondenAPIClient() as tr:
+        daily = fetch_daily_races(target, db_path=db_path, travsport=ts, travronden=tr)
     finished_results = 0
     with ATGClient() as atg:
         cal = atg.get_calendar_day(target)
@@ -1589,6 +1757,7 @@ def _setup_for_date(
     db_path: str,
     label: str,
     travsport: Any | None = None,
+    travronden: Any | None = None,
 ) -> dict:
     """Yhteinen toteutus _initial_setupille ja _daily_setupille.
 
@@ -1598,7 +1767,8 @@ def _setup_for_date(
     """
     try:
         stats = fetch_daily_races(
-            target, db_path=db_path, scheduler=scheduler, travsport=travsport
+            target, db_path=db_path, scheduler=scheduler,
+            travsport=travsport, travronden=travronden,
         )
         # Ajasta toistuva refresh PER RATA 45 min välein ensimmäisestä
         # viimeiseen lähtöön. Scratch-muutokset havaitaan enintään 45 min
@@ -1633,6 +1803,7 @@ def _initial_setup(
     scheduler: BlockingScheduler,
     db_path: str = DB_PATH,
     travsport: Any | None = None,
+    travronden: Any | None = None,
 ) -> dict:
     """Käynnistyssetuppi: hae tämän päivän + tarvittaessa huomisen lähdöt.
 
@@ -1642,7 +1813,8 @@ def _initial_setup(
     """
     today = datetime.now(ATG_TZ).date()
     today_stats = _setup_for_date(
-        scheduler, today, db_path, "_initial_setup", travsport=travsport
+        scheduler, today, db_path, "_initial_setup",
+        travsport=travsport, travronden=travronden,
     )
 
     tomorrow_stats: dict = {}
@@ -1657,7 +1829,7 @@ def _initial_setup(
         )
         tomorrow_stats = _setup_for_date(
             scheduler, tomorrow, db_path, "_initial_setup (tomorrow)",
-            travsport=travsport,
+            travsport=travsport, travronden=travronden,
         )
 
     return {"today": today_stats, "tomorrow": tomorrow_stats}
@@ -1667,11 +1839,13 @@ def _daily_setup(
     scheduler: BlockingScheduler,
     db_path: str = DB_PATH,
     travsport: Any | None = None,
+    travronden: Any | None = None,
 ) -> dict:
     """Päivittäinen 03:00-jobi: hae päivän lähdöt + ajasta snapshot/result-jobit."""
     today = datetime.now(ATG_TZ).date()
     return _setup_for_date(
-        scheduler, today, db_path, "_daily_setup", travsport=travsport
+        scheduler, today, db_path, "_daily_setup",
+        travsport=travsport, travronden=travronden,
     )
 
 
@@ -1687,16 +1861,18 @@ def run_forever(db_path: str = DB_PATH) -> None:
     """
     _migrate_schema(db_path)  # Idempotentti schema-migraatio
     from src.data.scrapers.travsport import TravsportAPIClient
+    from src.data.scrapers.travronden import TravrondenAPIClient
 
     scheduler = BlockingScheduler(timezone=timezone.utc)
     travsport = TravsportAPIClient()
+    travronden = TravrondenAPIClient()
 
-    _initial_setup(scheduler, db_path=db_path, travsport=travsport)
+    _initial_setup(scheduler, db_path=db_path, travsport=travsport, travronden=travronden)
 
     scheduler.add_job(
         _daily_setup,
         trigger=CronTrigger(hour=3, minute=0, timezone=ATG_TZ),
-        args=[scheduler, db_path, travsport],
+        args=[scheduler, db_path, travsport, travronden],
         id="daily_setup",
         replace_existing=True,
         misfire_grace_time=600,  # 10min - jos kone heräsi sleepistä
