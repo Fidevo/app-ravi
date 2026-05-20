@@ -28,12 +28,16 @@ _RACE_COLS_EXTRA = ["track_condition", "race_min_earnings", "race_max_earnings",
 # Sarakkeet joita tarvitaan muotolaskentaan sekä runners- että horse_starts-tauluista.
 _POOL_COLS = [
     "horse_id", "race_date", "finish_position",
-    "kilometer_time_seconds", "win_odds_final", "had_gallop",
+    "kilometer_time_seconds", "win_odds_final",
 ]
 
 # Lisäsarakkeet segmentoituihin muotopiirteisiin (B2). Nämä haetaan pooliin
 # vain jos ne löytyvät syötedatasta — taaksepäin-yhteensopiva.
 _POOL_COLS_SEGMENTED = ["start_method", "distance"]
+
+# Valinnaiset pool-sarakkeet — otetaan mukaan vain jos löytyvät syötedatasta.
+# had_gallop on vain horse_starts-taulussa, ei runners-taulussa.
+_POOL_COLS_OPTIONAL = ["had_gallop"]
 
 # Muotolaskennan tulossarakkeet (siirretään runners:iin mergellä)
 _FORM_OUT_COLS = [
@@ -137,7 +141,8 @@ def form_features(
 
     # B2: sisällytä start_method ja distance pooliin jos saatavilla
     seg_cols_avail = [c for c in _POOL_COLS_SEGMENTED if c in df.columns]
-    pool_cols_full = _POOL_COLS + seg_cols_avail
+    opt_cols_avail = [c for c in _POOL_COLS_OPTIONAL if c in df.columns]
+    pool_cols_full = _POOL_COLS + seg_cols_avail + opt_cols_avail
 
     # --- Rakenna pool: runners + valinnainen horse_starts-historia ---
     current = df[pool_cols_full].copy()
