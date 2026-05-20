@@ -568,7 +568,18 @@ def _migrate_schema(db_path: str = DB_PATH) -> None:
     migrations = [
         # Migraatio 1: withdrawn-sarake runners-tauluun (2026-05-16)
         "ALTER TABLE runners ADD COLUMN withdrawn INTEGER DEFAULT 0",
+        # Migraatio 2: had_gallop horse_starts-tauluun (2026-05-20)
+        "ALTER TABLE horse_starts ADD COLUMN had_gallop BOOLEAN DEFAULT 0",
     ]
+    # Backfill: historiallisille riveille joilla finish_position IS NULL ja ei vetäytynyt
+    # → todennäköinen laukka (tieto menetettiin _placement()-muunnoksessa)
+    backfill_sql = (
+        "UPDATE horse_starts SET had_gallop = 1 "
+        "WHERE had_gallop = 0 "
+        "  AND finish_position IS NULL "
+        "  AND (withdrawn IS NULL OR withdrawn = 0) "
+        "  AND race_date < date('now')"
+    )
     with engine.connect() as conn:
         for sql in migrations:
             try:
@@ -577,6 +588,13 @@ def _migrate_schema(db_path: str = DB_PATH) -> None:
                 logger.info("Migration applied: %s", sql[:60])
             except Exception:
                 pass  # Sarake on jo olemassa — OK
+        try:
+            result = conn.execute(text(backfill_sql))
+            conn.commit()
+            if result.rowcount > 0:
+                logger.info("had_gallop backfill: %d riviä päivitetty", result.rowcount)
+        except Exception as exc:
+            logger.warning("had_gallop backfill epäonnistui: %s", exc)
 
 
 def _upsert_horse_starts(
@@ -634,6 +652,7 @@ def _upsert_horse_starts(
                 prize_won=s.get("prize_won", 0),
                 win_odds_final=s.get("win_odds_final"),
                 withdrawn=s.get("withdrawn", False),
+                had_gallop=s.get("had_gallop", False),
                 travsport_race_id=int(ts_race_id),
                 race_number=s.get("race_number"),
                 track_condition=s.get("track_condition"),

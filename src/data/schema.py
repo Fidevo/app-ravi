@@ -184,6 +184,7 @@ class HorseStart(Base):
     travsport_race_id = Column(Integer)     # Travsport-natiivi race_id
     race_number = Column(Integer)
     track_condition = Column(String)        # radan kunto (Travsport: "LE", "ME", "TU" tms.)
+    had_gallop = Column(Boolean, default=False)  # 1 jos km_time sortValue >= 9990 (laukka)
 
 
 # Partial unique -indeksi horse_starts-deduplikointiin.

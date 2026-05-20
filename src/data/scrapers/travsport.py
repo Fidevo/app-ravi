@@ -195,6 +195,9 @@ def _normalize_start(r: dict) -> dict[str, Any]:
         "start_number": _sort_int(r.get("startPosition")),
         "finish_position": _placement(r.get("placement")),
         "kilometer_time_seconds": _kilometer_time_from_sort(r.get("kilometerTime")),
+        # km_time sortValue >= 9990 tarkoittaa laukkaa; withdrawn-hevoset eivät ole laukkoja
+        "had_gallop": ((_sort_int(r.get("kilometerTime")) or 0) >= _INVALID_KM_TIME
+                       and not bool(r.get("withdrawn"))),
         "position_at_800m": None,   # ei saatavilla Travsport /results-endpointista
         "track_condition": _track_condition(r.get("trackCondition")),
         "driver": (r.get("driver") or {}).get("name"),

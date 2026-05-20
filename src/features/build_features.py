@@ -28,7 +28,7 @@ _RACE_COLS_EXTRA = ["track_condition", "race_min_earnings", "race_max_earnings",
 # Sarakkeet joita tarvitaan muotolaskentaan sekä runners- että horse_starts-tauluista.
 _POOL_COLS = [
     "horse_id", "race_date", "finish_position",
-    "kilometer_time_seconds", "win_odds_final",
+    "kilometer_time_seconds", "win_odds_final", "had_gallop",
 ]
 
 # Lisäsarakkeet segmentoituihin muotopiirteisiin (B2). Nämä haetaan pooliin
@@ -39,8 +39,9 @@ _POOL_COLS_SEGMENTED = ["start_method", "distance"]
 _FORM_OUT_COLS = [
     "horse_id", "race_date",
     "form_avg_finish_5", "form_win_rate_5", "form_top3_rate_5",
-    "form_avg_km_time_5", "form_best_km_time_5",
+    "form_avg_km_time_5", "form_best_km_time_5", "form_ewm_km_time",
     "form_market_avg_5", "form_days_since_last",
+    "last_race_had_gallop",
     # B2: segmentoidut muotopiirteet (lisätään vain jos sarakkeet löytyivät poolista)
     "form_avg_finish_5_same_method", "form_avg_finish_5_same_dist",
 ]
@@ -187,11 +188,24 @@ def form_features(
     combined["form_top3_rate_5"] = grouped["_is_top3"].transform(
         lambda s: s.shift(1).rolling(n_last, min_periods=1).mean()
     )
-    combined["form_avg_km_time_5"] = grouped["kilometer_time_seconds"].transform(
+    # Gallop-filtteri: maski km_time NaN:iksi laukkastarteilla jotta nopeat
+    # hevoset eivät näytä hitailta pelkkien laukojen takia.
+    if "had_gallop" in combined.columns:
+        combined["_km_clean"] = combined["kilometer_time_seconds"].where(
+            ~combined["had_gallop"].fillna(False).astype(bool)
+        )
+    else:
+        combined["_km_clean"] = combined["kilometer_time_seconds"]
+
+    combined["form_avg_km_time_5"] = grouped["_km_clean"].transform(
         lambda s: s.shift(1).rolling(n_last, min_periods=1).mean()
     )
-    combined["form_best_km_time_5"] = grouped["kilometer_time_seconds"].transform(
+    combined["form_best_km_time_5"] = grouped["_km_clean"].transform(
         lambda s: s.shift(1).rolling(n_last, min_periods=1).min()
+    )
+    # Recency-painotettu km-aika: viimeisin startti painaa enemmän (span=n_last)
+    combined["form_ewm_km_time"] = grouped["_km_clean"].transform(
+        lambda s: s.shift(1).ewm(span=n_last, min_periods=1).mean()
     )
     combined["form_market_avg_5"] = grouped["_market_prob"].transform(
         lambda s: s.shift(1).rolling(n_last, min_periods=1).mean()
@@ -202,6 +216,14 @@ def form_features(
     combined["form_days_since_last"] = (
         combined["race_date"] - combined["_prev_race_date"]
     ).dt.days
+
+    # last_race_had_gallop: 1.0 jos edellinen startti päättyi laukkaan
+    if "had_gallop" in combined.columns:
+        combined["last_race_had_gallop"] = grouped["had_gallop"].transform(
+            lambda s: s.shift(1).fillna(False).astype(float)
+        )
+    else:
+        combined["last_race_had_gallop"] = np.nan
 
     # --- B2: Segmentoidut muotopiirteet ---
     # form_avg_finish_5_same_method: rolling 5 vain samalla starttimuodolla (auto/volt)
@@ -490,6 +512,9 @@ def race_setup_features(
 
     df["inside_post"] = (df["start_number"] <= 3).astype(int)
     df["back_row"] = (df["handicap_meters"].fillna(0) > 0).astype(int)
+    # Normalisoitu lähtörata: inside_post-etu vaihtelee kenttäkoon mukaan
+    df["field_size"] = df.groupby("race_id")["horse_id"].transform("count")
+    df["post_pos_norm"] = df["start_number"] / df["field_size"].replace(0, np.nan)
 
     df["distance_category"] = pd.cut(
         df["distance"],
@@ -1580,10 +1605,13 @@ def change_features(
     }
     has_hist_driver = "driver" in hs.columns
     has_hist_distance = "distance" in hs.columns
+    has_hist_prize = "prize_won" in hs.columns
     if has_hist_driver:
         hs_cols_src["driver"] = "hist_driver"
     if has_hist_distance:
         hs_cols_src["distance"] = "hist_distance"
+    if has_hist_prize:
+        hs_cols_src["prize_won"] = "hist_prize_won"
 
     hs_sub = hs[[c for c in hs_cols_src]].rename(columns=hs_cols_src)
 
@@ -1617,16 +1645,23 @@ def change_features(
     else:
         last["distance_change_m"] = np.nan
 
+    # prev_prize_won: hevosen edellisen startin palkinto (luokkamuutos-proxy)
+    if has_hist_prize and "hist_prize_won" in last.columns:
+        last["prev_prize_won"] = last["hist_prize_won"].astype(float)
+    else:
+        last["prev_prize_won"] = np.nan
+
     out = runners_df[["race_id", "horse_id"]].copy()
     out["race_id"] = out["race_id"].astype(str)
+    out_cols = ["race_id", "horse_id", "driver_changed", "distance_change_m", "prev_prize_won"]
     out = out.merge(
-        last[["race_id", "horse_id", "driver_changed", "distance_change_m"]],
+        last[[c for c in out_cols if c in last.columns]],
         on=["race_id", "horse_id"],
         how="left",
     )
 
     # Varmista sarakkeet olemassa (tyhjä horse_starts → NaN)
-    for col in ("driver_changed", "distance_change_m"):
+    for col in ("driver_changed", "distance_change_m", "prev_prize_won"):
         if col not in out.columns:
             out[col] = np.nan
 
@@ -1849,7 +1884,8 @@ def build_feature_matrix(
     # 13: Muutospiirteet — ohjastajan vaihto ja matkamuutos edelliseen starttiin
     # driver_changed: 1 jos eri kuski kuin viimeisin horse_starts-startti (point-in-time)
     # distance_change_m: nykyinen matka - edellinen matka (metreinä)
-    _chg_cols = ["driver_changed", "distance_change_m"]
+    # prev_prize_won: edellisen startin palkinto (luokkamuutos-proxy)
+    _chg_cols = ["driver_changed", "distance_change_m", "prev_prize_won"]
     if horse_starts is not None and len(horse_starts) > 0:
         chg_feat = change_features(df, horse_starts, races)
         chg_feat["race_id"] = chg_feat["race_id"].astype(df["race_id"].dtype)
@@ -1858,6 +1894,14 @@ def build_feature_matrix(
     else:
         for col in _chg_cols:
             df[col] = np.nan
+
+    # driver_quality_signal: kuskin laatu muutostilanteessa
+    # Kuvaa muutoksen suuntaa osittain: korkea arvo = vaihto hyvään kuskiin.
+    # Puuttuva puoli (vanhan kuskin laatu) vaatisi erillisen hist-hakuun.
+    if "driver_changed" in df.columns and "driver_win_rate_365d" in df.columns:
+        df["driver_quality_signal"] = df["driver_win_rate_365d"].where(
+            df["driver_changed"] == 1.0
+        )
 
     # M1: Markkinaodds-todennäköisyys (win_odds_final → devigoitu implied prob)
     # Treenauksessa: win_odds_final saatavilla → feature lasketaan.

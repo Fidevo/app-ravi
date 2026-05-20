@@ -38,8 +38,10 @@ FEATURE_COLS: list[str] = [
     "form_avg_finish_5",
     "form_win_rate_5",
     "form_top3_rate_5",
-    "form_avg_km_time_5",
+    "form_avg_km_time_5",        # gallop-filteroitu (2026-05-20)
     "form_best_km_time_5",
+    "form_ewm_km_time",          # recency-painotettu km-aika (span=5)
+    "last_race_had_gallop",      # 1 jos edellinen startti päättyi laukkaan
     "form_market_avg_5",
     # market_implied_prob on POISTETTU FEATURE_COLS:ista (18.5.2026, auditoijan suositus).
     # Perustelut: Copycat-ansa — malli joka kopioi markkinaa tuottaa edge ≈ 0.
@@ -83,15 +85,18 @@ FEATURE_COLS: list[str] = [
     "inside_post",
     "back_row",
     "handicap_meters",
+    "post_pos_norm",             # lähtörata / kenttäkoko (inside-etu suhteessa kilpailijoihin)
     "track_horse_starts",
     "track_horse_win_rate",
     # --- Lähdön luokka (races-taulusta) ---
     "race_min_earnings",
     "race_max_earnings",
+    "prev_prize_won",            # edellisen startin palkinto (luokkamuutos-proxy)
     # --- Kengät ja sulky: muutossignaalit (runners-taulusta suoraan) ---
     "shoes_changed_front",
     "shoes_changed_back",
     "sulky_changed",
+    "driver_quality_signal",     # driver_win_rate_365d kun kuski on vaihtunut (NaN muulloin)
     # --- Johdetut piirteet (build_features.derived_features) ---
     "barfota_law_active",
     "horse_age",   # Vaatii birth_year runners-DataFramessa — ohitetaan jos puuttuu
