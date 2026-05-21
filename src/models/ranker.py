@@ -452,8 +452,26 @@ def predict_win_probabilities(
     _avail_cat_set = set(avail_cat)
     avail_feat_only = [c for c in avail_feat if c not in _avail_cat_set]
     X = race_df[avail_feat_only + avail_cat].copy()
-    for col in avail_cat:
-        X[col] = X[col].astype("category")
+
+    # Hae mallin tallentamat kategoria-arvot (jos on) jotta int-koodaukset 
+    # osuvat täsmälleen yhteen treenidatan kanssa. Estää pahan bugin jos
+    # ennustettavasta datasta puuttuu kategorioita.
+    model_cats = getattr(model, "pandas_categorical", None)
+    model_features = model.feature_name()
+    
+    if model_cats is not None and len(model_cats) > 0 and len(model_features) >= len(model_cats):
+        train_cat_cols = model_features[-len(model_cats):]
+        cat_map = dict(zip(train_cat_cols, model_cats))
+        
+        for col in avail_cat:
+            if col in cat_map:
+                cat_dtype = pd.CategoricalDtype(categories=cat_map[col], ordered=False)
+                X[col] = X[col].astype(cat_dtype)
+            else:
+                X[col] = X[col].astype("category")
+    else:
+        for col in avail_cat:
+            X[col] = X[col].astype("category")
 
     raw_scores = model.predict(X)
 
