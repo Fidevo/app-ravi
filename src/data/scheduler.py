@@ -583,20 +583,6 @@ def _migrate_schema(db_path: str = DB_PATH) -> None:
         "  AND (withdrawn IS NULL OR withdrawn = 0) "
         "  AND race_date < date('now')"
     )
-    # Backfill 2: race_min_earnings races-taulusta matchaamalla race_date+track+race_number.
-    # Idempotentti: päivittää vain NULL-rivit. Joineamattomille (norjalaiset radat,
-    # historiadata ennen DB:n alkua) jää NULL — LightGBM käsittelee automaattisesti.
-    backfill_earnings_sql = (
-        "UPDATE horse_starts "
-        "SET race_min_earnings = ("
-        "  SELECT r.race_min_earnings FROM races r "
-        "  WHERE r.race_date = horse_starts.race_date "
-        "    AND r.track     = horse_starts.track "
-        "    AND r.race_number = horse_starts.race_number "
-        "  LIMIT 1"
-        ") "
-        "WHERE race_min_earnings IS NULL"
-    )
     with engine.connect() as conn:
         for sql in migrations:
             try:
@@ -612,13 +598,58 @@ def _migrate_schema(db_path: str = DB_PATH) -> None:
                 logger.info("had_gallop backfill: %d riviä päivitetty", result.rowcount)
         except Exception as exc:
             logger.warning("had_gallop backfill epäonnistui: %s", exc)
-        try:
-            result = conn.execute(text(backfill_earnings_sql))
-            conn.commit()
-            if result.rowcount > 0:
-                logger.info("race_min_earnings backfill: %d riviä päivitetty", result.rowcount)
-        except Exception as exc:
-            logger.warning("race_min_earnings backfill epäonnistui: %s", exc)
+
+    # Backfill 2: race_min_earnings races-taulusta — Pythonissa koska horse_starts.track
+    # käyttää Travsport-koodeja (esim. "År") mutta races.track käyttää ATG-nimiä
+    # ("Årjäng"). TRACKCODE_TO_NAME hoitaa käännöksen.
+    # Idempotentti: käsitellään vain NULL-rivit. Norjalaisille/tuntemattomille
+    # radoille jää NULL — LightGBM käsittelee automaattisesti.
+    _backfill_race_min_earnings(db_path)
+
+
+def _backfill_race_min_earnings(db_path: str = DB_PATH) -> None:
+    """Täytä horse_starts.race_min_earnings races-taulusta.
+
+    Muuntaa Travsport-ratakoodit ATG-nimiksi (TRACKCODE_TO_NAME) ennen joinia.
+    Käsittelee vain rivit joilla race_min_earnings IS NULL.
+    """
+    import sqlite3 as _sqlite3
+    from src.data.track_codes import TRACKCODE_TO_NAME
+
+    try:
+        con = _sqlite3.connect(db_path)
+        # Lataa matchauskelpoiset horse_starts-rivit (vain NULL-rivit)
+        hs = con.execute(
+            "SELECT id, race_date, track, race_number FROM horse_starts "
+            "WHERE race_min_earnings IS NULL"
+        ).fetchall()
+        if not hs:
+            con.close()
+            return
+        # Lataa koko races-taulu lookuppia varten
+        races_rows = con.execute(
+            "SELECT race_date, track, race_number, race_min_earnings FROM races"
+        ).fetchall()
+        # Races lookup: (race_date, atg_track, race_number) → race_min_earnings
+        races_lookup: dict[tuple, int] = {
+            (r[0], r[1], r[2]): r[3] for r in races_rows
+        }
+        updates: list[tuple[int, int]] = []
+        for row_id, race_date, ts_track, race_number in hs:
+            atg_track = TRACKCODE_TO_NAME.get(ts_track, ts_track)
+            key = (race_date, atg_track, race_number)
+            val = races_lookup.get(key)
+            if val is not None:
+                updates.append((val, row_id))
+        if updates:
+            con.executemany(
+                "UPDATE horse_starts SET race_min_earnings=? WHERE id=?", updates
+            )
+            con.commit()
+            logger.info("race_min_earnings backfill: %d riviä päivitetty", len(updates))
+        con.close()
+    except Exception as exc:
+        logger.warning("race_min_earnings backfill epäonnistui: %s", exc)
 
 
 def _upsert_horse_starts(
