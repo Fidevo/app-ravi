@@ -28,7 +28,7 @@ horse_starts = pd.read_sql(
     "SELECT * FROM horse_starts "
     "WHERE (withdrawn IS NULL OR withdrawn != 1) "
     "  AND (finish_position IS NULL OR finish_position != 99) "
-    "  AND (race_date IS NULL OR race_date >= '2023-01-01')", con
+    "  AND (race_date IS NULL OR race_date >= '2024-01-01')", con
 )
 horses = pd.read_sql("SELECT * FROM horses", con)
 tracks = pd.read_sql("SELECT * FROM tracks", con)
