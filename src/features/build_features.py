@@ -35,9 +35,15 @@ _POOL_COLS = [
 # vain jos ne löytyvät syötedatasta — taaksepäin-yhteensopiva.
 _POOL_COLS_SEGMENTED = ["start_method", "distance"]
 
-# Valinnaiset pool-sarakkeet — otetaan mukaan vain jos löytyvät syötedatasta.
-# had_gallop on vain horse_starts-taulussa, ei runners-taulussa.
-_POOL_COLS_OPTIONAL = ["had_gallop"]
+# Valinnaiset pool-sarakkeet ja niiden oletusarvot puuttuvalle datalle.
+# had_gallop: vain horse_starts-taulussa (ei runners) → oletus False
+# race_min_earnings: runners saa sen races-pre-mergellä, horse_starts
+#   rikasteellaan build_feature_matrix():ssa → oletus NaN
+_POOL_COLS_OPTIONAL_DEFAULTS: dict = {
+    "had_gallop": False,
+    "race_min_earnings": float("nan"),
+}
+_POOL_COLS_OPTIONAL: list[str] = list(_POOL_COLS_OPTIONAL_DEFAULTS.keys())
 
 # Muotolaskennan tulossarakkeet (siirretään runners:iin mergellä)
 _FORM_OUT_COLS = [
@@ -48,6 +54,8 @@ _FORM_OUT_COLS = [
     "last_race_had_gallop",
     # B2: segmentoidut muotopiirteet (lisätään vain jos sarakkeet löytyivät poolista)
     "form_avg_finish_5_same_method", "form_avg_finish_5_same_dist",
+    # C6: luokkakohtaiset muotopiirteet (lisätään vain jos race_min_earnings saatavilla)
+    "form_win_rate_5_same_class", "form_avg_finish_5_same_class", "form_avg_km_time_5_same_class",
 ]
 
 # Normalisointitaulu rataolot-koodit: Travsport + ATG → kanoninen muoto.
@@ -151,10 +159,10 @@ def form_features(
 
     # --- Rakenna pool: runners + valinnainen horse_starts-historia ---
     current = df[[c for c in pool_cols_full if c in df.columns]].copy()
-    # Täytä puuttuvat optionaaliset sarakkeet oletusarvoilla
+    # Täytä puuttuvat optionaaliset sarakkeet per-sarake-oletusarvoilla
     for c in opt_cols_avail:
         if c not in current.columns:
-            current[c] = False
+            current[c] = _POOL_COLS_OPTIONAL_DEFAULTS.get(c, False)
     current["_is_runner"] = True
 
     if horse_starts is not None and len(horse_starts) > 0:
@@ -269,6 +277,41 @@ def form_features(
         combined = combined.drop(columns=["_dist_bucket"])
     else:
         combined["form_avg_finish_5_same_dist"] = np.nan
+
+    # --- C6: Luokkakohtaiset muotopiirteet ---
+    # Vaatii race_min_earnings poolissa (runners: pre-merge races:sta,
+    # horse_starts: rikastettu build_feature_matrix():ssa).
+    # Luokkabucketit (SEK) kuvaavat lähdön tasoa tienausrajan mukaan:
+    #   low    : 0–25 000  (kevyet avoimet / alempi taso)
+    #   medium : 25 000–75 000  (perustaso)
+    #   high   : 75 000–200 000  (korkeampi taso)
+    #   elite  : 200 000+  (huipputaso)
+    # NaN: joinaamaton historiastartit (norjalaiset/vanhat radat) → LightGBM käsittelee.
+    if "race_min_earnings" in combined.columns and combined["race_min_earnings"].notna().any():
+        combined["_race_class_bucket"] = pd.cut(
+            combined["race_min_earnings"],
+            bins=[0, 25_000, 75_000, 200_000, float("inf")],
+            labels=["low", "medium", "high", "elite"],
+            right=True,
+            include_lowest=True,
+        )
+        grouped_class = combined.groupby(
+            ["horse_id", "_race_class_bucket"], group_keys=False, observed=True
+        )
+        combined["form_win_rate_5_same_class"] = grouped_class["_is_win"].transform(
+            lambda s: s.shift(1).rolling(n_last, min_periods=1).mean()
+        )
+        combined["form_avg_finish_5_same_class"] = grouped_class["finish_position"].transform(
+            lambda s: s.shift(1).rolling(n_last, min_periods=1).mean()
+        )
+        combined["form_avg_km_time_5_same_class"] = grouped_class["_km_clean"].transform(
+            lambda s: s.shift(1).rolling(n_last, min_periods=1).mean()
+        )
+        combined = combined.drop(columns=["_race_class_bucket"])
+    else:
+        combined["form_win_rate_5_same_class"] = np.nan
+        combined["form_avg_finish_5_same_class"] = np.nan
+        combined["form_avg_km_time_5_same_class"] = np.nan
 
     # --- Palauta vain runner-rivit, liitä form-piirteet runners:iin ---
     # Suodata _FORM_OUT_COLS:sta vain sarakkeet jotka löytyvät combined:sta
@@ -1790,7 +1833,7 @@ def build_feature_matrix(
     # form_avg_finish_5_same_dist) jotka olivat 100 % NaN tuotannossa.
     # horse_starts:ssa nämä sarakkeet ovat jo natiivisti (Travsport tallentaa ne).
     race_meta_cols = ["race_id"]
-    for c in ("start_method", "distance"):
+    for c in ("start_method", "distance", "race_min_earnings"):
         if c in races.columns and c not in runners.columns:
             race_meta_cols.append(c)
     if len(race_meta_cols) > 1:
@@ -1812,6 +1855,27 @@ def build_feature_matrix(
         horse_starts["start_method"] = horse_starts["start_method"].map(
             lambda m: START_METHOD_TO_ATG.get(m, m) if m is not None else None
         )
+
+    # C6: rikasta horse_starts race_min_earnings:lla luokkabucketointia varten.
+    # Joinataan races-tauluun (race_date + track + race_number) jotta jokainen
+    # historiallinen startti saa lähdön tienausrajan. Joineamattomille (norjalaiset
+    # radat, vanhempi data) jää NaN — LightGBM käsittelee automaattisesti.
+    # horse_starts on jo kopioitu yllä jos start_method-normalisointi ajettiin;
+    # muussa tapauksessa kopioidaan tässä ennen muutosta.
+    if horse_starts is not None and "race_min_earnings" not in horse_starts.columns:
+        _hs_join_keys = ["race_date", "track", "race_number"]
+        if (
+            all(c in races.columns for c in _hs_join_keys + ["race_min_earnings"])
+            and all(c in horse_starts.columns for c in _hs_join_keys)
+        ):
+            _races_cls = (
+                races[_hs_join_keys + ["race_min_earnings"]]
+                .drop_duplicates(subset=_hs_join_keys)
+            )
+            # Kopioidaan vain jos ei jo kopioitu start_method-blokin toimesta
+            if "start_method" not in horse_starts.columns:
+                horse_starts = horse_starts.copy()
+            horse_starts = horse_starts.merge(_races_cls, on=_hs_join_keys, how="left")
 
     df = form_features(runners_with_meta, horse_starts=horse_starts)
     df = driver_trainer_features(df)

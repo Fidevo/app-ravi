@@ -55,6 +55,13 @@ FEATURE_COLS: list[str] = [
     # B2: segmentoidut muotopiirteet — vain sama starttimuoto / matkaluokka
     "form_avg_finish_5_same_method",
     "form_avg_finish_5_same_dist",
+    # C6: luokkakohtaiset muotopiirteet — vain samantasoinen lähtö (2026-05-21)
+    # Luokat: low (0–25k SEK) / medium (25–75k) / high (75–200k) / elite (200k+)
+    # Korjaa tilastoharhan: hevonen joka voittaa halvassa lähdössä ≠ vahva suosikki
+    # kalliissa lähdössä. NaN = luokkadata ei saatavilla → LightGBM käsittelee.
+    "form_win_rate_5_same_class",
+    "form_avg_finish_5_same_class",
+    "form_avg_km_time_5_same_class",
     # --- ATG-aggregaatit hevosesta: koko ura (runners-taulusta suoraan) ---
     "atg_lifetime_win_rate",
     "atg_lifetime_top3_rate",
