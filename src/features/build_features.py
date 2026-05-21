@@ -1857,9 +1857,10 @@ def build_feature_matrix(
         )
 
     # C6: rikasta horse_starts race_min_earnings:lla luokkabucketointia varten.
-    # Joinataan races-tauluun (race_date + track + race_number) jotta jokainen
-    # historiallinen startti saa lähdön tienausrajan. Joineamattomille (norjalaiset
-    # radat, vanhempi data) jää NaN — LightGBM käsittelee automaattisesti.
+    # Ensisijainen: race_min_earnings on tallennettu suoraan horse_starts-tauluun
+    # scheduler._migrate_schema()-backfillillä (migraatio 3, 2026-05-21).
+    # Fallback: jos sarake puuttuu (vanha DB tai testi), joinataan races-tauluun.
+    # Joineamattomille (norjalaiset radat, data ennen DB:n alkua) jää NaN.
     # horse_starts on jo kopioitu yllä jos start_method-normalisointi ajettiin;
     # muussa tapauksessa kopioidaan tässä ennen muutosta.
     if horse_starts is not None and "race_min_earnings" not in horse_starts.columns:

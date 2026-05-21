@@ -185,6 +185,7 @@ class HorseStart(Base):
     race_number = Column(Integer)
     track_condition = Column(String)        # radan kunto (Travsport: "LE", "ME", "TU" tms.)
     had_gallop = Column(Boolean, default=False)  # 1 jos km_time sortValue >= 9990 (laukka)
+    race_min_earnings = Column(Integer)          # lähdön tienausrajan alaraja (SEK) — backfill races-taulusta
 
 
 # Partial unique -indeksi horse_starts-deduplikointiin.

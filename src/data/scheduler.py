@@ -570,15 +570,32 @@ def _migrate_schema(db_path: str = DB_PATH) -> None:
         "ALTER TABLE runners ADD COLUMN withdrawn INTEGER DEFAULT 0",
         # Migraatio 2: had_gallop horse_starts-tauluun (2026-05-20)
         "ALTER TABLE horse_starts ADD COLUMN had_gallop BOOLEAN DEFAULT 0",
+        # Migraatio 3: race_min_earnings horse_starts-tauluun (2026-05-21)
+        # Täytetään races-taulusta backfill-kyselyllä alla.
+        "ALTER TABLE horse_starts ADD COLUMN race_min_earnings INTEGER",
     ]
-    # Backfill: historiallisille riveille joilla finish_position IS NULL ja ei vetäytynyt
+    # Backfill 1: historiallisille riveille joilla finish_position IS NULL ja ei vetäytynyt
     # → todennäköinen laukka (tieto menetettiin _placement()-muunnoksessa)
-    backfill_sql = (
+    backfill_gallop_sql = (
         "UPDATE horse_starts SET had_gallop = 1 "
         "WHERE had_gallop = 0 "
         "  AND finish_position IS NULL "
         "  AND (withdrawn IS NULL OR withdrawn = 0) "
         "  AND race_date < date('now')"
+    )
+    # Backfill 2: race_min_earnings races-taulusta matchaamalla race_date+track+race_number.
+    # Idempotentti: päivittää vain NULL-rivit. Joineamattomille (norjalaiset radat,
+    # historiadata ennen DB:n alkua) jää NULL — LightGBM käsittelee automaattisesti.
+    backfill_earnings_sql = (
+        "UPDATE horse_starts "
+        "SET race_min_earnings = ("
+        "  SELECT r.race_min_earnings FROM races r "
+        "  WHERE r.race_date = horse_starts.race_date "
+        "    AND r.track     = horse_starts.track "
+        "    AND r.race_number = horse_starts.race_number "
+        "  LIMIT 1"
+        ") "
+        "WHERE race_min_earnings IS NULL"
     )
     with engine.connect() as conn:
         for sql in migrations:
@@ -589,12 +606,19 @@ def _migrate_schema(db_path: str = DB_PATH) -> None:
             except Exception:
                 pass  # Sarake on jo olemassa — OK
         try:
-            result = conn.execute(text(backfill_sql))
+            result = conn.execute(text(backfill_gallop_sql))
             conn.commit()
             if result.rowcount > 0:
                 logger.info("had_gallop backfill: %d riviä päivitetty", result.rowcount)
         except Exception as exc:
             logger.warning("had_gallop backfill epäonnistui: %s", exc)
+        try:
+            result = conn.execute(text(backfill_earnings_sql))
+            conn.commit()
+            if result.rowcount > 0:
+                logger.info("race_min_earnings backfill: %d riviä päivitetty", result.rowcount)
+        except Exception as exc:
+            logger.warning("race_min_earnings backfill epäonnistui: %s", exc)
 
 
 def _upsert_horse_starts(
