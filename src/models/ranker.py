@@ -256,8 +256,15 @@ def train_ranker(
     # (esim. horse_age) ei vaadita kaikissa ympäristöissä.
     avail_feat, avail_cat = _resolve_cols(df, feature_cols, categorical_cols)
 
-    # Ranker-target: käännetään sijoitus pisteeksi (1. -> korkein)
-    df["relevance"] = (6 - df["finish_position"]).clip(lower=1).astype(int)
+    # Ranker-target: täysi ranking-signaali per lähtö.
+    # max_pos - finish_position + 1 → voittaja saa kentän koon, viimeinen saa 1.
+    # Esim. 12 hevosen lähdössä: [12, 11, 10, ..., 2, 1].
+    # VANHA KOODI (6 - pos).clip(lower=1) oli bugi: kaikki sijoitukset 5+
+    # saivat saman relevance=1 → LambdaRank ei saanut gradienttia näiden
+    # välillä → mallin pisteet puristuivat → softmax tasainen jakauma.
+    # _MAX_VALID_POS-suodatin (yllä) estää erikoiskoodi-ongelmat (99, 104).
+    max_pos = df.groupby("race_id")["finish_position"].transform("max")
+    df["relevance"] = (max_pos - df["finish_position"] + 1).astype(int)
 
     # Ryhmäkoot per lähtö (lambdarankin vaatimus).
     # sort=False: df on jo sortattu → ei uudelleensortausta, järjestys säilyy.
@@ -465,15 +472,22 @@ def predict_win_probabilities(
     # ennustettavasta datasta puuttuu kategorioita.
     model_cats = getattr(model, "pandas_categorical", None)
     model_features = model.feature_name()
-    
-    if model_cats is not None and len(model_cats) > 0 and len(model_features) >= len(model_cats):
-        train_cat_cols = model_features[-len(model_cats):]
-        cat_map = dict(zip(train_cat_cols, model_cats))
-        
+
+    # Defensiivinen kategorinen koodaus: etsi kategoriakolumnit nimellä,
+    # älä järjestyksellä. Järjestysoletus ([-len(model_cats):]) rikkoutuisi
+    # hiljaisesti jos X-rakentamisen järjestys muuttuu tulevaisuudessa.
+    if model_cats is not None and len(model_cats) > 0:
+        cat_features_in_model = [c for c in model_features if c in set(avail_cat)]
+        if len(cat_features_in_model) == len(model_cats):
+            cat_map = dict(zip(cat_features_in_model, model_cats))
+        else:
+            # Fallback: järjestysoletus jos nimihaku ei täsmää
+            cat_map = dict(zip(model_features[-len(model_cats):], model_cats))
         for col in avail_cat:
             if col in cat_map:
-                cat_dtype = pd.CategoricalDtype(categories=cat_map[col], ordered=False)
-                X[col] = X[col].astype(cat_dtype)
+                X[col] = X[col].astype(
+                    pd.CategoricalDtype(categories=cat_map[col], ordered=False)
+                )
             else:
                 X[col] = X[col].astype("category")
     else:

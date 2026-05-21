@@ -1249,7 +1249,7 @@ def test_setup_for_date_schedules_refresh_job(monkeypatch):
     sched = MagicMock()
     captured: list = []
 
-    def fake_fetch_daily_races(target, db_path, scheduler, travsport):
+    def fake_fetch_daily_races(target, db_path, scheduler, travsport, travronden=None):
         # Palauta track_first_races dict jossa yksi rata tulevaisuuteen
         future = datetime.now(timezone.utc) + timedelta(hours=4)
         return {
@@ -1273,7 +1273,7 @@ def test_setup_for_date_skips_refresh_when_first_race_in_past(monkeypatch):
     """Jos 1. lähdön - 10min on jo mennyt (esim. iltapäivä-restartti), ei ajasteta."""
     sched = MagicMock()
 
-    def fake_fetch_daily_races(target, db_path, scheduler, travsport):
+    def fake_fetch_daily_races(target, db_path, scheduler, travsport, travronden=None):
         past = datetime.now(timezone.utc) - timedelta(hours=2)
         return {
             "races_processed": 5, "snapshot_jobs": 0, "result_jobs": 0,
@@ -1369,7 +1369,7 @@ def test_refresh_day_runners_calls_fetch_daily_without_scheduling(monkeypatch):
     """refresh_day_runners EI saa kutsua scheduleria/travsportia - vain runner-päivitys."""
     captured = {}
 
-    def fake_fetch_daily_races(target, db_path, atg=None, scheduler=None, travsport=None):
+    def fake_fetch_daily_races(target, db_path, atg=None, scheduler=None, travsport=None, travronden=None):
         captured["target"] = target
         captured["scheduler"] = scheduler
         captured["travsport"] = travsport
