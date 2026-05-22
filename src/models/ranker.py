@@ -94,7 +94,9 @@ FEATURE_COLS: list[str] = [
     "handicap_meters",
     "post_pos_norm",             # lähtörata / kenttäkoko (inside-etu suhteessa kilpailijoihin)
     "track_horse_starts",
-    "track_horse_win_rate",
+    # track_horse_win_rate poistettu 22.5.2026: (horse, track)-segmentti erittäin sparse
+    # (68.8 % n≤3, Q1=1, seg_med=2) ja SHAP=0.033 harmaalla alueella → auditoijan suositus
+    # "todennäköisesti poista". Sparsempi kuin C6 (42.9 %) joka jo osoittautui kohinaksi.
     # --- Lähdön luokka (races-taulusta) ---
     "race_min_earnings",
     "race_max_earnings",
@@ -146,8 +148,9 @@ FEATURE_COLS: list[str] = [
     # --- C: Uudet piirteet (build_features, C1–C4) ---
     "start_position_win_rate",     # starttipaikan historiallinen voitto-% tällä radalla (C2)
     "start_method_win_rate_diff",  # auto_win_rate - volte_win_rate per hevonen (C3)
-    "driver_track_win_rate_60d",   # kuski×rata voitto-% 60d (C4)
-    "trainer_track_win_rate_60d",  # valmentaja×rata voitto-% 60d (C4)
+    # driver_track_win_rate_60d ja trainer_track_win_rate_60d poistettu 22.5.2026:
+    # SHAP 0.012 / 0.013 (lähes nolla) + notna 31% / 24% (erittäin sparse) →
+    # "matala SHAP + sparse" -ruutu auditoijan matriisissa → poista, älä kynnystä.
     # --- C5: Trendit ja rataolot-preferenssi (build_features, C5) ---
     "km_time_trend",            # km-ajan suuntaus: neg=nopeutuu, pos=hidastuu (C5)
     "prize_money_trend",        # palkintorahan suuntaus: pos=nousee luokkaa (C5)

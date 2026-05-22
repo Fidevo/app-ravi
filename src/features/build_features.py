@@ -52,6 +52,13 @@ _POOL_COLS_OPTIONAL: list[str] = list(_POOL_COLS_OPTIONAL_DEFAULTS.keys())
 # Kokeile 3 jos 5 leikkaa liikaa walk-forwardissa (~2026-07).
 _CLASS_MIN_STARTS: int = 5
 
+# B2: minimisegmenttikynnys same_method / same_dist -piirteille.
+# Alhaisepi kuin C6 (5) koska 2 buckettia (auto/volt) ja 3 buckettia (matka)
+# → segmentit ovat luonnostaan isompia. Diagnostiikka 22.5.2026:
+# 34–37 % n≤3, seg_med=6, Q1=2 — hieman parempaa kuin C6 (42.9 %).
+# Kokeile 2:ta jos 3 leikkaa liikaa walk-forwardissa (~2026-07).
+_B2_MIN_STARTS: int = 3
+
 # Muotolaskennan tulossarakkeet (siirretään runners:iin mergellä)
 _FORM_OUT_COLS = [
     "horse_id", "race_date",
@@ -266,6 +273,12 @@ def form_features(
         combined["form_avg_finish_5_same_method"] = grouped_method[
             "finish_position"
         ].transform(lambda s: s.shift(1).rolling(n_last, min_periods=1).mean())
+        # _B2_MIN_STARTS-kynnys: nollaa sparse-segmentit (diagnostiikka 22.5.2026:
+        # 34.2 % segmenteistä n≤3, Q1=2 → kohinaa sparse-hevosten auto/volt-jakaumissa)
+        _b2_method_n = grouped_method["finish_position"].transform(
+            lambda s: s.shift(1).rolling(n_last, min_periods=1).count()
+        )
+        combined.loc[_b2_method_n < _B2_MIN_STARTS, "form_avg_finish_5_same_method"] = np.nan
     else:
         combined["form_avg_finish_5_same_method"] = np.nan
 
@@ -281,6 +294,12 @@ def form_features(
         combined["form_avg_finish_5_same_dist"] = grouped_dist[
             "finish_position"
         ].transform(lambda s: s.shift(1).rolling(n_last, min_periods=1).mean())
+        # _B2_MIN_STARTS-kynnys: nollaa sparse-segmentit (diagnostiikka 22.5.2026:
+        # 36.6 % segmenteistä n≤3, Q1=2 → sama mekanismi kuin same_method)
+        _b2_dist_n = grouped_dist["finish_position"].transform(
+            lambda s: s.shift(1).rolling(n_last, min_periods=1).count()
+        )
+        combined.loc[_b2_dist_n < _B2_MIN_STARTS, "form_avg_finish_5_same_dist"] = np.nan
         combined = combined.drop(columns=["_dist_bucket"])
     else:
         combined["form_avg_finish_5_same_dist"] = np.nan
