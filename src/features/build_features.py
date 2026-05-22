@@ -45,6 +45,13 @@ _POOL_COLS_OPTIONAL_DEFAULTS: dict = {
 }
 _POOL_COLS_OPTIONAL: list[str] = list(_POOL_COLS_OPTIONAL_DEFAULTS.keys())
 
+# C6: minimisegmenttikoko — sama kaava kuin sire-piirteiden _SIRE_MIN_STARTS.
+# Piirre nollataan NaN:ksi jos (hevonen, luokka)-segmentissä on alle tämän
+# verran aiempia startteja. Poistaa sparse-segmenttien kohinan (diagnostiikka
+# 22.5.2026: 42.9 % segmenteistä n≤3, kattavuus vain 27.1 %).
+# Kokeile 3 jos 5 leikkaa liikaa walk-forwardissa (~2026-07).
+_CLASS_MIN_STARTS: int = 5
+
 # Muotolaskennan tulossarakkeet (siirretään runners:iin mergellä)
 _FORM_OUT_COLS = [
     "horse_id", "race_date",
@@ -307,6 +314,20 @@ def form_features(
         combined["form_avg_km_time_5_same_class"] = grouped_class["_km_clean"].transform(
             lambda s: s.shift(1).rolling(n_last, min_periods=1).mean()
         )
+        # Minimisegmenttikynnys: nollaa C6-piirteet jos (horse, class) -segmentissä
+        # on alle _CLASS_MIN_STARTS aiempaa starttia. Perustuu finish_position-laskuriin
+        # (aina saatavilla, toisin kuin _km_clean jossa voi olla NaN gallop-filterin takia).
+        # Diagnostiikka 22.5.2026: mediaani segmentti=4, 42.9 % ≤3 → kohinaa malliin.
+        _seg_n = grouped_class["finish_position"].transform(
+            lambda s: s.shift(1).rolling(n_last, min_periods=1).count()
+        )
+        _sparse = _seg_n < _CLASS_MIN_STARTS
+        for _c6_col in (
+            "form_win_rate_5_same_class",
+            "form_avg_finish_5_same_class",
+            "form_avg_km_time_5_same_class",
+        ):
+            combined.loc[_sparse, _c6_col] = np.nan
         combined = combined.drop(columns=["_race_class_bucket"])
     else:
         combined["form_win_rate_5_same_class"] = np.nan

@@ -252,6 +252,38 @@ shap_df = (
 # ---------------------------------------------------------------------------
 # 6. Ryhmittäinen SHAP-hyöty uusille piirteille
 # ---------------------------------------------------------------------------
+# HUOM: _cls lisätään features-DataFrameen ENNEN train/test-slicejä jotta
+# per-luokka-kattavuusanalyysi toimii train-subsetissä ilman KeyError.
+_bins   = [0, 25_000, 75_000, 200_000, float("inf")]
+_labels = ["low", "medium", "high", "elite"]
+if "race_min_earnings" in features.columns:
+    features["_cls"] = pd.cut(
+        features["race_min_earnings"], bins=_bins, labels=_labels,
+        right=True, include_lowest=True,
+    )
+    train_cls = features[features["race_date"] < SPLIT_DATE]
+    c6_col = "form_avg_km_time_5_same_class"
+    print(f"\n--- C6-kattavuusdiagnostiikka ---")
+    print(f"  {c6_col} notna%: koko data {features[c6_col].notna().mean()*100:.1f}%"
+          f"  | train {train_cls[c6_col].notna().mean()*100:.1f}%")
+    seg_counts = (
+        features.dropna(subset=["race_min_earnings"])
+        .groupby(["horse_id", "_cls"], observed=True)
+        .size()
+    )
+    print(f"  Segmenttikoko (horse×luokka): mediaani={seg_counts.median():.1f}"
+          f"  Q1={seg_counts.quantile(0.25):.1f}  Q3={seg_counts.quantile(0.75):.1f}")
+    print(f"  n=1: {(seg_counts==1).mean()*100:.1f}%"
+          f"  | n≤3: {(seg_counts<=3).mean()*100:.1f}%"
+          f"  | n≥5: {(seg_counts>=5).mean()*100:.1f}%")
+    print(f"  {c6_col} notna% per luokka (train):")
+    for lbl in _labels:
+        sub = train_cls[train_cls["_cls"] == lbl]
+        if len(sub) > 0:
+            pct = sub[c6_col].notna().mean() * 100
+            print(f"    {lbl:8s}: {pct:.1f}%  (n={len(sub)})")
+    features = features.drop(columns=["_cls"])
+
 group_shap: dict[str, float] = {}
 for group_name, cols in NEW_FEATURE_GROUPS.items():
     vals = shap_df[shap_df["feature"].isin(cols)]["mean_abs_shap"].sum()

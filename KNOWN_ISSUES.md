@@ -31,6 +31,32 @@ korrelaatiosäätöä. Oikea toteutus: `[r * total_prob for r in raw]`.
 
 ## Avoimet — korjattava ennen seuraavaa uudelleentreenauksia
 
+### #19 · C6-luokkapiirteet: sparse-segmentit → epäluotettava signaali
+
+**Havainto (22.5.2026, SHAP + segmenttianalyysi):**
+- `form_avg_km_time_5_same_class` on SHAP #2 (0.861) mutta kattavuus vain **27.1%**
+- **42.9%** segmenteistä perustuu ≤3 starttiin, **20.6%** vain yhteen starttiin
+- Sparse-segmenteissä piirre on kohinaa — malli käyttää sitä silti (SHAP #2) →
+  voi tuottaa valheellisia value-betejä (korkea ennuste kohinaan perustuen)
+
+**Korjaus tehty (22.5.2026):** `_CLASS_MIN_STARTS = 5` kynnys `build_features.py`:ssä —
+C6-piirteet nollataan NaN:ksi jos segmentissä < 5 aiempaa starttia.
+
+**Vahvistettava walk-forwardissa (~2026-07-01, kun dataa 42+ vrk):**
+Testaa kolme varianttia yli ikkunoiden:
+- **A**: ilman `form_avg_km_time_5_same_class`
+- **B**: nykyinen (min_sample=5)
+- **C**: tiukempi (min_sample=8)
+
+Hypoteesi: Jos B > A vakaasti → kynnys auttaa, signaali on aito.
+Jos B ≈ A tai heiluu ikkunoittain → luokkapiirre ei yleisty, harkitse poistoa.
+Kokeile myös kynnystä 3 jos 5 leikkaa kattavuuden liian alas.
+
+**Prioriteetti:** tärkeä ennen paperitestausta — korjattu versio parempi kuin 0,
+mutta vahvistus tarvitaan.
+
+---
+
 ### #18 · OOM-laastari: `horse_starts`-rajaus 2024+ RAM-ongelman kiertämiseksi
 
 **Havainto (22.5.2026):** `retrain_model.py` kaatui OOM-tappoon (~3.15 GB) kun
