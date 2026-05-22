@@ -1,6 +1,6 @@
 # Ravit Edge — Tunnetut ongelmat
 
-> Päivitetty 16.5.2026.
+> Päivitetty 22.5.2026.
 > Vain avoimet ongelmat — korjatut bugit löytyvät tiedoston lopusta.
 > Tämänhetkinen tila ja avoimet tehtävät: [`TASK_PROGRESS.md`](TASK_PROGRESS.md).
 
@@ -31,7 +31,24 @@ korrelaatiosäätöä. Oikea toteutus: `[r * total_prob for r in raw]`.
 
 ## Avoimet — korjattava ennen seuraavaa uudelleentreenauksia
 
-*(Ei avoimia — kaikki seuraavaan treeniin vaikuttavat korjattu 16.5.2026)*
+### #18 · OOM-laastari: `horse_starts`-rajaus 2024+ RAM-ongelman kiertämiseksi
+
+**Havainto (22.5.2026):** `retrain_model.py` kaatui OOM-tappoon (~3.15 GB) kun
+C6-luokkapiirteiden `groupby`-laskenta käytti real-dataa `race_min_earnings`-backfillin
+jälkeen (255k riviä → enemmän RAM kuin all-NaN-tapauksessa).
+
+**Väliaikaisratkaisu:** `horse_starts`-suodatin muutettu `>= '2023-01-01'` →
+`>= '2024-01-01'` (177k riviä, peak 1913 MB). Tämä tiputtaa 78k riviä historiasta.
+
+**Vaikutus nyt:** Marginaalinen — 177k riviä riittää form-piirteiden laskentaan.
+Brier 0.0670 (T=0.8845), std 0.915 — malli toimii hyvin.
+
+**Oikea korjaus — tarvitaan kun data kasvaa 255k → 400k+:**
+- `float64` → `float32` piirrekolumneille (puolittaa RAM:n useimmissa)
+- C6 `groupby`-laskenta chunkeissa tai [Polars](https://pola.rs/)-kirjastolla
+- Vaihtoehto: lisää RAM Hetznerillä (4 GB → 8 GB, ~5 €/kk)
+
+**Prioriteetti:** matala nyt, kasvaa kun `horse_starts` ylittää ~300k riviä.
 
 ---
 
@@ -285,3 +302,6 @@ kaikki 3 ehtoa.
 | **sire-leakage** | `sire_features()` sisällytti hevosen omat startit aggregaattiin → leave-one-out -korjaus | 14.5.2026 |
 | **backtest race_date -kollissio** | `rolling_walk_forward` ja `quarterly_walk_forward` kaatuivat KeyError:iin kun race_date oli jo features-DataFramessa | 14.5.2026 |
 | **test_travsport fixture** | `sample_792729_*.json` fixture-tiedostot `data/raw/` (gitignored) → siirretty `tests/fixtures/travsport/` (gitattu). 6 testiä kaatui Hetznerillä. | 16.5.2026 |
+| **relevance-bugi** | `(6-pos).clip(lower=1)` antoi kaikille positioille 5+ saman relevanssin=1 → LambdaRank ei saanut gradienttia erottelemaan loppupään hevosia → tasaiset todennäköisyysjakaumat. Korjattu: `max_pos - finish_position + 1` (lineaarinen). Malli uudelleentreenaattu 22.5.2026 (Brier=0.0670, T=0.8845, std per lähtö=0.915). | 22.5.2026 |
+| **C6-luokkapiirteet** | `race_min_earnings` backfill epäonnistui silently koska `horse_starts.track` käyttää Travsport-koodeja ("År") mutta `races.track` ATG-nimiä ("Årjäng") → SQL JOIN ei osannut matchata → 0% kattavuus. Korjattu Python-backfillillä `TRACKCODE_TO_NAME`-mappingilla. Kattavuus 22.5.2026: ~72%. | 22.5.2026 |
+| **predict_win_probs categoricals** | `pandas_categorical` indeksipohjaisesta mappingista nimipohjainen mapping → vääriä kategoriakoodeiksi mapping korjattu defensiivisellä logiikalla. | 22.5.2026 |
