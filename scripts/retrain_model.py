@@ -63,7 +63,7 @@ print(f"Piirteitä: {len(FEATURE_COLS)}")
 print(f"[3] Train split valmis, RAM={mem_mb()} MB", flush=True)
 model = train_ranker(train_df, random_state=42)
 print(f"[4] Malli koulutettu, RAM={mem_mb()} MB", flush=True)
-out = "/home/ravi/app-ravi/data/model_baseline_20260522.lgb"
+out = "/home/ravi/app-ravi/data/model_baseline_20260523.lgb"
 model.save_model(out)
 print(f"Malli tallennettu: {out}")
 
@@ -85,9 +85,28 @@ merged_cal["actual_win"] = (merged_cal["finish_position"] == 1).astype(int)
 brier_cal = float(((merged_cal["win_prob"] - merged_cal["actual_win"]) ** 2).mean())
 print(f"Brier (T={temperature:.4f}) = {brier_cal:.4f}  NLL={compute_nll(merged_cal):.2f}")
 
+# Tasaisuusdiagnostiikka (suosikki-jakauma-mittaus)
+# Tarkistaa ettei T > 1 aiheuta tasaisen jakauman regressiota.
+# Healthy: median_std 0.05-0.12, median_top1 0.20-0.40, flat_pct < 5 %.
+race_stats = merged_cal.groupby("race_id")["win_prob"].agg(["std", "max"]).reset_index()
+median_std  = float(race_stats["std"].median())
+mean_std    = float(race_stats["std"].mean())
+median_top1 = float(race_stats["max"].median())
+mean_top1   = float(race_stats["max"].mean())
+flat_pct    = float((race_stats["std"] < 0.03).mean() * 100)
+print(f"Tasaisuusdiagnostiikka (T={temperature:.4f}):")
+print(f"  Median std/lähtö: {median_std:.4f}  (healthy: 0.05-0.12)")
+print(f"  Mean   std/lähtö: {mean_std:.4f}")
+print(f"  Median top-1 prob: {median_top1:.4f}  (healthy: 0.20-0.40)")
+print(f"  Mean   top-1 prob: {mean_top1:.4f}")
+print(f"  Tasaisia lähtöjä (std<0.03): {flat_pct:.1f}%  (pitäisi olla lähellä 0)")
+
 # Tallennetaan meta-tiedosto dashboardia varten
 meta = {"temperature": temperature, "brier": brier_cal, "brier_uncal": brier_raw,
-        "split_date": split_date, "train_rows": len(train_df), "test_rows": len(test_df)}
+        "split_date": split_date, "train_rows": len(train_df), "test_rows": len(test_df),
+        "flatness": {"median_std": median_std, "mean_std": mean_std,
+                     "median_top1": median_top1, "mean_top1": mean_top1,
+                     "flat_pct": flat_pct}}
 meta_path = out.replace(".lgb", "_meta.json")
 with open(meta_path, "w") as f:
     json.dump(meta, f, indent=2)
