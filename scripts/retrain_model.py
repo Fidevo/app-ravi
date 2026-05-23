@@ -18,11 +18,23 @@ def mem_mb():
 print(f"[0] Aloitetaan, RAM={mem_mb()} MB", flush=True)
 con = sqlite3.connect("/home/ravi/app-ravi/data/ravit.db")
 runners = pd.read_sql(
-    "SELECT r.*, ra.race_date, h.birth_year FROM runners r "
+    # Bugikorjaus 23.5.2026: lisätty ra.distance ja ra.start_method fill_finish_positions():lle.
+    # Volttilähdöissä hevoset ajavat eri pituisia matkoja (tasakäynti) — sijoitusten
+    # laskeminen pelkästä km_ajasta antaa väärän järjestyksen. total_time = km_time *
+    # (distance + handicap_meters) / 1000 on oikea vertailuaika.
+    "SELECT r.*, ra.race_date, ra.distance, ra.start_method AS race_start_method, "
+    "h.birth_year FROM runners r "
     "JOIN races ra ON r.race_id = ra.race_id "
     "LEFT JOIN horses h ON r.horse_id = h.horse_id",
     con,
 )
+# Runners-taulussa on oma start_method (voi olla NULL joillekin riveille).
+# Käytä races:n start_method:ä fill_finish_positions()-korjaukseen jos oma puuttuu.
+if "start_method" not in runners.columns:
+    runners = runners.rename(columns={"race_start_method": "start_method"})
+elif "race_start_method" in runners.columns:
+    runners["start_method"] = runners["start_method"].fillna(runners["race_start_method"])
+    runners = runners.drop(columns=["race_start_method"])
 races = pd.read_sql("SELECT * FROM races", con)
 horse_starts = pd.read_sql(
     "SELECT * FROM horse_starts "

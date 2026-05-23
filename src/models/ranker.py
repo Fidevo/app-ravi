@@ -55,8 +55,13 @@ FEATURE_COLS: list[str] = [
     # B2: segmentoidut muotopiirteet — vain sama starttimuoto / matkaluokka
     "form_avg_finish_5_same_method",
     "form_avg_finish_5_same_dist",
+    "form_avg_km_time_5_same_dist",  # km-aika samassa matkaluokassa (bugikorjaus 23.5.2026)
+    # Perustelut: form_avg_km_time_5 laskee km-ajan kaikille matkoille, mutta
+    # 1600 m ja 3200 m sprint/long-ajat eivät ole vertailukelpoisia.
+    # Tämä matkakohtainen versio korvaa cross-distance-vertailun harhan.
     # C6: luokkakohtaiset muotopiirteet — vain samantasoinen lähtö (2026-05-21)
-    # Luokat: low (0–25k SEK) / medium (25–75k) / high (75–200k) / elite (200k+)
+    # Luokat perustuvat race_max_earnings (yläraja, ei alaraja) — bugikorjaus 23.5.2026.
+    # low (0–50k SEK) / medium (50–150k) / high (150–500k) / elite (500k+ tai NULL)
     # Korjaa tilastoharhan: hevonen joka voittaa halvassa lähdössä ≠ vahva suosikki
     # kalliissa lähdössä. NaN = luokkadata ei saatavilla → LightGBM käsittelee.
     "form_win_rate_5_same_class",
@@ -90,7 +95,9 @@ FEATURE_COLS: list[str] = [
     "trainer_top3_rate_60d",
     # --- Lähtöasetelma (build_features.race_setup_features) ---
     "inside_post",
-    "back_row",
+    "has_handicap",              # 1 jos handicap_meters > 0 (bugikorjaus 23.5.2026: was back_row)
+    "is_back_row_auto",          # 1 jos autolähdössä start_number > 8 (takarivin signaali)
+    # back_row säilyy aliaksena has_handicap:lle (takaisinyhteensopivuus, ei syötetä mallille)
     "handicap_meters",
     "post_pos_norm",             # lähtörata / kenttäkoko (inside-etu suhteessa kilpailijoihin)
     "track_horse_starts",
@@ -153,7 +160,10 @@ FEATURE_COLS: list[str] = [
     # "matala SHAP + sparse" -ruutu auditoijan matriisissa → poista, älä kynnystä.
     # --- C5: Trendit ja rataolot-preferenssi (build_features, C5) ---
     "km_time_trend",            # km-ajan suuntaus: neg=nopeutuu, pos=hidastuu (C5)
-    "prize_money_trend",        # palkintorahan suuntaus: pos=nousee luokkaa (C5)
+    # prize_money_trend poistettu 23.5.2026 (raviasiantuntijan havainto):
+    # Suunta on käänteinen — nouseva palkintokehitys tarkoittaa lähtöihin NOUSUA
+    # (kovempi kilpailu), ei helpotusta. Piirteen kausaalisuus on väärä.
+    # prev_prize_won (SHAP=0.060) kattaa luokkatason paremmin absoluuttisena arvona.
     "track_condition_win_rate", # voitto-% samassa normalisoidussa rataolossa (C5)
     # --- Muutospiirteet (build_features.change_features) ---
     "driver_changed",           # 1 jos eri kuski kuin edellisessä startissa (signaali)

@@ -37,11 +37,12 @@ _POOL_COLS_SEGMENTED = ["start_method", "distance"]
 
 # Valinnaiset pool-sarakkeet ja niiden oletusarvot puuttuvalle datalle.
 # had_gallop: vain horse_starts-taulussa (ei runners) → oletus False
-# race_min_earnings: runners saa sen races-pre-mergellä, horse_starts
+# race_max_earnings: runners saa sen races-pre-mergellä, horse_starts
 #   rikasteellaan build_feature_matrix():ssa → oletus NaN
+#   (Bugikorjaus 23.5.2026: muutettu race_min_earnings → race_max_earnings)
 _POOL_COLS_OPTIONAL_DEFAULTS: dict = {
     "had_gallop": False,
-    "race_min_earnings": float("nan"),
+    "race_max_earnings": float("nan"),
 }
 _POOL_COLS_OPTIONAL: list[str] = list(_POOL_COLS_OPTIONAL_DEFAULTS.keys())
 
@@ -68,7 +69,8 @@ _FORM_OUT_COLS = [
     "last_race_had_gallop",
     # B2: segmentoidut muotopiirteet (lisätään vain jos sarakkeet löytyivät poolista)
     "form_avg_finish_5_same_method", "form_avg_finish_5_same_dist",
-    # C6: luokkakohtaiset muotopiirteet (lisätään vain jos race_min_earnings saatavilla)
+    "form_avg_km_time_5_same_dist",  # km-aika samassa matkaluokassa (bugikorjaus 23.5.2026)
+    # C6: luokkakohtaiset muotopiirteet (lisätään vain jos race_max_earnings saatavilla)
     "form_win_rate_5_same_class", "form_avg_finish_5_same_class", "form_avg_km_time_5_same_class",
 ]
 
@@ -263,8 +265,12 @@ def form_features(
         combined["last_race_had_gallop"] = np.nan
 
     # --- B2: Segmentoidut muotopiirteet ---
-    # form_avg_finish_5_same_method: rolling 5 vain samalla starttimuodolla (auto/volt)
-    # form_avg_finish_5_same_dist:   rolling 5 vain samalla matkaluokalla (sprint/middle/long)
+    # form_avg_finish_5_same_method:  rolling 5 vain samalla starttimuodolla (auto/volt)
+    # form_avg_finish_5_same_dist:    rolling 5 vain samalla matkaluokalla (sprint/middle/long)
+    # form_avg_km_time_5_same_dist:   rolling 5 km-aika vain samalla matkaluokalla
+    #   Bugikorjaus 23.5.2026 (raviasiantuntija): form_avg_km_time_5 laskee km-ajan yli
+    #   kaikkien matkojen — 1600 m ja 3200 m eivät ole vertailukelpoisia.
+    #   Tämä matkaluokkakohtainen versio korjaa sen.
     # Lasketaan vain jos start_method/distance löytyivät poolista.
     if "start_method" in combined.columns:
         grouped_method = combined.groupby(
@@ -294,29 +300,46 @@ def form_features(
         combined["form_avg_finish_5_same_dist"] = grouped_dist[
             "finish_position"
         ].transform(lambda s: s.shift(1).rolling(n_last, min_periods=1).mean())
+        # form_avg_km_time_5_same_dist: km-aika samassa matkaluokassa (bugikorjaus 23.5.2026)
+        if "km_time" in combined.columns:
+            combined["form_avg_km_time_5_same_dist"] = grouped_dist[
+                "km_time"
+            ].transform(lambda s: s.shift(1).rolling(n_last, min_periods=1).mean())
+        else:
+            combined["form_avg_km_time_5_same_dist"] = np.nan
         # _B2_MIN_STARTS-kynnys: nollaa sparse-segmentit (diagnostiikka 22.5.2026:
         # 36.6 % segmenteistä n≤3, Q1=2 → sama mekanismi kuin same_method)
         _b2_dist_n = grouped_dist["finish_position"].transform(
             lambda s: s.shift(1).rolling(n_last, min_periods=1).count()
         )
         combined.loc[_b2_dist_n < _B2_MIN_STARTS, "form_avg_finish_5_same_dist"] = np.nan
+        combined.loc[_b2_dist_n < _B2_MIN_STARTS, "form_avg_km_time_5_same_dist"] = np.nan
         combined = combined.drop(columns=["_dist_bucket"])
     else:
         combined["form_avg_finish_5_same_dist"] = np.nan
+        combined["form_avg_km_time_5_same_dist"] = np.nan
 
     # --- C6: Luokkakohtaiset muotopiirteet ---
-    # Vaatii race_min_earnings poolissa (runners: pre-merge races:sta,
+    # Vaatii race_max_earnings poolissa (runners: pre-merge races:sta,
     # horse_starts: rikastettu build_feature_matrix():ssa).
-    # Luokkabucketit (SEK) kuvaavat lähdön tasoa tienausrajan mukaan:
-    #   low    : 0–25 000  (kevyet avoimet / alempi taso)
-    #   medium : 25 000–75 000  (perustaso)
-    #   high   : 75 000–200 000  (korkeampi taso)
-    #   elite  : 200 000+  (huipputaso)
+    # Luokkabucketit (SEK) kuvaavat lähdön tasoa ylärajan mukaan (race_max_earnings).
+    # race_max_earnings = NULL merkitsee huippuluokkaa (ei ylärajaa) → "elite".
+    # Bugikorjaus 23.5.2026: aiemmin käytettiin race_min_earnings (alaraja),
+    # joka on raviasiantuntijan mukaan väärä — Ruotsissa luokka määräytyy
+    # hevosen kumulatiivisten palkintosumman YLÄRAJAN mukaan.
+    #   low    : 0–50 000  (aloittelijat / kevyet avoimet)
+    #   medium : 50 000–150 000  (perustaso)
+    #   high   : 150 000–500 000  (korkeampi taso)
+    #   elite  : 500 000+ tai NULL  (huipputaso / ei ylärajaa)
     # NaN: joinaamaton historiastartit (norjalaiset/vanhat radat) → LightGBM käsittelee.
-    if "race_min_earnings" in combined.columns and combined["race_min_earnings"].notna().any():
+    if "race_max_earnings" in combined.columns and (
+        combined["race_max_earnings"].notna().any() or combined["race_max_earnings"].isna().any()
+    ):
+        # NULL race_max_earnings = elite (ei ylärajaa → huippuluokka)
+        _max_earn = combined["race_max_earnings"].fillna(float("inf"))
         combined["_race_class_bucket"] = pd.cut(
-            combined["race_min_earnings"],
-            bins=[0, 25_000, 75_000, 200_000, float("inf")],
+            _max_earn,
+            bins=[0, 50_000, 150_000, 500_000, float("inf")],
             labels=["low", "medium", "high", "elite"],
             right=True,
             include_lowest=True,
@@ -578,7 +601,9 @@ def race_setup_features(
 
     Lisää:
       - inside_post           : 1 jos lähtörata 1-3 (autostart edge)
-      - back_row              : 1 jos takamatka volttilähdössä
+      - has_handicap          : 1 jos hevosella on tasamatka (handicap_meters > 0)
+      - is_back_row_auto      : 1 jos autolähdössä ja lähtönumero > 8 (takarivin signaali)
+      - (back_row säilyy yhteensopivuussyistä, alias has_handicap:lle)
       - distance_category     : lyhyt/keski/pitkä matka
       - track_horse_starts    : kuinka monta kertaa hevonen on aiemmin
                                 ajanut tällä radalla (kokemus)
@@ -609,7 +634,23 @@ def race_setup_features(
     df = runners.merge(races[cols_not_in_runners], on="race_id", how="left")
 
     df["inside_post"] = (df["start_number"] <= 3).astype(int)
-    df["back_row"] = (df["handicap_meters"].fillna(0) > 0).astype(int)
+    # has_handicap: hevosella on lisämatka (takamatka volttilähdössä tai autolähdössä).
+    # Nimetty aiemmin "back_row" — termi oli harhaanjohtava, koska takamatka on eri
+    # asia kuin volttilähdön takarivi. Raviasiantuntijan bugikorjaus 23.5.2026.
+    df["has_handicap"] = (df["handicap_meters"].fillna(0) > 0).astype(int)
+    # Takaisinyhteensopivuus: back_row säilyy aliaksena has_handicap:lle.
+    df["back_row"] = df["has_handicap"]
+    # is_back_row_auto: autolähdössä lähtönumero > 8 = konkreettinen takarivin haitta.
+    # Volttilähdössä kaikki lähtevät samanaikaisesti — ei sama ilmiö.
+    # Lähde: raviasiantuntija 23.5.2026.
+    if "start_method" in df.columns:
+        df["is_back_row_auto"] = (
+            (df["start_number"] > 8) & (df["start_method"].str.lower() == "auto")
+        ).astype(float)  # float: NaN jos start_method puuttuu
+        # Nullaa rivit joissa start_method on NaN
+        df.loc[df["start_method"].isna(), "is_back_row_auto"] = np.nan
+    else:
+        df["is_back_row_auto"] = np.nan
     # Normalisoitu lähtörata: inside_post-etu vaihtelee kenttäkoon mukaan
     df["field_size"] = df.groupby("race_id")["horse_id"].transform("count")
     df["post_pos_norm"] = df["start_number"] / df["field_size"].replace(0, np.nan)
@@ -735,11 +776,18 @@ def sire_features(
 ) -> pd.DataFrame:
     """Lisää sire/dam_sire-aggregaatit runner-riveille (leave-one-out).
 
-    Lasketaan horse_starts-koko-uradata:sta (ei rajoitettu 14 päivään).
     Käytetään **leave-one-out (LOO)** -laskentaa: hevosen omat startit
     vähennetään sen isäoriin kokonaisaggregaatista ennen win-rate-laskentaa.
     Tämä estää "indirektin leakagen" jossa hevosen oma menestys nostaa
     sen sire-ratea, joka kertoo "tämä hevonen on hyvä" eikä "tämä sire on hyvä".
+
+    Point-in-time (leakage-korjaus 22.5.2026): horse_starts rajataan
+    ennen runners:in vanhinta race_dateja. Tämä on konservatiivinen
+    globaali katkaisu — oikea per-runner-PIT vaatisi _loo_stats:n
+    rakennemuutoksen. Nykytoteutus ei vuoda tulevaisuutta mutta saattaa
+    aliarvioida sire-statistiikkaa uusimmille runnereille.
+    TODO: refaktoroi _loo_stats per-runner-PIT:ksi kun sire-piirteet
+          aktivoidaan uudelleen (~2026-07).
 
     Piirteet:
       sire_lifetime_win_rate     : isäoriin muiden jälkeläisten voitto-% (LOO)
@@ -753,17 +801,26 @@ def sire_features(
       automaattisesti puuttuvana arvona.
 
     Args:
-        runners: DataFrame jossa horse_id (lähdöt joita ennustetaan)
+        runners: DataFrame jossa horse_id ja race_date (lähdöt joita ennustetaan)
         horses: DataFrame jossa horse_id, sire, dam_sire
-        horse_starts: Travsport-historia (103k+ starttia, kaikki hevoset)
+        horse_starts: Travsport-historia (kaikki hevoset)
 
     Returns:
         runners-DataFrame lisättyinä sire/dam_sire-sarakkeilla
     """
     pedigree = horses[["horse_id", "sire", "dam_sire"]].drop_duplicates("horse_id")
 
+    # Point-in-time: poista tulevaisuuden startit ennen aggregointia.
+    # Käytetään runners:in vanhinta race_dateja kynnyksenä (konservatiivinen
+    # globaali katkaisu). Estää backtestauksen "aikamatkailun" eli sen että
+    # vuoden 2024 ennuste sisältäisi oriin jälkeläisten vuoden 2026 tulokset.
+    hs_pit = horse_starts.copy()
+    if "race_date" in runners.columns and "race_date" in hs_pit.columns:
+        min_runner_date = pd.to_datetime(runners["race_date"]).min()
+        hs_pit = hs_pit[pd.to_datetime(hs_pit["race_date"]) < min_runner_date]
+
     # --- 1. Liitä sire/dam_sire horse_starts-riveihin horses-taulusta ---
-    starts = horse_starts.merge(pedigree, on="horse_id", how="left")
+    starts = hs_pit.merge(pedigree, on="horse_id", how="left")
     starts["is_win"] = (starts["finish_position"] == 1).astype(float)
 
     # ------------------------------------------------------------------ #
@@ -921,8 +978,14 @@ def fill_finish_positions(runners: pd.DataFrame) -> pd.DataFrame:
     Täyttölogiikka per lähtö (race_id):
       1. Viralliset sijoitukset (1–N) säilytetään muuttumattomina.
       2. Hevoset jotka ajoivat (kilometer_time_seconds IS NOT NULL, finish=NULL):
-         järjestetään km-ajan mukaan nousevasti (nopein saa parhaan sijoituksen)
-         ja sijoitetaan heti virallisten jälkeen (N+1, N+2, ...).
+         järjestetään nousevasti per lähtö ja sijoitetaan heti virallisten jälkeen
+         (N+1, N+2, ...).
+         Järjestysaika (bugikorjaus 23.5.2026, raviasiantuntija):
+           - Volttilähtö (start_method == "volte") JA distance+handicap_meters saatavilla:
+               total_time = km_time * (distance + handicap_meters) / 1000
+             Perustelu: hevosilla on eri lähtömatkat (tasamatkat) — km_aika on sama
+             vaikka hevonen ajoi enemmän metreitä. total_time on oikea vertailuaika.
+           - Muulloin (autolähtö tai ei distance-dataa): käytetään km_time suoraan.
       3. Vetäytyneet/peruuntuneet (sekä finish että km_time NULL):
          sijoitetaan viimeisiksi järjestyksessä (km_aika ei tiedossa).
       4. Lähdöt joissa KAIKKI sijoitukset ovat NULL (tulevat lähdöt) jätetään
@@ -934,6 +997,8 @@ def fill_finish_positions(runners: pd.DataFrame) -> pd.DataFrame:
     Args:
         runners: DataFrame jossa on sarakkeet race_id, finish_position,
                  kilometer_time_seconds. Muut sarakkeet läpäistään sellaisinaan.
+                 Valinnainen: distance, handicap_meters, start_method
+                 (tarvitaan volttilähtö-korjaukseen).
 
     Returns:
         Kopio DataFramesta jossa finish_position täytetty kaikille riveille
@@ -960,9 +1025,27 @@ def fill_finish_positions(runners: pd.DataFrame) -> pd.DataFrame:
     withdrawn = needs[~has_km].copy()
 
     # km_aika-hevoset: järjestä nousevasti per lähtö → sijoitus = race_max + rank
+    # Volttilähtö-korjaus (bugikorjaus 23.5.2026): käytä total_time jos distance+handicap
+    # saatavilla ja start_method == "volte". Muulloin km_time riittää (autolähtö).
     if not km_runners.empty:
+        _has_volte_fix = (
+            "distance" in km_runners.columns
+            and "handicap_meters" in km_runners.columns
+            and "start_method" in km_runners.columns
+        )
+        if _has_volte_fix:
+            _is_volte = km_runners["start_method"].str.lower().eq("volte")
+            _dist = km_runners["distance"].fillna(0)
+            _hcap = km_runners["handicap_meters"].fillna(0)
+            _sort_time = km_runners["kilometer_time_seconds"].copy()
+            # total_time (sekuntia) = km_time * kokonaismatka / 1000
+            _total_time = km_runners["kilometer_time_seconds"] * (_dist + _hcap) / 1000
+            _sort_time = _sort_time.where(~_is_volte, _total_time)
+        else:
+            _sort_time = km_runners["kilometer_time_seconds"]
+        km_runners["_sort_time"] = _sort_time
         km_runners["_rank"] = km_runners.groupby("race_id")[
-            "kilometer_time_seconds"
+            "_sort_time"
         ].rank(method="first", ascending=True)
         km_runners["finish_position"] = km_runners["_race_max"] + km_runners["_rank"]
 
@@ -1873,7 +1956,7 @@ def build_feature_matrix(
     # form_avg_finish_5_same_dist) jotka olivat 100 % NaN tuotannossa.
     # horse_starts:ssa nämä sarakkeet ovat jo natiivisti (Travsport tallentaa ne).
     race_meta_cols = ["race_id"]
-    for c in ("start_method", "distance", "race_min_earnings"):
+    for c in ("start_method", "distance", "race_max_earnings"):
         if c in races.columns and c not in runners.columns:
             race_meta_cols.append(c)
     if len(race_meta_cols) > 1:
@@ -1896,21 +1979,22 @@ def build_feature_matrix(
             lambda m: START_METHOD_TO_ATG.get(m, m) if m is not None else None
         )
 
-    # C6: rikasta horse_starts race_min_earnings:lla luokkabucketointia varten.
-    # Ensisijainen: race_min_earnings on tallennettu suoraan horse_starts-tauluun
-    # scheduler._migrate_schema()-backfillillä (migraatio 3, 2026-05-21).
+    # C6: rikasta horse_starts race_max_earnings:lla luokkabucketointia varten.
+    # Bugikorjaus 23.5.2026: muutettu race_min_earnings → race_max_earnings.
+    # Ensisijainen: race_max_earnings on tallennettu suoraan horse_starts-tauluun
+    # scheduler._migrate_schema()-backfillillä.
     # Fallback: jos sarake puuttuu (vanha DB tai testi), joinataan races-tauluun.
-    # Joineamattomille (norjalaiset radat, data ennen DB:n alkua) jää NaN.
+    # Joineamattomille (norjalaiset radat, data ennen DB:n alkua) jää NaN → LightGBM käsittelee.
     # horse_starts on jo kopioitu yllä jos start_method-normalisointi ajettiin;
     # muussa tapauksessa kopioidaan tässä ennen muutosta.
-    if horse_starts is not None and "race_min_earnings" not in horse_starts.columns:
+    if horse_starts is not None and "race_max_earnings" not in horse_starts.columns:
         _hs_join_keys = ["race_date", "track", "race_number"]
         if (
-            all(c in races.columns for c in _hs_join_keys + ["race_min_earnings"])
+            all(c in races.columns for c in _hs_join_keys + ["race_max_earnings"])
             and all(c in horse_starts.columns for c in _hs_join_keys)
         ):
             _races_cls = (
-                races[_hs_join_keys + ["race_min_earnings"]]
+                races[_hs_join_keys + ["race_max_earnings"]]
                 .drop_duplicates(subset=_hs_join_keys)
             )
             # Kopioidaan vain jos ei jo kopioitu start_method-blokin toimesta
