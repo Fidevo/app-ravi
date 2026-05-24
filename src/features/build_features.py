@@ -1081,7 +1081,17 @@ def start_position_features(
     historical_runners_df: pd.DataFrame | None = None,
     min_samples: int = 10,
 ) -> pd.DataFrame:
-    """Laske historiallinen voitto-% per (track, start_number).
+    """Laske historiallinen voitto-% per (track, start_number, start_method).
+
+    Bugikorjaus 24.5.2026 (raviasiantuntija): aiemmin ryhmittely oli vain
+    (track, start_number), joka sekoitti autolähdön ja volttilähdön tilastot.
+    Nyt ryhmittely on (track, start_number, start_method) kun start_method on
+    saatavilla. Autolähdössä ja volttilähdössä ratojen dynamiikka on täysin erilainen:
+      - Volttilähtö: rata 1 ylivoimaisesti paras (lyhin matka ensimmäiseen
+        kaarteeseen, välitön keulahevonenmahdollisuus). Rata 8+ usein toivoton.
+      - Autolähtö: rata 1 ei yhtä ylivoimainen; radat 4–5 usein parhaita.
+    Ilman start_method-erottelua malli saa kompromissiluvun joka ei kuvaa
+    kumpaakaan lähtötapaa oikein.
 
     Käyttää **point-in-time** -tilastoa kun runners_df:ssä on race_date-sarake:
     kullekin lähdölle lasketaan aggregaatti vain aiemmista lähdöistä
@@ -1091,8 +1101,9 @@ def start_position_features(
 
     Args:
         runners_df: nykyiset lähdöt, vaaditut sarakkeet: race_id, start_number,
-            finish_position. Valinnaisesti race_date (point-in-time-laskentaan).
-        races_df: races-taulu, vaaditut sarakkeet: race_id, track
+            finish_position. Valinnaisesti race_date ja start_method.
+        races_df: races-taulu, vaaditut sarakkeet: race_id, track.
+            Valinnaisesti start_method (käytetään jos runners_df:ssä ei ole).
         historical_runners_df: runners historiasta (valinnainen). Jos annetaan,
             yhdistetään pooliin ennen aggregointia.
         min_samples: min. näytemäärä — alle tämän → NaN (oletus 10)
@@ -1101,9 +1112,20 @@ def start_position_features(
         DataFrame sarakkeilla [race_id, start_number,
             start_position_win_rate, start_position_win_rate_n]
     """
-    track_map = races_df[["race_id", "track"]].drop_duplicates("race_id")
+    # track_map: liittää track (ja start_method jos saatavilla) race_id:n mukaan.
+    _tm_cols = ["race_id", "track"]
+    if "start_method" in races_df.columns:
+        _tm_cols.append("start_method")
+    track_map = races_df[_tm_cols].drop_duplicates("race_id")
+
+    # Onko start_method käytettävissä jossain muodossa?
+    has_start_method = (
+        "start_method" in runners_df.columns
+        or "start_method" in races_df.columns
+    )
 
     def _add_track(df: pd.DataFrame) -> pd.DataFrame:
+        """Liitä track (ja start_method) race_id:n perusteella."""
         d = df.copy()
         d["race_id"] = d["race_id"].astype(str)
         tm = track_map.copy()
@@ -1111,9 +1133,17 @@ def start_position_features(
         return d.merge(tm, on="race_id", how="left")
 
     def _compute_agg(pool_sub: pd.DataFrame) -> pd.DataFrame:
-        """Laske win rate -aggregaatti osajoukolle."""
+        """Laske win rate -aggregaatti osajoukolle.
+
+        Ryhmittely: (track, start_number, start_method) jos start_method
+        saatavilla — muuten (track, start_number) fallbackina.
+        """
+        if has_start_method and "start_method" in pool_sub.columns:
+            group_keys = ["track", "start_number", "start_method"]
+        else:
+            group_keys = ["track", "start_number"]
         agg = (
-            pool_sub.groupby(["track", "start_number"])
+            pool_sub.groupby(group_keys, observed=True)
             .agg(_n=("is_win", "count"), _wins=("is_win", "sum"))
             .reset_index()
         )
@@ -1123,14 +1153,21 @@ def start_position_features(
             np.nan,
         )
         agg = agg.rename(columns={"_n": "start_position_win_rate_n"})
-        return agg[["track", "start_number", "start_position_win_rate",
-                    "start_position_win_rate_n"]]
+        out_cols = group_keys + ["start_position_win_rate", "start_position_win_rate_n"]
+        return agg[out_cols]
+
+    # merge-avaimet: (track, start_number, start_method) tai (track, start_number)
+    _merge_keys = ["track", "start_number", "start_method"] if has_start_method \
+        else ["track", "start_number"]
 
     # Rakenna pool race_date:n kanssa (point-in-time-suodatusta varten)
     has_race_date = "race_date" in runners_df.columns
     pool_cols = ["race_id", "start_number", "finish_position"]
     if has_race_date:
         pool_cols = pool_cols + ["race_date"]
+    # start_method pooliin jos runners_df:ssä — muuten _add_track liittää races_df:stä
+    if "start_method" in runners_df.columns:
+        pool_cols = pool_cols + ["start_method"]
 
     pool = _add_track(runners_df[[c for c in pool_cols if c in runners_df.columns]].copy())
 
@@ -1158,25 +1195,35 @@ def start_position_features(
         for cut_date in unique_dates:
             # Suodata historiallinen data: vain päivät ennen cut_date
             hist_pool = pool[pool["race_date"] < cut_date]
+            # Slice-sarakkeet: race_id + start_number (+ start_method jos saatavilla)
+            _slice_cols = ["race_id", "start_number"]
+            if "start_method" in runners_df.columns:
+                _slice_cols.append("start_method")
             runners_slice = runners_df[
                 runners_df["race_date"] == cut_date
-            ][["race_id", "start_number"]].copy()
+            ][_slice_cols].copy()
 
             if hist_pool.empty:
                 # Ei historiaa — palautetaan NaN
                 runners_slice["start_position_win_rate"] = np.nan
                 runners_slice["start_position_win_rate_n"] = np.nan
-                parts.append(runners_slice)
+                parts.append(runners_slice[["race_id", "start_number",
+                                            "start_position_win_rate",
+                                            "start_position_win_rate_n"]])
                 continue
 
             agg = _compute_agg(hist_pool)
+            # _add_track liittää track + start_method (jos races_df:ssä)
             runners_with_track = _add_track(runners_slice)
+            # Merge-avaimet: (track, start_number, start_method) tai (track, start_number)
+            _avail_merge = [k for k in _merge_keys if k in runners_with_track.columns
+                            and k in agg.columns]
             runners_with_track = runners_with_track.merge(
-                agg, on=["track", "start_number"], how="left"
+                agg, on=_avail_merge, how="left"
             )
             runners_with_track["race_id"] = runners_with_track["race_id"].astype(str)
 
-            result_slice = runners_slice.copy()
+            result_slice = runners_slice[["race_id", "start_number"]].copy()
             result_slice["race_id"] = result_slice["race_id"].astype(str)
             result_slice = result_slice.merge(
                 runners_with_track[["race_id", "start_number",
@@ -1204,7 +1251,9 @@ def start_position_features(
     agg = _compute_agg(pool)
 
     runners_with_track = _add_track(runners_df[["race_id", "start_number"]].copy())
-    runners_with_track = runners_with_track.merge(agg, on=["track", "start_number"], how="left")
+    _avail_merge = [k for k in _merge_keys if k in runners_with_track.columns
+                    and k in agg.columns]
+    runners_with_track = runners_with_track.merge(agg, on=_avail_merge, how="left")
 
     out = runners_df[["race_id", "start_number"]].copy()
     out["race_id"] = out["race_id"].astype(str)
