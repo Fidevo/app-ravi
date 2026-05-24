@@ -301,9 +301,16 @@ def form_features(
             "finish_position"
         ].transform(lambda s: s.shift(1).rolling(n_last, min_periods=1).mean())
         # form_avg_km_time_5_same_dist: km-aika samassa matkaluokassa (bugikorjaus 23.5.2026)
-        if "km_time" in combined.columns:
+        # Bugikorjaus 24.5.2026: aiemmin käytettiin "km_time" jota ei ole combined:ssa.
+        # Oikea sarake on "_km_clean" (gallop-filteroitu kilometer_time_seconds),
+        # joka on laskettu yläpuolella form_avg_km_time_5:tä varten.
+        if "_km_clean" in combined.columns:
             combined["form_avg_km_time_5_same_dist"] = grouped_dist[
-                "km_time"
+                "_km_clean"
+            ].transform(lambda s: s.shift(1).rolling(n_last, min_periods=1).mean())
+        elif "kilometer_time_seconds" in combined.columns:
+            combined["form_avg_km_time_5_same_dist"] = grouped_dist[
+                "kilometer_time_seconds"
             ].transform(lambda s: s.shift(1).rolling(n_last, min_periods=1).mean())
         else:
             combined["form_avg_km_time_5_same_dist"] = np.nan
