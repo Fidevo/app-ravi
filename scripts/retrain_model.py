@@ -63,7 +63,7 @@ print(f"Piirteitä: {len(FEATURE_COLS)}")
 print(f"[3] Train split valmis, RAM={mem_mb()} MB", flush=True)
 model = train_ranker(train_df, random_state=42)
 print(f"[4] Malli koulutettu, RAM={mem_mb()} MB", flush=True)
-out = "/home/ravi/app-ravi/data/model_baseline_20260524.lgb"
+out = "/home/ravi/app-ravi/data/model_baseline_20260526.lgb"
 model.save_model(out)
 print(f"Malli tallennettu: {out}")
 
