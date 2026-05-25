@@ -1139,13 +1139,17 @@ def start_position_features(
         tm["race_id"] = tm["race_id"].astype(str)
         return d.merge(tm, on="race_id", how="left")
 
-    def _compute_agg(pool_sub: pd.DataFrame) -> pd.DataFrame:
+    def _compute_agg(pool_sub: pd.DataFrame,
+                     force_base: bool = False) -> pd.DataFrame:
         """Laske win rate -aggregaatti osajoukolle.
 
-        Ryhmittely: (track, start_number, start_method) jos start_method
-        saatavilla — muuten (track, start_number) fallbackina.
+        Ensisijainen ryhmittely: (track, start_number, start_method) jos
+        start_method saatavilla — muuten (track, start_number).
+
+        force_base=True: pakota (track, start_number) -aggregaatti
+        (käytetään fallback-täytössä kun ensisijainen tuottaa NaN).
         """
-        if has_start_method and "start_method" in pool_sub.columns:
+        if has_start_method and "start_method" in pool_sub.columns and not force_base:
             group_keys = ["track", "start_number", "start_method"]
         else:
             group_keys = ["track", "start_number"]
@@ -1162,6 +1166,30 @@ def start_position_features(
         agg = agg.rename(columns={"_n": "start_position_win_rate_n"})
         out_cols = group_keys + ["start_position_win_rate", "start_position_win_rate_n"]
         return agg[out_cols]
+
+    def _apply_fallback(runners_wt: pd.DataFrame,
+                        pool_sub: pd.DataFrame) -> pd.DataFrame:
+        """Täytä NaN start_position_win_rate (track, start_number) -aggregaatilla.
+
+        Kutsutaan kun (track, start_number, start_method) -segmentti ei riittänyt
+        min_samples-kynnyksen ylittämiseen. Näin C2-korjaus ei aiheuta regressiota
+        tilanteissa joissa start_method-segmentti on liian pieni.
+        """
+        missing = runners_wt["start_position_win_rate"].isna()
+        if not missing.any() or not has_start_method:
+            return runners_wt
+        agg_base = _compute_agg(pool_sub, force_base=True)
+        filled = runners_wt.copy()
+        filled = filled.merge(
+            agg_base[["track", "start_number",
+                       "start_position_win_rate", "start_position_win_rate_n"]]
+            .rename(columns={"start_position_win_rate": "_spr_fb",
+                             "start_position_win_rate_n": "_sprn_fb"}),
+            on=["track", "start_number"], how="left",
+        )
+        filled.loc[missing, "start_position_win_rate"] = filled.loc[missing, "_spr_fb"]
+        filled.loc[missing, "start_position_win_rate_n"] = filled.loc[missing, "_sprn_fb"]
+        return filled.drop(columns=["_spr_fb", "_sprn_fb"], errors="ignore")
 
     # merge-avaimet: (track, start_number, start_method) tai (track, start_number)
     _merge_keys = ["track", "start_number", "start_method"] if has_start_method \
@@ -1228,6 +1256,9 @@ def start_position_features(
             runners_with_track = runners_with_track.merge(
                 agg, on=_avail_merge, how="left"
             )
+            # Fallback: jos start_method-segmentti tuotti NaN (liian pieni n),
+            # täytä (track, start_number) -aggregaatilla. Estää C2-regression.
+            runners_with_track = _apply_fallback(runners_with_track, hist_pool)
             runners_with_track["race_id"] = runners_with_track["race_id"].astype(str)
 
             result_slice = runners_slice[["race_id", "start_number"]].copy()
@@ -1261,6 +1292,8 @@ def start_position_features(
     _avail_merge = [k for k in _merge_keys if k in runners_with_track.columns
                     and k in agg.columns]
     runners_with_track = runners_with_track.merge(agg, on=_avail_merge, how="left")
+    # Fallback: täytä NaN (track, start_number) -aggregaatilla
+    runners_with_track = _apply_fallback(runners_with_track, pool)
 
     out = runners_df[["race_id", "start_number"]].copy()
     out["race_id"] = out["race_id"].astype(str)
