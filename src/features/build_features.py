@@ -1082,6 +1082,51 @@ def fill_finish_positions(runners: pd.DataFrame) -> pd.DataFrame:
 # 8. Starttipaikan vinouma per rata (start_position_win_rate)
 # ----------------------------------------------------------------------
 
+
+def compute_start_position_lookup(
+    runners_df: pd.DataFrame,
+    races_df: pd.DataFrame,
+    min_samples: int = 10,
+) -> pd.DataFrame:
+    """Laske start_position_win_rate -hakutaulu koko datasta live-ennustusta varten.
+
+    Käytettäväksi retrain_model.py:ssä mallin koulutuksen jälkeen — tallennetaan
+    CSV:nä ja ladataan check_todays_preds.py:ssä. Näin live-ennustus saa oikeat
+    (track, start_number, start_method) → win_rate -arvot ilman että runners_df:n
+    pitää sisältää koko historiaa.
+
+    Returns:
+        DataFrame: (track, start_number, start_method,
+                    start_position_win_rate, start_position_win_rate_n)
+    """
+    _tm_cols = ["race_id", "track"]
+    if "start_method" in races_df.columns:
+        _tm_cols = ["race_id", "track", "start_method"]
+    track_map = races_df[_tm_cols].drop_duplicates("race_id").copy()
+    track_map["race_id"] = track_map["race_id"].astype(str)
+
+    pool = runners_df[["race_id", "start_number", "finish_position"]].copy()
+    pool["race_id"] = pool["race_id"].astype(str)
+    pool = pool.merge(track_map, on="race_id", how="left")
+    pool = pool.dropna(subset=["track", "start_number", "finish_position"])
+    pool["is_win"] = (pool["finish_position"] == 1).astype(float)
+
+    has_sm = "start_method" in pool.columns
+    group_keys = ["track", "start_number", "start_method"] if has_sm else ["track", "start_number"]
+
+    agg = (
+        pool.groupby(group_keys, observed=True)
+        .agg(_n=("is_win", "count"), _wins=("is_win", "sum"))
+        .reset_index()
+    )
+    agg["start_position_win_rate"] = np.where(
+        agg["_n"] >= min_samples,
+        agg["_wins"] / agg["_n"],
+        np.nan,
+    )
+    agg = agg.rename(columns={"_n": "start_position_win_rate_n"})
+    return agg[group_keys + ["start_position_win_rate", "start_position_win_rate_n"]]
+
 def start_position_features(
     runners_df: pd.DataFrame,
     races_df: pd.DataFrame,
@@ -1988,6 +2033,7 @@ def build_feature_matrix(
     horses: pd.DataFrame | None = None,
     tracks: pd.DataFrame | None = None,
     all_races: pd.DataFrame | None = None,
+    spwr_lookup: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Aja kaikki feature-funktiot ja palauta valmis matriisi mallille.
 
@@ -2018,6 +2064,12 @@ def build_feature_matrix(
     oikein horse_starts-poolista — kun runners sisältää vain tämän päivän lähdöt,
     point-in-time-pool on muuten tyhjä → 100% NaN.
     Uudelleenkoulutuksessa tätä ei tarvita koska runners sisältää jo kaiken historian.
+
+    Valinnainen spwr_lookup-parametri: pre-laskettu (track, start_number, start_method)
+    → win_rate -hakutaulu (compute_start_position_lookup:n tuloste, tallennettu CSV:nä).
+    Jos annettu, ohittaa start_position_features()-kutsun kokonaan — sopii live-
+    ennustukseen jossa runners ei sisällä historiaa. Päivittyy jokaisen uudelleenkoulutuksen
+    yhteydessä.
     """
     # A1-korjaus: pre-merge start_method ja distance races-taulusta runners:iin
     # ENNEN form_features()-kutsua. Ilman tätä seg_cols_avail=[] aina koska
@@ -2102,17 +2154,32 @@ def build_feature_matrix(
 
     # C2: starttipaikan vinouma per rata
     # Bugikorjaus 1.6.2026: live-ennustuksessa runners sisältää vain tämän päivän
-    # lähdöt — point-in-time-pool on tyhjä → 100% NaN. Korjaus: kun all_races on
-    # annettu, käytetään sitä track_map:ina (kattaa historialliset race_id:t) ja
-    # horse_starts:ia historiallisena poolin lähteenä.
+    # lähdöt → point-in-time-pool tyhjä → 100% NaN.
+    # Korjaus: spwr_lookup = pre-laskettu hakutaulu (compute_start_position_lookup).
+    # Kun annettu, mergataan suoraan (track, start_number, start_method) -avaimilla.
+    # Uudelleenkoulutuksessa spwr_lookup=None → start_position_features() laskee
+    # oikein koko historiadatasta.
     _sp_cols = ["start_position_win_rate", "start_position_win_rate_n"]
-    _races_for_spwr = all_races if all_races is not None else races
-    _hist_for_spwr = horse_starts if all_races is not None else None
-    sp_feat = start_position_features(df, _races_for_spwr, historical_runners_df=_hist_for_spwr)
-    # race_id-tyypit yhtenäistettävä ennen mergeä
-    _df_race_id_orig = df["race_id"].dtype
-    sp_feat["race_id"] = sp_feat["race_id"].astype(df["race_id"].dtype)
-    df = df.merge(sp_feat, on=["race_id", "start_number"], how="left")
+    if spwr_lookup is not None and len(spwr_lookup) > 0:
+        # Live-ennustus: käytä pre-laskettua hakutaulua
+        _merge_keys = ["track", "start_number"]
+        if "start_method" in spwr_lookup.columns and "start_method" in df.columns:
+            _merge_keys.append("start_method")
+        _spwr_cols = _merge_keys + [c for c in _sp_cols if c in spwr_lookup.columns]
+        # Tarkista että df:ssä on track-sarake (lisätty race_setup_features:ssa)
+        if "track" not in df.columns and "race_id" in df.columns:
+            _tm = races[["race_id", "track"]].drop_duplicates("race_id")
+            _tm["race_id"] = _tm["race_id"].astype(df["race_id"].dtype)
+            df = df.merge(_tm, on="race_id", how="left")
+        df = df.merge(spwr_lookup[_spwr_cols], on=_merge_keys, how="left")
+    else:
+        _races_for_spwr = all_races if all_races is not None else races
+        _hist_for_spwr = horse_starts if all_races is not None else None
+        sp_feat = start_position_features(df, _races_for_spwr, historical_runners_df=_hist_for_spwr)
+        # race_id-tyypit yhtenäistettävä ennen mergeä
+        _df_race_id_orig = df["race_id"].dtype
+        sp_feat["race_id"] = sp_feat["race_id"].astype(df["race_id"].dtype)
+        df = df.merge(sp_feat, on=["race_id", "start_number"], how="left")
 
     # C3: lähtötapa-preferenssi (auto vs. volte win_rate per hevonen)
     _sm_cols = ["start_method_win_rate_diff"]

@@ -1,7 +1,7 @@
 """Tarkista tämän päivän ennusteet — tasaisuusdiagnostiikka per lähtö."""
 import sys
 sys.path.insert(0, "/home/ravi/app-ravi")
-import sqlite3, json
+import sqlite3, json, glob, os
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
@@ -10,8 +10,9 @@ from src.features.build_features import build_feature_matrix, fill_finish_positi
 from src.models.ranker import predict_win_probabilities
 
 TARGET_DATE = "2026-06-01"
+DATA_DIR    = "/home/ravi/app-ravi/data"
 
-con = sqlite3.connect("/home/ravi/app-ravi/data/ravit.db")
+con = sqlite3.connect(f"{DATA_DIR}/ravit.db")
 runners = pd.read_sql(
     "SELECT r.*, ra.race_date, ra.distance, ra.start_method AS race_start_method,"
     " h.birth_year FROM runners r"
@@ -20,11 +21,8 @@ runners = pd.read_sql(
     f" WHERE ra.race_date = '{TARGET_DATE}'",
     con,
 )
-races      = pd.read_sql(f"SELECT * FROM races WHERE race_date='{TARGET_DATE}'", con)
-# Bugikorjaus 1.6.2026: all_races tarvitaan start_position_win_rate:lle live-ennustuksessa.
-# Ilman tätä point-in-time-pool on tyhjä (vain tämän päivän lähdöt) → 100% NaN.
-races_all  = pd.read_sql("SELECT * FROM races", con)
-hs         = pd.read_sql(
+races  = pd.read_sql(f"SELECT * FROM races WHERE race_date='{TARGET_DATE}'", con)
+hs     = pd.read_sql(
     "SELECT * FROM horse_starts"
     " WHERE (withdrawn IS NULL OR withdrawn != 1)"
     "   AND (finish_position IS NULL OR finish_position != 99)"
@@ -41,16 +39,29 @@ elif "race_start_method" in runners.columns:
     runners["start_method"] = runners["start_method"].fillna(runners["race_start_method"])
     runners = runners.drop(columns=["race_start_method"])
 
-print(f"Runners: {len(runners)}, Races: {len(races)}, all_races: {len(races_all)}", flush=True)
+# Lataa uusin spwr_lookup (tallennettu retrain_model.py:ssä 1.6.2026 -korjauksella)
+spwr_files = sorted(glob.glob(f"{DATA_DIR}/model_baseline_*_spwr_lookup.csv"))
+spwr_lookup = pd.read_csv(spwr_files[-1]) if spwr_files else None
+if spwr_lookup is not None:
+    print(f"SPWR-hakutaulu: {os.path.basename(spwr_files[-1])} ({len(spwr_lookup)} riviä)", flush=True)
+else:
+    print("VAROITUS: spwr_lookup ei löydy — start_position_win_rate voi olla NaN", flush=True)
+
+print(f"Runners: {len(runners)}, Races: {len(races)}", flush=True)
 
 features = build_feature_matrix(runners, races, horse_starts=hs, horses=horses, tracks=tracks,
-                                 all_races=races_all)
+                                 spwr_lookup=spwr_lookup)
 features["race_date"] = pd.to_datetime(features["race_date"])
 print(f"Features rakennettu: {len(features)} riviä", flush=True)
 
-meta  = json.load(open("/home/ravi/app-ravi/data/model_baseline_20260526_meta.json"))
+# Tarkista start_position_win_rate NaN-%
+if "start_position_win_rate" in features.columns:
+    spwr_nan = features["start_position_win_rate"].isna().mean() * 100
+    print(f"start_position_win_rate NaN: {spwr_nan:.0f}%", flush=True)
+
+meta  = json.load(open(f"{DATA_DIR}/model_baseline_20260526_meta.json"))
 T     = meta["temperature"]
-model = lgb.Booster(model_file="/home/ravi/app-ravi/data/model_baseline_20260526.lgb")
+model = lgb.Booster(model_file=f"{DATA_DIR}/model_baseline_20260526.lgb")
 
 preds = predict_win_probabilities(model, features, temperature=T)
 name_map = features[["race_id", "horse_id", "horse_name"]].drop_duplicates() \

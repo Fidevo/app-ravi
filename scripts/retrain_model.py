@@ -7,6 +7,7 @@ import pandas as pd
 from src.features.build_features import build_feature_matrix, fill_finish_positions
 import json
 from src.models.ranker import train_ranker, predict_win_probabilities, compute_nll, calibrate_temperature, FEATURE_COLS
+from src.features.build_features import compute_start_position_lookup
 
 def mem_mb():
     with open("/proc/self/status") as f:
@@ -66,6 +67,14 @@ print(f"[4] Malli koulutettu, RAM={mem_mb()} MB", flush=True)
 out = "/home/ravi/app-ravi/data/model_baseline_20260526.lgb"
 model.save_model(out)
 print(f"Malli tallennettu: {out}")
+
+# Tallenna start_position_win_rate hakutaulu live-ennustusta varten (1.6.2026)
+# Laskee (track, start_number, start_method) → win_rate koko historiadatasta.
+# check_todays_preds.py lataa tämän ja välittää spwr_lookup=... build_feature_matrix:ille.
+spwr_lookup = compute_start_position_lookup(features, races)
+spwr_path = out.replace(".lgb", "_spwr_lookup.csv")
+spwr_lookup.to_csv(spwr_path, index=False)
+print(f"SPWR-hakutaulu tallennettu: {spwr_path} ({len(spwr_lookup)} riviä)")
 
 # Evaluointi ilman kalibrointia (T=1.0)
 preds_raw = predict_win_probabilities(model, test_df)
