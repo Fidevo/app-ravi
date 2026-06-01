@@ -55,7 +55,7 @@ features = build_feature_matrix(
 print(f"[2] Features rakennettu, RAM={mem_mb()} MB | features={len(features)}", flush=True)
 features["race_date"] = pd.to_datetime(features["race_date"])
 
-split_date = "2026-04-01"
+split_date = "2026-06-01"
 train_df = features[features["race_date"] < split_date].copy()
 test_df  = features[features["race_date"] >= split_date].copy()
 print(f"Train: {len(train_df)} riviä | Test: {len(test_df)} riviä")
@@ -64,7 +64,7 @@ print(f"Piirteitä: {len(FEATURE_COLS)}")
 print(f"[3] Train split valmis, RAM={mem_mb()} MB", flush=True)
 model = train_ranker(train_df, random_state=42)
 print(f"[4] Malli koulutettu, RAM={mem_mb()} MB", flush=True)
-out = "/home/ravi/app-ravi/data/model_baseline_20260526.lgb"
+out = "/home/ravi/app-ravi/data/model_baseline_20260601.lgb"
 model.save_model(out)
 print(f"Malli tallennettu: {out}")
 
