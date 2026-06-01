@@ -59,9 +59,13 @@ if "start_position_win_rate" in features.columns:
     spwr_nan = features["start_position_win_rate"].isna().mean() * 100
     print(f"start_position_win_rate NaN: {spwr_nan:.0f}%", flush=True)
 
-meta  = json.load(open(f"{DATA_DIR}/model_baseline_20260526_meta.json"))
+# Auditoija 1.6.2026: kovakoodattu mallinimi korjattu → lataa aina uusin malli
+model_files = sorted(glob.glob(f"{DATA_DIR}/model_baseline_*.lgb"))
+latest_lgb  = model_files[-1]
+meta  = json.load(open(latest_lgb.replace(".lgb", "_meta.json")))
 T     = meta["temperature"]
-model = lgb.Booster(model_file=f"{DATA_DIR}/model_baseline_20260526.lgb")
+model = lgb.Booster(model_file=latest_lgb)
+print(f"Malli: {os.path.basename(latest_lgb)}  T={T:.4f}", flush=True)
 
 preds = predict_win_probabilities(model, features, temperature=T)
 name_map = features[["race_id", "horse_id", "horse_name"]].drop_duplicates() \
