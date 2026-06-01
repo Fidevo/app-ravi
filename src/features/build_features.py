@@ -1987,6 +1987,7 @@ def build_feature_matrix(
     horse_starts: pd.DataFrame | None = None,
     horses: pd.DataFrame | None = None,
     tracks: pd.DataFrame | None = None,
+    all_races: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Aja kaikki feature-funktiot ja palauta valmis matriisi mallille.
 
@@ -2011,6 +2012,12 @@ def build_feature_matrix(
 
     Valinnainen horse_age-piirre: lisää birth_year runners-DataFrameen
     JOIN:lla horses-tauluun ennen tätä kutsua.
+
+    Valinnainen all_races-parametri: koko races-taulu (kaikki historialliset lähdöt).
+    Tarvitaan live-ennustuksessa jotta start_position_win_rate voidaan laskea
+    oikein horse_starts-poolista — kun runners sisältää vain tämän päivän lähdöt,
+    point-in-time-pool on muuten tyhjä → 100% NaN.
+    Uudelleenkoulutuksessa tätä ei tarvita koska runners sisältää jo kaiken historian.
     """
     # A1-korjaus: pre-merge start_method ja distance races-taulusta runners:iin
     # ENNEN form_features()-kutsua. Ilman tätä seg_cols_avail=[] aina koska
@@ -2094,8 +2101,14 @@ def build_feature_matrix(
     df = rest_days_bucket_features(df)
 
     # C2: starttipaikan vinouma per rata
+    # Bugikorjaus 1.6.2026: live-ennustuksessa runners sisältää vain tämän päivän
+    # lähdöt — point-in-time-pool on tyhjä → 100% NaN. Korjaus: kun all_races on
+    # annettu, käytetään sitä track_map:ina (kattaa historialliset race_id:t) ja
+    # horse_starts:ia historiallisena poolin lähteenä.
     _sp_cols = ["start_position_win_rate", "start_position_win_rate_n"]
-    sp_feat = start_position_features(df, races)
+    _races_for_spwr = all_races if all_races is not None else races
+    _hist_for_spwr = horse_starts if all_races is not None else None
+    sp_feat = start_position_features(df, _races_for_spwr, historical_runners_df=_hist_for_spwr)
     # race_id-tyypit yhtenäistettävä ennen mergeä
     _df_race_id_orig = df["race_id"].dtype
     sp_feat["race_id"] = sp_feat["race_id"].astype(df["race_id"].dtype)

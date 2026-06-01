@@ -16,7 +16,8 @@ runners = pd.read_sql(
     " LEFT JOIN horses h ON r.horse_id = h.horse_id"
     " WHERE ra.race_date = ?", con, params=(TARGET_DATE,)
 )
-races  = pd.read_sql("SELECT * FROM races WHERE race_date=?", con, params=(TARGET_DATE,))
+races      = pd.read_sql("SELECT * FROM races WHERE race_date=?", con, params=(TARGET_DATE,))
+races_all  = pd.read_sql("SELECT * FROM races", con)
 hs     = pd.read_sql(
     "SELECT * FROM horse_starts"
     " WHERE (withdrawn IS NULL OR withdrawn != 1)"
@@ -33,7 +34,8 @@ elif "race_start_method" in runners.columns:
     runners["start_method"] = runners["start_method"].fillna(runners["race_start_method"])
     runners = runners.drop(columns=["race_start_method"])
 
-features = build_feature_matrix(runners, races, horse_starts=hs, horses=horses, tracks=tracks)
+features = build_feature_matrix(runners, races, horse_starts=hs, horses=horses, tracks=tracks,
+                                all_races=races_all)
 KEY_COLS = [c for c in FEATURE_COLS if c in features.columns]
 
 print(f"Lähtöjä: {features['race_id'].nunique()}, hevosia: {len(features)}, featuria: {len(KEY_COLS)}")
@@ -74,8 +76,8 @@ meta  = json.load(open("/home/ravi/app-ravi/data/model_baseline_20260526_meta.js
 T     = meta["temperature"]
 model = lgb.Booster(model_file="/home/ravi/app-ravi/data/model_baseline_20260526.lgb")
 from src.models.ranker import predict_win_probabilities
-preds_t1  = predict_win_probabilities(model, features, temperature=1.0)
-preds_cal = predict_win_probabilities(model, features, temperature=T)
+preds_t1  = predict_win_probabilities(model, features, temperature=1.0)   # noqa: E501
+preds_cal = predict_win_probabilities(model, features, temperature=T)    # noqa: E501
 race_stats_t1  = preds_t1.groupby("race_id")["win_prob"].std().reset_index(name="std_T1")
 race_stats_cal = preds_cal.groupby("race_id")["win_prob"].std().reset_index(name="std_cal")
 merged = race_stats_t1.merge(race_stats_cal, on="race_id")

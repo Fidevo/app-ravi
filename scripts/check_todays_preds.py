@@ -9,7 +9,7 @@ import lightgbm as lgb
 from src.features.build_features import build_feature_matrix, fill_finish_positions
 from src.models.ranker import predict_win_probabilities
 
-TARGET_DATE = "2026-05-25"
+TARGET_DATE = "2026-06-01"
 
 con = sqlite3.connect("/home/ravi/app-ravi/data/ravit.db")
 runners = pd.read_sql(
@@ -20,8 +20,11 @@ runners = pd.read_sql(
     f" WHERE ra.race_date = '{TARGET_DATE}'",
     con,
 )
-races  = pd.read_sql(f"SELECT * FROM races WHERE race_date='{TARGET_DATE}'", con)
-hs     = pd.read_sql(
+races      = pd.read_sql(f"SELECT * FROM races WHERE race_date='{TARGET_DATE}'", con)
+# Bugikorjaus 1.6.2026: all_races tarvitaan start_position_win_rate:lle live-ennustuksessa.
+# Ilman tätä point-in-time-pool on tyhjä (vain tämän päivän lähdöt) → 100% NaN.
+races_all  = pd.read_sql("SELECT * FROM races", con)
+hs         = pd.read_sql(
     "SELECT * FROM horse_starts"
     " WHERE (withdrawn IS NULL OR withdrawn != 1)"
     "   AND (finish_position IS NULL OR finish_position != 99)"
@@ -38,15 +41,16 @@ elif "race_start_method" in runners.columns:
     runners["start_method"] = runners["start_method"].fillna(runners["race_start_method"])
     runners = runners.drop(columns=["race_start_method"])
 
-print(f"Runners: {len(runners)}, Races: {len(races)}", flush=True)
+print(f"Runners: {len(runners)}, Races: {len(races)}, all_races: {len(races_all)}", flush=True)
 
-features = build_feature_matrix(runners, races, horse_starts=hs, horses=horses, tracks=tracks)
+features = build_feature_matrix(runners, races, horse_starts=hs, horses=horses, tracks=tracks,
+                                 all_races=races_all)
 features["race_date"] = pd.to_datetime(features["race_date"])
 print(f"Features rakennettu: {len(features)} riviä", flush=True)
 
-meta  = json.load(open("/home/ravi/app-ravi/data/model_baseline_20260524_meta.json"))
+meta  = json.load(open("/home/ravi/app-ravi/data/model_baseline_20260526_meta.json"))
 T     = meta["temperature"]
-model = lgb.Booster(model_file="/home/ravi/app-ravi/data/model_baseline_20260524.lgb")
+model = lgb.Booster(model_file="/home/ravi/app-ravi/data/model_baseline_20260526.lgb")
 
 preds = predict_win_probabilities(model, features, temperature=T)
 name_map = features[["race_id", "horse_id", "horse_name"]].drop_duplicates() \
