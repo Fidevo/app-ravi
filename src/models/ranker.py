@@ -59,14 +59,20 @@ FEATURE_COLS: list[str] = [
     # Perustelut: form_avg_km_time_5 laskee km-ajan kaikille matkoille, mutta
     # 1600 m ja 3200 m sprint/long-ajat eivät ole vertailukelpoisia.
     # Tämä matkakohtainen versio korvaa cross-distance-vertailun harhan.
-    # C6: luokkakohtaiset muotopiirteet — vain samantasoinen lähtö (2026-05-21)
-    # Luokat perustuvat race_max_earnings (yläraja, ei alaraja) — bugikorjaus 23.5.2026.
-    # low (0–50k SEK) / medium (50–150k) / high (150–500k) / elite (500k+ tai NULL)
-    # Korjaa tilastoharhan: hevonen joka voittaa halvassa lähdössä ≠ vahva suosikki
-    # kalliissa lähdössä. NaN = luokkadata ei saatavilla → LightGBM käsittelee.
-    "form_win_rate_5_same_class",
-    "form_avg_finish_5_same_class",
-    "form_avg_km_time_5_same_class",
+    # C6: luokkakohtaiset muotopiirteet — POISTETTU FEATURE_COLS:ista 1.6.2026
+    # (auditointi: train/serve-skew). race_max_earnings ei ole horse_starts-sarake
+    # (schema.py: ei mallissa eikä _COLUMN_MIGRATIONS["horse_starts"]:ssa), ja
+    # build_feature_matrix():n fallback-join (race_date,track,race_number) on rikki
+    # track-koodien epäsuhdan takia (races.track="Solvalla" vs horse_starts.track="S").
+    # → live-ennustuksessa kaikki historia fillna(inf)→"elite"-bucket → ~98 % NaN,
+    # vaikka treenissä (runners=koko historia) piirre on populoitu. Tämä on
+    # systemaattinen train/serve-skew joka litisti live-jakauman.
+    # Ei live-lähdettä Travsport-historian luokkaylärajalle → poistetaan kunnes
+    # luokkahistoria saadaan laskettua live-symmetrisesti (esim. lookup-taulu).
+    # form_features() laskee nämä yhä, mutta mallille niitä ei syötetä.
+    # "form_win_rate_5_same_class",
+    # "form_avg_finish_5_same_class",
+    # "form_avg_km_time_5_same_class",
     # --- ATG-aggregaatit hevosesta: koko ura (runners-taulusta suoraan) ---
     "atg_lifetime_win_rate",
     "atg_lifetime_top3_rate",
@@ -82,12 +88,21 @@ FEATURE_COLS: list[str] = [
     # "atg_trainer_win_pct",        # K1-pollutoitu
     # "atg_trainer_starts",         # K1-pollutoitu
     "atg_best_km_for_this_setup",   # paras km tämä matka+starttimuoto
-    # --- Meistä lasketut rolling-tilastot (kasvavat ajan myötä, parempia V4+) ---
-    "driver_win_rate_365d",
-    "driver_starts_365d",
-    "driver_top3_rate_365d",
-    "trainer_win_rate_365d",
-    "trainer_top3_rate_365d",
+    # --- Meistä lasketut rolling-tilastot ---
+    # 365d driver/trainer -piirteet POISTETTU FEATURE_COLS:ista 1.6.2026
+    # (auditointi: train/serve-skew). driver_trainer_features() laskee nämä
+    # PELKÄSTÄÄN runners-taulusta (ei horse_starts). Live-ennustuksessa
+    # runners = vain tämän päivän lähdöt → 365d rolling (closed="left") on tyhjä
+    # → 100 % NaN, vaikka treenissä (runners=koko historia) ne ovat populoituja.
+    # Sama ilmiö kuin C6:ssa. Serve-symmetriset 60d-versiot (alla) lasketaan
+    # horse_starts:sta ja toimivat livessä → ne korvaavat 365d-signaalin.
+    # Aktivoi uudelleen vasta jos 365d reititetään horse_starts-pohjaiseksi
+    # (driver_trainer_hs_features lookback_days=365) → live-symmetrinen.
+    # "driver_win_rate_365d",
+    # "driver_starts_365d",
+    # "driver_top3_rate_365d",
+    # "trainer_win_rate_365d",
+    # "trainer_top3_rate_365d",
     # --- horse_starts-pohjaiset 60d-tilastot (ei ATG K1-bugista) ---
     "driver_win_rate_60d",
     "driver_top3_rate_60d",
@@ -112,7 +127,10 @@ FEATURE_COLS: list[str] = [
     "shoes_changed_front",
     "shoes_changed_back",
     "sulky_changed",
-    "driver_quality_signal",     # driver_win_rate_365d kun kuski on vaihtunut (NaN muulloin)
+    # driver_quality_signal POISTETTU 1.6.2026 (auditointi: train/serve-skew).
+    # Johdettu driver_win_rate_365d:stä joka on nyt poistettu — se oli 100 % NaN
+    # livessä, joten myös tämä oli. Aktivoi 365d-reitityksen mukana.
+    # "driver_quality_signal",
     # --- Johdetut piirteet (build_features.derived_features) ---
     "barfota_law_active",
     "horse_age",   # Vaatii birth_year runners-DataFramessa — ohitetaan jos puuttuu
@@ -164,7 +182,13 @@ FEATURE_COLS: list[str] = [
     # Suunta on käänteinen — nouseva palkintokehitys tarkoittaa lähtöihin NOUSUA
     # (kovempi kilpailu), ei helpotusta. Piirteen kausaalisuus on väärä.
     # prev_prize_won (SHAP=0.060) kattaa luokkatason paremmin absoluuttisena arvona.
-    "track_condition_win_rate", # voitto-% samassa normalisoidussa rataolossa (C5)
+    # track_condition_win_rate POISTETTU 1.6.2026 (auditointi: train/serve-skew).
+    # Vaatii lähdön track_conditionin races-taulusta ENNUSTUSHETKELLÄ, mutta
+    # tulevien lähtöjen track_condition on NULL (ei tiedossa / ei skreipattu)
+    # → _current_cond=None → suodatin pudottaa kaiken → ~97 % NaN livessä.
+    # Treenissä menneiden lähtöjen olosuhde on tiedossa → populoitu → skew.
+    # Aktivoi uudelleen jos lähdön olosuhde saadaan luotettavasti pre-race.
+    # "track_condition_win_rate", # voitto-% samassa normalisoidussa rataolossa (C5)
     # --- Muutospiirteet (build_features.change_features) ---
     "driver_changed",           # 1 jos eri kuski kuin edellisessä startissa (signaali)
     "distance_change_m",        # matkamuutos metreinä (pos=pidempi, neg=lyhyempi)

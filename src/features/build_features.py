@@ -2102,10 +2102,18 @@ def build_feature_matrix(
         )
 
     # C6: rikasta horse_starts race_max_earnings:lla luokkabucketointia varten.
-    # Bugikorjaus 23.5.2026: muutettu race_min_earnings → race_max_earnings.
-    # Ensisijainen: race_max_earnings on tallennettu suoraan horse_starts-tauluun
-    # scheduler._migrate_schema()-backfillillä.
-    # Fallback: jos sarake puuttuu (vanha DB tai testi), joinataan races-tauluun.
+    # HUOM (auditointi 1.6.2026): race_max_earnings EI ole horse_starts-sarake —
+    # se ei ole HorseStart-mallissa eikä _COLUMN_MIGRATIONS["horse_starts"]:ssa
+    # (vain races-taulussa). Aiempi kommentti väitti virheellisesti että se on
+    # backfillattu suoraan horse_starts:iin — sellaista backfilliä ei ole.
+    # Siksi alla oleva ehto on käytännössä AINA tosi ja fallback-join ajetaan.
+    # Fallback-join on lisäksi rikki: se joinaa raa'alla track-arvolla, mutta
+    # races.track = täysi nimi ("Solvalla") ja horse_starts.track = koodi ("S")
+    # → ei matchaa → race_max_earnings jää NaN → kaikki historia → "elite".
+    # → form_*_same_class on poistettu FEATURE_COLS:ista (ranker.py) kunnes tämä
+    #   saadaan laskettua live-symmetrisesti. Jätetään laskenta tähän toistaiseksi
+    #   ettei käytös muutu hiljaa; korjaa normalisoimalla track TRACKCODE_TO_NAME:lla
+    #   ja käyttämällä all_races:a (ei today-only races:a) jos C6 aktivoidaan.
     # Joineamattomille (norjalaiset radat, data ennen DB:n alkua) jää NaN → LightGBM käsittelee.
     # horse_starts on jo kopioitu yllä jos start_method-normalisointi ajettiin;
     # muussa tapauksessa kopioidaan tässä ennen muutosta.
