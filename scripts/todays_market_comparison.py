@@ -109,8 +109,10 @@ if len(value_bets) > 0:
     for _, row in value_bets.head(10).iterrows():
         ri = races[races["race_id"] == row["race_id"]].iloc[0]
         name = str(row.get("horse_name") or row["horse_id"])[:24]
-        print(f"  {ri['track']:<12} L{ri['race_number']:>2} #{int(row['start_number']):<2} {name:<24}"
+        fp   = row.get("finish_position")
+        result = f"  ✓VOITTI" if pd.notna(fp) and fp == 1 else (f"  pos={int(fp)}" if pd.notna(fp) else "")
+        print(f"  {ri['track']:<12} L{ri['race_number']:>2} {name:<24}"
               f"  malli={row['win_prob']:>5.1%}  kerroin={row['win_odds_final']:.1f}"
-              f"  edge={row['edge']:+.1%}")
+              f"  edge={row['edge']:+.1%}{result}")
 else:
     print("Ei markkinakertoimi saatavilla tai ei selviä value-bettejä.")
