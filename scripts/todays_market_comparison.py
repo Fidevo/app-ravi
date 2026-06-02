@@ -54,9 +54,12 @@ print(f"Malli: {latest_lgb.split('/')[-1]}  T={T:.4f}\n")
 preds = predict_win_probabilities(model, features, temperature=T)
 
 # Yhdistä nimien, kertoimien ja ennusteiden kanssa
-name_odds = runners[["race_id", "horse_id", "horse_name", "win_odds_final",
-                       "start_number", "finish_position"]].copy()
+# Ota start_number features-DataFramesta (vältetään merge-konflikti)
+feat_cols = ["race_id", "horse_id", "start_number", "finish_position"]
+feat_extra = features[[c for c in feat_cols if c in features.columns]].copy()
+name_odds = runners[["race_id", "horse_id", "horse_name", "win_odds_final"]].copy()
 preds = preds.merge(name_odds, on=["race_id", "horse_id"], how="left")
+preds = preds.merge(feat_extra, on=["race_id", "horse_id"], how="left")
 
 # Implied probability markkinalta
 preds["market_prob"] = 1.0 / preds["win_odds_final"].replace(0, np.nan)
@@ -87,13 +90,15 @@ for race_id in race_ids:
         fp   = row.get("finish_position")
         result = f"  ✓{int(fp)}" if pd.notna(fp) and fp == 1 else (f"  pos={int(fp)}" if pd.notna(fp) else "")
 
+        sn = row.get("start_number")
+        sn_str = f"#{int(sn):<2}" if pd.notna(sn) else "#? "
         if pd.notna(mp) and mp > 0:
             edge  = wp - mp
             odds  = row["win_odds_final"]
             edge_str = f"  edge={edge:+.1%}" if abs(edge) > 0.01 else ""
-            print(f"  #{int(row['start_number']):<2} {name:<24} malli={wp:>6.1%}  markkina={mp:>5.1%} ({odds:.1f}){edge_str}{result}")
+            print(f"  {sn_str} {name:<24} malli={wp:>6.1%}  markkina={mp:>5.1%} ({odds:.1f}){edge_str}{result}")
         else:
-            print(f"  #{int(row['start_number']):<2} {name:<24} malli={wp:>6.1%}{result}")
+            print(f"  {sn_str} {name:<24} malli={wp:>6.1%}{result}")
     print()
 
 # Parhaat valuebetit (edge > 5%)
