@@ -114,7 +114,14 @@ def _client() -> httpx.Client:
 
 
 def find_result_pdfs(client: httpx.Client) -> list[str]:
-    """Hae tulossivulta vain per-erä-tulos-PDF:t (Resultat_*), ei pressreleaseja."""
+    """Hae tulossivulta kaikki per-erä-mahdolliset PDF:t.
+
+    Laajenne 2.6.2026: 2010–2016 tiedostot nimetty ilman 'resultat'-sanaa
+    (esim. Krit_12total.pdf, BC_auktion12.pdf). Haetaan KAIKKI PDF:t kansiosta
+    /images/pdf/auktionsresultat/ — parserin PRECISION-suoja (aito erärivi vaatii
+    hinnan tai status-sanan) suodattaa pressrelease-proosan pois automaattisesti.
+    Tuoreemmat /images/aktuellt/ -tiedostot filtteröidään 'resultat'-sanalla kuten ennen.
+    """
     r = client.get(RESULTS_PAGE)
     r.raise_for_status()
     hrefs = re.findall(r'href="([^"]+\.pdf[^"]*)"', r.text, re.I)
@@ -122,8 +129,12 @@ def find_result_pdfs(client: httpx.Client) -> list[str]:
     seen: set[str] = set()
     for h in hrefs:
         name = h.rsplit("/", 1)[-1].lower()
-        # Vain tulostiedostot. Pressrelease_* sisältää vain yhteenvetolukuja.
-        if "resultat" not in name:
+        path = h.lower()
+        # Historialliset arkistokansiot: ota kaikki (ei filtteröintiä)
+        if "/images/pdf/auktionsresultat/" in path:
+            pass  # kaikki mukaan
+        # Tuoreet /aktuellt/- ja juuri-tiedostot: vain "resultat"-nimisiä
+        elif "resultat" not in name:
             continue
         url = h if h.startswith("http") else BASE + h
         if url not in seen:
@@ -171,10 +182,20 @@ def parse_pdf(path: Path) -> list[dict]:
             continue
         nr, name, sex, rest = m.groups()
 
-        # Valinnainen Regnr rest:in alussa (uudempi layout) → syntymävuosi.
         regnr, birth_year, by_source = None, None, None
+
+        # Layout "Namn Regnr Kön ..." → regnr jää nimen perään (esim. bc/krit_10).
+        # Bugikorjaus 1.6.2026: tämä esti joinin DB:hen ("Bubba Sting 09-4286").
+        # Irrota se nimestä ja käytä syntymävuoteen.
+        nm = re.search(r"\s(\d{2})-(\d{3,5})\s*$", name)
+        if nm:
+            regnr = f"{nm.group(1)}-{nm.group(2)}"
+            birth_year, by_source = 2000 + int(nm.group(1)), "regnr"
+            name = name[: nm.start()].strip()
+
+        # Layout "Namn Kön Regnr ..." → regnr rest:in alussa (esim. elit 2026).
         rm = _REGNR_RE.match(rest)
-        if rm:
+        if rm and regnr is None:
             yy, serial = rm.groups()
             regnr = f"{yy}-{serial}"
             birth_year, by_source = 2000 + int(yy), "regnr"
