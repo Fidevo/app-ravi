@@ -55,7 +55,7 @@ features = build_feature_matrix(
 print(f"[2] Features rakennettu, RAM={mem_mb()} MB | features={len(features)}", flush=True)
 features["race_date"] = pd.to_datetime(features["race_date"])
 
-split_date = "2026-06-01"
+split_date = "2026-05-01"
 train_df = features[features["race_date"] < split_date].copy()
 test_df  = features[features["race_date"] >= split_date].copy()
 print(f"Train: {len(train_df)} riviä | Test: {len(test_df)} riviä")
