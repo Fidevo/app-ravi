@@ -103,6 +103,13 @@ FEATURE_COLS: list[str] = [
     # "driver_top3_rate_365d",
     # "trainer_win_rate_365d",
     # "trainer_top3_rate_365d",
+    # 365d-signaali reititetty horse_starts-pohjaiseksi 4.7.2026 (auditointi):
+    # driver_trainer_hs_features(lookback_days=365) → live-symmetrinen, koska
+    # horse_starts on saatavilla myös ennustushetkellä (toisin kuin runners-historia).
+    "driver_win_rate_365d_hs",
+    "driver_top3_rate_365d_hs",
+    "trainer_win_rate_365d_hs",
+    "trainer_top3_rate_365d_hs",
     # --- horse_starts-pohjaiset 60d-tilastot (ei ATG K1-bugista) ---
     "driver_win_rate_60d",
     "driver_top3_rate_60d",
@@ -542,6 +549,96 @@ def predict_win_probabilities(
         .transform(lambda s: np.exp(s - s.max()) / np.exp(s - s.max()).sum())
     )
     return out
+
+
+def blend_with_market(
+    predictions: pd.DataFrame,
+    odds_col: str = "win_odds",
+    alpha: float = 0.16,
+) -> pd.DataFrame:
+    """Blendaa mallin todennäköisyydet markkinan implied-todennäköisyyksiin.
+
+    Tarkoitus: REALISTISET prosenttiarviot, EI itsenäinen edge-signaali.
+    Toukokuun 2026 ratkaiseva testi (eval_market_vs_model.py) osoitti että
+    markkina on yksinään terävämpi kuin malli (Brier 0.0730 vs 0.0796) ja
+    optimaalinen blendi painottaa mallia vain α≈0.16. Jos siis halutaan
+    paras mahdollinen arvio lähdön todellisista voittotodennäköisyyksistä,
+    markkinaa EI saa jättää pois — pelkkä piirrepohjainen malli tuottaa
+    systemaattisesti liian tasaisen jakauman (suosikin aliarvio).
+
+    HUOM Copycat-rajaus: markkinasignaali blendataan ULOSTULOON, ei syötetä
+    piirteenä malliin. Näin mallin itsenäinen signaali (win_prob) säilyy
+    puhtaana edge-analyysiin, ja blendattu win_prob_blend on kalibroitu
+    "paras arvio" -tuloste.
+
+    Blendi tehdään log-odds-tilassa ja normalisoidaan softmaxilla per lähtö:
+        logit_i = α·logit(P_malli,i) + (1−α)·logit(P_markkina,i)
+        P_blend = softmax(logit) per race_id
+
+    Args:
+        predictions: DataFrame jossa race_id, win_prob ja odds_col.
+            Rivit joilla kerroin puuttuu tai on ≤ 1.0 käyttävät pelkkää
+            mallin ennustetta (logit-komponentti = mallin logit).
+        odds_col: desimaalimuotoisen voittokertoimen sarake.
+        alpha: mallin paino (0..1). Sovita validointidatalta
+            (esim. scipy minimize_scalar NLL:ää vasten) ja tallenna
+            mallin meta-tiedostoon avaimella "blend_alpha".
+
+    Returns:
+        Kopio DataFramesta + sarakkeet market_prob (devigattu markkina,
+        NaN jos ei kerrointa) ja win_prob_blend (summautuu 1.0:aan per lähtö).
+    """
+    eps = 1e-9
+    out = predictions.copy()
+
+    odds = pd.to_numeric(out[odds_col], errors="coerce")
+    odds = odds.where(odds > 1.0)  # 0/negat./≤1.0-kertoimet → NaN → fallback malliin
+    raw_market = 1.0 / odds
+    # Devig: normalisoi markkinan implied-todennäköisyydet summaan 1 per lähtö
+    # (vain riveillä joilla kerroin on; NaN ei osallistu summaan).
+    market_sum = raw_market.groupby(out["race_id"]).transform("sum")
+    out["market_prob"] = raw_market / market_sum
+
+    def _logit(p: pd.Series) -> pd.Series:
+        p = p.clip(eps, 1 - eps)
+        return np.log(p / (1 - p))
+
+    model_logit = _logit(out["win_prob"])
+    market_logit = _logit(out["market_prob"])
+    # Jos markkinakerroin puuttuu, käytä mallin logitia myös markkinakomponenttina
+    market_logit = market_logit.fillna(model_logit)
+
+    out["_blend_logit"] = alpha * model_logit + (1 - alpha) * market_logit
+    out["win_prob_blend"] = out.groupby("race_id")["_blend_logit"].transform(
+        lambda s: np.exp(s - s.max()) / np.exp(s - s.max()).sum()
+    )
+    return out.drop(columns=["_blend_logit"])
+
+
+def fit_blend_alpha(predictions: pd.DataFrame, odds_col: str = "win_odds") -> float:
+    """Sovita blend_with_market():n α validointidatalta minimoimalla NLL.
+
+    Tarvittavat sarakkeet: race_id, win_prob, finish_position ja odds_col.
+    Käytä OUT-OF-SAMPLE-dataa (eri ikkuna kuin mallin treeni) — muuten α
+    yliarvioi mallin painon samalla tavalla kuin in-sample-temperature.
+
+    Returns:
+        float: optimaalinen α (0..1). Tallenna meta-tiedostoon "blend_alpha".
+    """
+    from scipy.optimize import minimize_scalar
+
+    df = predictions.dropna(subset=["finish_position", "win_prob"]).copy()
+    actual_win = (df["finish_position"] == 1).astype(float).values
+
+    def nll(alpha: float) -> float:
+        blended = blend_with_market(df, odds_col=odds_col, alpha=alpha)
+        probs = blended["win_prob_blend"].clip(1e-9).values
+        return -float(np.sum(actual_win * np.log(probs)))
+
+    result = minimize_scalar(nll, bounds=(0.0, 1.0), method="bounded")
+    alpha_opt = float(result.x)
+    logger.info("fit_blend_alpha: α=%.4f (NLL=%.4f)", alpha_opt, result.fun)
+    return alpha_opt
 
 
 def detect_value_bets(

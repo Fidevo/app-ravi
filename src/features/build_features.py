@@ -2148,6 +2148,27 @@ def build_feature_matrix(
         for col in _hs_cols:
             df[col] = np.nan
 
+    # horse_starts-pohjainen 365d driver/trainer-tilasto (train/serve-symmetrinen
+    # korvaaja 1.6.2026 poistetuille runners-pohjaisille *_365d-piirteille, jotka
+    # olivat 100 % NaN livessä). Nimetään *_365d_hs jotta ei törmätä
+    # driver_trainer_features():n yhä laskemiin runners-pohjaisiin *_365d-sarakkeisiin.
+    # min_starts=10: vuoden ikkunassa vaaditaan isompi otos kuin 60d:n 3,
+    # muuten harvat kuskit saavat kohinaisen ratensa.
+    _hs365_map = {
+        "driver_win_rate_365d": "driver_win_rate_365d_hs",
+        "driver_top3_rate_365d": "driver_top3_rate_365d_hs",
+        "trainer_win_rate_365d": "trainer_win_rate_365d_hs",
+        "trainer_top3_rate_365d": "trainer_top3_rate_365d_hs",
+    }
+    if horse_starts is not None and len(horse_starts) > 0:
+        hs365_feat = driver_trainer_hs_features(
+            df, horse_starts, lookback_days=365, min_starts=10
+        ).rename(columns=_hs365_map)
+        df = df.merge(hs365_feat, on=["race_id", "horse_id"], how="left")
+    else:
+        for col in _hs365_map.values():
+            df[col] = np.nan
+
     df = race_setup_features(df, races, horse_starts=horse_starts)  # B1: track-historia
 
     # D: ratarakenne — track-sarake on saatavilla race_setup_features():n jälkeen

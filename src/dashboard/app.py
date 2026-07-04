@@ -25,7 +25,12 @@ import pandas as pd
 import streamlit as st
 
 from src.features.build_features import build_feature_matrix, fill_finish_positions
-from src.models.ranker import predict_win_probabilities, FEATURE_COLS, CATEGORICAL_COLS
+from src.models.ranker import (
+    CATEGORICAL_COLS,
+    FEATURE_COLS,
+    blend_with_market,
+    predict_win_probabilities,
+)
 from src.paths import DB_PATH
 
 _MODEL_GLOB = "data/model_*.lgb"
@@ -60,34 +65,39 @@ st.set_page_config(page_title="Ravit Edge", layout="wide", page_icon="🏇")
 # ---------------------------------------------------------------------------
 
 @st.cache_data
-def _load_model_cached(model_path: str, _mtime: float) -> tuple[lgb.Booster, float]:
+def _load_model_cached(
+    model_path: str, _mtime: float
+) -> tuple[lgb.Booster, float, float]:
     """Välimuistitettu malli — invalidoituu automaattisesti kun tiedosto muuttuu.
 
-    Palauttaa (model, temperature) -tuplen. Lukee temperature pipeline-ajon
-    tallentamasta _meta.json-tiedostosta. Jos metaa ei löydy, T=1.0 (ei skaalausta).
+    Palauttaa (model, temperature, blend_alpha) -tuplen. Lukee temperature ja
+    blend_alpha pipeline-ajon tallentamasta _meta.json-tiedostosta. Jos metaa
+    ei löydy, T=1.0 (ei skaalausta) ja α=0.16 (toukokuun 2026 blenditesti).
     """
     booster = lgb.Booster(model_file=model_path)
     meta_path = model_path.replace(".lgb", "_meta.json")
     temperature = 1.0
+    blend_alpha = 0.16
     try:
         with open(meta_path) as _f:
             meta = json.load(_f)
             temperature = float(meta.get("temperature", 1.0))
+            blend_alpha = float(meta.get("blend_alpha", blend_alpha))
     except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass  # Vanha malli ilman meta-tiedostoa — käytä T=1.0
-    return booster, temperature
+        pass  # Vanha malli ilman meta-tiedostoa — käytä oletuksia
+    return booster, temperature, blend_alpha
 
 
-def load_model() -> tuple[lgb.Booster, float] | tuple[None, float]:
+def load_model() -> tuple[lgb.Booster, float, float] | tuple[None, float, float]:
     """Lataa uusin malli data/-hakemistosta. Käyttää mtime-pohjaista välimuistia:
     jos model-tiedosto päivitetään (uusi treeni), uusi malli ladataan automaattisesti
     ilman palvelimen uudelleenkäynnistystä.
 
-    Palauttaa (model, temperature) -tuplen. temperature=1.0 jos ei meta-tiedostoa.
+    Palauttaa (model, temperature, blend_alpha) -tuplen.
     """
     models = sorted(Path(".").glob(_MODEL_GLOB))
     if not models:
-        return None, 1.0
+        return None, 1.0, 0.16
     path = str(models[-1])
     mtime = models[-1].stat().st_mtime
     return _load_model_cached(path, mtime)
@@ -114,8 +124,14 @@ def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
         races = pd.read_sql(
             "SELECT * FROM races WHERE race_date = ?", con, params=(str(target_date),)
         )
+        # KNOWN_ISSUES #16: NULL-safe suodatus — `withdrawn != 1` pudottaisi
+        # myös NULL-rivit (SQLite: NULL != 1 → NULL → ei-tosi). Sama suodatus
+        # ja 2024-rajaus kuin treenipipelinessä → serve-symmetria.
         horse_starts = pd.read_sql(
-            "SELECT * FROM horse_starts WHERE withdrawn != 1", con
+            "SELECT * FROM horse_starts"
+            " WHERE (withdrawn IS NULL OR withdrawn != 1)"
+            "   AND (finish_position IS NULL OR finish_position != 99)"
+            "   AND (race_date IS NULL OR race_date >= '2024-01-01')", con
         )
         horses = pd.read_sql("SELECT * FROM horses", con)
         tracks = pd.read_sql("SELECT * FROM tracks", con)
@@ -124,18 +140,26 @@ def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
         st.error(f"DB-virhe: {e}")
         return None
 
+    # spwr_lookup: start_position_win_rate ei ole laskettavissa pelkästä
+    # päivän datasta (point-in-time-pool tyhjä) → ilman hakutaulua piirre
+    # olisi 100 % NaN livessä (train/serve-skew, sama korjaus kuin
+    # check_todays_preds.py:ssä 1.6.2026).
+    spwr_files = sorted(Path("data").glob("model_baseline_*_spwr_lookup.csv"))
+    spwr_lookup = pd.read_csv(spwr_files[-1]) if spwr_files else None
+
     try:
         # HUOM: fill_finish_positions() on VAIN koulutusaineistolle — älä kutsu
         # sitä ennusteputkessa. Ennustetaan päivän lähtöjä joilla finish_position=NULL.
         features = build_feature_matrix(
             runners, races,
             horse_starts=horse_starts, horses=horses, tracks=tracks,
+            spwr_lookup=spwr_lookup,
         )
     except Exception as e:
         st.error(f"Feature-virhe: {e}")
         return None
 
-    model, temperature = load_model()
+    model, temperature, blend_alpha = load_model()
     if model is None:
         st.warning("Mallia ei löydy data/-hakemistosta.")
         return None
@@ -148,11 +172,19 @@ def load_predictions(target_date: date, db_path: str) -> pd.DataFrame | None:
 
     try:
         preds = predict_win_probabilities(model, features, temperature=temperature)
-        return features.merge(
+        out = features.merge(
             preds[["race_id", "horse_id", "win_prob"]],
             on=["race_id", "horse_id"],
             how="left",
         )
+        # Realistiset prosentit: blendaa markkinaprioriin (win_prob_blend).
+        # win_prob säilyy mallin itsenäisenä signaalina edge-laskentaan.
+        if "market_implied_prob" in out.columns:
+            _mip = pd.to_numeric(out["market_implied_prob"], errors="coerce")
+            out["_blend_odds"] = 1.0 / _mip.where(_mip > 0)
+            out = blend_with_market(out, odds_col="_blend_odds", alpha=blend_alpha)
+            out = out.drop(columns=["_blend_odds"])
+        return out
     except Exception as e:
         st.error(f"Ennustevirhe: {e}")
         return None
@@ -435,7 +467,7 @@ def main() -> None:
     else:
         tracks_sorted = ["(tuntematon)"]
 
-    model, _temperature = load_model()
+    model, _temperature, _blend_alpha = load_model()
 
     for track_name in tracks_sorted:
         if track_col:
@@ -507,6 +539,7 @@ def main() -> None:
                 if has_atg:
                     show_cols.append("atg_link")
                 show_cols.append("win_prob")
+                show_cols.append("win_prob_blend")
                 if live_odds_col:
                     show_cols.append(live_odds_col)
                 if odds_col:
@@ -518,10 +551,11 @@ def main() -> None:
                 disp = disp.sort_values("start_number", na_position="last")
 
                 # Formatointi
-                if "win_prob" in disp.columns:
-                    disp["win_prob"] = disp["win_prob"].map(
-                        lambda x: f"{x*100:.1f} %" if pd.notna(x) else "—"
-                    )
+                for _pcol in ("win_prob", "win_prob_blend"):
+                    if _pcol in disp.columns:
+                        disp[_pcol] = disp[_pcol].map(
+                            lambda x: f"{x*100:.1f} %" if pd.notna(x) else "—"
+                        )
                 if "edge_pct" in disp.columns:
                     disp["edge_pct"] = disp["edge_pct"].map(
                         lambda x: (
@@ -538,7 +572,8 @@ def main() -> None:
                     "start_number": "#",
                     "horse_id": "Hevonen",
                     "horse_name": "Hevonen",
-                    "win_prob": "P(win)",
+                    "win_prob": "P(win) malli",
+                    "win_prob_blend": "P(win) paras arvio",
                     "live_odds": "Live-kerroin",
                     "edge_pct": "Edge",
                     "data_quality": "Data",

@@ -7,7 +7,7 @@ import numpy as np
 import lightgbm as lgb
 
 from src.features.build_features import build_feature_matrix, fill_finish_positions
-from src.models.ranker import predict_win_probabilities
+from src.models.ranker import blend_with_market, predict_win_probabilities
 
 TARGET_DATE = "2026-06-01"
 DATA_DIR    = "/home/ravi/app-ravi/data"
@@ -73,6 +73,17 @@ name_map = features[["race_id", "horse_id", "horse_name"]].drop_duplicates() \
 if name_map is not None:
     preds = preds.merge(name_map, on=["race_id", "horse_id"], how="left")
 
+# Realistiset prosentit: blendaa markkinan kanssa (α metasta; toukokuun
+# ratkaiseva testi osoitti että markkina on terävämpi kuin malli yksin →
+# paras arvio lähdön todellisista todennäköisyyksistä vaatii markkinapriorin).
+# win_prob säilyy mallin itsenäisenä signaalina, win_prob_blend on "paras arvio".
+BLEND_ALPHA = meta.get("blend_alpha", 0.16)
+odds_map = runners[["race_id", "horse_id", "win_odds_final"]].rename(
+    columns={"win_odds_final": "win_odds"})
+preds = preds.merge(odds_map, on=["race_id", "horse_id"], how="left")
+preds = blend_with_market(preds, odds_col="win_odds", alpha=BLEND_ALPHA)
+print(f"Blend-α={BLEND_ALPHA:.3f} (kertoimet {preds['win_odds'].notna().mean():.0%} runnereista)", flush=True)
+
 # Näytä kaikki lähdöt
 race_ids = preds["race_id"].unique()
 print(f"\nLähtöjä yhteensä: {len(race_ids)}\n")
@@ -94,7 +105,9 @@ for race_id in race_ids:
           f"top1={top1:.1%}  std={std:.4f}  n={len(r)}{flag}")
     for _, row in r.iterrows():
         name = str(row.get("horse_name", row["horse_id"]))[:28]
-        print(f"         {name:<28} {row['win_prob']:>7.1%}  score={row['score']:>7.3f}")
+        blend = row.get("win_prob_blend")
+        blend_s = f"  paras arvio={blend:>6.1%}" if pd.notna(blend) else ""
+        print(f"         {name:<28} malli={row['win_prob']:>6.1%}{blend_s}  score={row['score']:>7.3f}")
 
 print(f"\nMedian std: {np.median(stds):.4f}")
 print(f"Tasaisia (std<0.04): {sum(s < 0.04 for s in stds)}/{len(stds)}")
