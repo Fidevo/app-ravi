@@ -1,6 +1,6 @@
 # Ravit Edge — Tunnetut ongelmat
 
-> Päivitetty 22.5.2026.
+> Päivitetty 4.7.2026.
 > Vain avoimet ongelmat — korjatut bugit löytyvät tiedoston lopusta.
 > Tämänhetkinen tila ja avoimet tehtävät: [`TASK_PROGRESS.md`](TASK_PROGRESS.md).
 
@@ -312,6 +312,21 @@ kaikki 3 ehtoa.
 
 ---
 
+## Seurattavat — Streamlit-muistivuoto (4.7.2026)
+
+### #20 · Streamlit-dashboard vuotaa muistia → OOM-riski retrain-ajoille
+
+**Havainto (4.7.2026):** 22.5. käynnistetty dashboard-prosessi oli paisunut
+2 GB:iin swapissa (`st.cache_data` kasautuu). Tämä täytti koko 2 GB swapin ja
+oli pääsyy 29.6. retrain-ajon OOM-tappoon (retrain-piikki ~3.3 GB + swap täynnä).
+
+**Mitigaatio (4.7.2026):** viikoittainen uudelleenkäynnistys
+(`/usr/local/bin/restart-ravit-dashboard.sh`, cron ma 05:00) + float32-downcast
+retrain-skriptissä (`retrain_20260704.py`). Oikea korjaus olisi `ttl`-parametri
+kaikkiin `st.cache_data`-dekoraattoreihin tai `max_entries`-raja.
+
+---
+
 ## Korjattu
 
 | # | Kuvaus | Korjattu |
@@ -331,3 +346,7 @@ kaikki 3 ehtoa.
 | **relevance-bugi** | `(6-pos).clip(lower=1)` antoi kaikille positioille 5+ saman relevanssin=1 → LambdaRank ei saanut gradienttia erottelemaan loppupään hevosia → tasaiset todennäköisyysjakaumat. Korjattu: `max_pos - finish_position + 1` (lineaarinen). Malli uudelleentreenaattu 22.5.2026 (Brier=0.0670, T=0.8845, std per lähtö=0.915). | 22.5.2026 |
 | **C6-luokkapiirteet** | `race_min_earnings` backfill epäonnistui silently koska `horse_starts.track` käyttää Travsport-koodeja ("År") mutta `races.track` ATG-nimiä ("Årjäng") → SQL JOIN ei osannut matchata → 0% kattavuus. Korjattu Python-backfillillä `TRACKCODE_TO_NAME`-mappingilla. Kattavuus 22.5.2026: ~72%. | 22.5.2026 |
 | **predict_win_probs categoricals** | `pandas_categorical` indeksipohjaisesta mappingista nimipohjainen mapping → vääriä kategoriakoodeiksi mapping korjattu defensiivisellä logiikalla. | 22.5.2026 |
+| **dashboard horse_starts NULL-suodatus** | `WHERE withdrawn != 1` pudotti NULL-rivit (sama kuin #16, mutta dashboard jäi silloin korjaamatta) → dashboardin form/driver-piirteet laskettiin vajaasta datasta. | 4.7.2026 |
+| **dashboard spwr_lookup puuttui** | `build_feature_matrix` kutsuttiin ilman `spwr_lookup`ia → `start_position_win_rate` 100 % NaN dashboardin live-ennusteissa (train/serve-skew; check_todays_preds korjattiin 1.6. mutta dashboard ei). | 4.7.2026 |
+| **in-sample-kalibrointi** | `calibrate_temperature` sovitettiin samaan test_df:ään josta Brier raportoitiin → optimistinen harha. Korjattu 3-jakoisella splitillä (train/cal/test) `retrain_20260704.py`:ssä; myös blend-α sovitetaan cal-ikkunaan. | 4.7.2026 |
+| **365d-signaalin palautus** | 1.6. poistetut runners-pohjaiset `*_365d`-piirteet (100 % NaN livessä) korvattu `driver_trainer_hs_features(lookback_days=365)` → `*_365d_hs`, serve-symmetrinen. | 4.7.2026 |
