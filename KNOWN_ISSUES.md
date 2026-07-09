@@ -267,6 +267,16 @@ Piirteet:
 **TODO:** Aktivoi ~2026-07-07 — toteuta point-in-time-laskenta, aja ablation,
 tarkista kaikki 4 ehtoa.
 
+**PORTTITARKISTUS 9.7.2026 (ei aktivointia):** ehdot 1–2 täyttyvät
+(8,6 vk dataa; dam_sire-kattavuus runners:ssa nyt **100 %**, oli ~24 % —
+toukokuun backfill + scheduler-korjaus). Ehdot 3–4 eivät: PIT-refaktorointi
+(#17) tekemättä ja ablaatiota ei uusittu. HUOM lisäksi: retrain-putken
+`horse_starts >= 2024-01-01` -suodatin + nykyinen globaali min-date-katkaisu
+tarkoittaisi että sire-piirteet olisivat treenissä ~100 % NaN mutta livessä
+populoituja → käänteinen train/serve-skew. PIT-refaktorointi on kova esiehto.
+Priorisointi: odota ensin Travronden-uusinta-A/B:n tulos (#14) — sama työmäärä,
+TR:llä parempi näyttö (V-NLL −11 % jo 2.4 % treenikattavuudella).
+
 ---
 
 ## Avoimet — Travronden D2 -piirteet (aktivoidaan ~2026-07)
@@ -309,6 +319,18 @@ Piirteet (kommentoitu pois `ranker.py` FEATURE_COLS + CATEGORICAL_COLS):
 
 **TODO:** Aktivoi ~2026-07-07 — aja A/B ilman tr_game_percent_v ensin, tarkista
 kaikki 3 ehtoa.
+
+**A/B AJETTU 9.7.2026 (portti EI ylittynyt → ei aktivointia):**
+- Ehto 1 ✅ (8,6 vk puhdasta dataa, 1410 lähtöä), ehto 2 ✅ (A/B ajettu ilman
+  tr_game_percent_v, split 2026-06-01, rs=42), ehto 3 ❌:
+  **Δ Brier V-lähdöissä +0.0017 < 0.005** (kaikki lähdöt +0.0005).
+- Positiivinen signaali on olemassa (V-NLL 828.9 → 740.0, −11 %) mutta
+  treenidatan tr-kattavuus on vain 2.4 % → malli ei voi oppia piirteitä
+  kunnolla. Testidatan kattavuus jo 36.4 %.
+- **Uusinta-ajo kun treenikattavuus > 10 %** (~lokakuu 2026 nykyisellä
+  keräysvauhdilla): `python scripts/travronden_ab_test.py --split-date <tuore> --rs 42`.
+  Skriptiin lisätty 9.7. tr_game_percent_v-eksluusio + float32-muistikorjaukset
+  (ensimmäinen ajo kuoli OOM:iin ilman niitä).
 
 ---
 

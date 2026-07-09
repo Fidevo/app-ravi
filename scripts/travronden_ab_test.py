@@ -42,7 +42,12 @@ from src.paths import DB_PATH
 # Piirteet ilman tr_* = baseline
 _BASELINE_FEATURE_COLS = [c for c in FEATURE_COLS if not c.startswith("tr_")]
 # Kaikki tr_*-piirteet PAITSI tr_expected_odds (< 30% notna)
-_TR_FEATURE_COLS = [c for c in TRAVRONDEN_FEATURE_COLS if c != "tr_expected_odds"]
+# KNOWN_ISSUES #14 aktivointiehto 2: A/B ILMAN tr_game_percent_v — se on
+# Copycat-riski (kopioi markkinasentimentin) ja vinouttaisi mittauksen.
+_TR_FEATURE_COLS = [
+    c for c in TRAVRONDEN_FEATURE_COLS
+    if c not in ("tr_expected_odds", "tr_game_percent_v")
+]
 # TR-malli: baseline + tr_*
 _TR_MODEL_COLS = _BASELINE_FEATURE_COLS + _TR_FEATURE_COLS
 
@@ -127,7 +132,8 @@ def main() -> int:
     horse_starts = pd.read_sql(
         "SELECT * FROM horse_starts "
         "WHERE (withdrawn IS NULL OR withdrawn != 1) "
-        "  AND (finish_position IS NULL OR finish_position != 99)",
+        "  AND (finish_position IS NULL OR finish_position != 99) "
+        "  AND (race_date IS NULL OR race_date >= '2024-01-01')",
         con,
     )
     horses = pd.read_sql("SELECT * FROM horses", con)
@@ -144,6 +150,12 @@ def main() -> int:
     print(f"is_v_race=True: {v_race_count}")
 
     # --- Rakenna feature-matriisi ---
+    # OOM-torjunta (9.7.2026: ajo kuoli 3.6 GB RSS:ään): float64 -> float32
+    # ennen buildia, kuten retrain_20260704.py:ssä.
+    for _df in (runners, horse_starts):
+        for _c in _df.select_dtypes(include="float64").columns:
+            _df[_c] = _df[_c].astype("float32")
+
     runners_filled = fill_finish_positions(runners)
     features = build_feature_matrix(
         runners_filled, races,
@@ -171,6 +183,10 @@ def main() -> int:
             how="left",
         )
         print(f"TR-sarakkeet mergetty features:iin: {tr_cols_in_runners}")
+
+    for _c in features.select_dtypes(include="float64").columns:
+        features[_c] = features[_c].astype("float32")
+    del runners_filled, horse_starts
 
     # --- Train/test -split ---
     split = pd.Timestamp(args.split_date)
