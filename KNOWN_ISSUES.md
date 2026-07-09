@@ -238,6 +238,17 @@ Aktivoidaan takaisin kun >= 600 puhdasta lähtöä kerätty K1-korjauksen jälke
 
 **TODO:** Kommentoi irti 2026-09-01 (tai kun DB:ssä on >= 600 lähtöä post-2026-05-10).
 
+**PORTTITARKISTUS 9.7.2026 — 600 lähdön ehto TÄYTTYI JO (1410 lähtöä
+post-2026-05-10), mutta löytyi kaksi uutta esiehtoa:**
+1. **Vanhat pollutoidut arvot ovat yhä DB:ssä:** K1-kenttien kattavuus on 93.4 %
+   myös PRE-fix-riveillä (post-race-arvoja ei nollattu). Aktivointi ilman
+   maskausta = treeni vuotaneilla arvoilla 94 %:ssa historiaa → live romahtaisi.
+   Vaadittu korjaus: retrain-putkessa K1-sarakkeet → NaN kun race_date < 2026-05-10.
+2. **Laimennus/käänteisskew maskauksen jälkeen:** rehellisiä arvoja ~5 %
+   treeniriveistä mutta ~93 % live-riveistä → sama jakaumaero joka estää
+   sire-aktivoinnin. → Aktivoi vasta A/B-portilla (kuten #14), aikaisintaan
+   TR-uusinnan yhteydessä ~10/2026 kun treenikattavuus on kasvanut.
+
 ---
 
 ## Avoimet — sire-piirteet (aktivoidaan ~2026-07)
