@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import logging
 import logging.handlers
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.betting.clv_tracker import calculate_vig, devig_odds
@@ -1013,6 +1015,53 @@ def _write_tr_last_round(round_id: int) -> None:
         logger.warning("Travronden state-tiedoston kirjoitus epäonnistui: %s", exc)
 
 
+# Travronden-kirjoituksen lukkoretry. SQLite sallii yhden kirjoittajan
+# kerrallaan; snapshot- ja tulosjobit ajavat rinnakkain samassa prosessissa,
+# joten lyhyt odotus riittää useimmiten (bugi 21.7.2026: koko päivän tr-data
+# hukkui kun yksi OperationalError keskeytti skannauksen).
+_TR_WRITE_ATTEMPTS = 5
+_TR_WRITE_BASE_DELAY = 2.0
+
+
+def _flush_tr_updates(
+    session: Session,
+    updates: list[tuple[str, dict[str, Any]]],
+    *,
+    attempts: int = _TR_WRITE_ATTEMPTS,
+    base_delay: float = _TR_WRITE_BASE_DELAY,
+) -> int:
+    """Kirjoita puskuroidut tr_*-päivitykset yhtenä lyhyenä transaktiona.
+
+    Kutsutaan VAIN HTTP-hakujen ulkopuolella — muuten kirjoituslukko
+    roikkuisi auki koko skannauksen ajan (1 req/s → minuutteja) ja
+    estäisi snapshot-jobit.
+
+    Palauttaa päivitettyjen rivien määrän. Nostaa poikkeuksen vasta kun
+    kaikki yritykset on käytetty.
+    """
+    if not updates:
+        return 0
+
+    for attempt in range(1, attempts + 1):
+        try:
+            written = 0
+            for sql, params in updates:
+                written += session.execute(text(sql), params).rowcount
+            session.commit()
+            return written
+        except OperationalError as exc:
+            session.rollback()
+            if "database is locked" not in str(exc) or attempt == attempts:
+                raise
+            delay = base_delay * attempt
+            logger.warning(
+                "Travronden-kirjoitus lukossa (yritys %d/%d), odotetaan %.0fs",
+                attempt, attempts, delay,
+            )
+            time.sleep(delay)
+    return 0
+
+
 def _fetch_travronden_v_races(
     target_date: date,
     session: Session,
@@ -1042,6 +1091,7 @@ def _fetch_travronden_v_races(
     rounds_found = 0
     runners_updated = 0
     latest_rid = 0
+    first_failed_rid: int | None = None
 
     for rid in range(scan_start, scan_start + _TR_SCAN_WINDOW):
         try:
@@ -1060,9 +1110,11 @@ def _fetch_travronden_v_races(
             continue
 
         rounds_found += 1
-        latest_rid = max(latest_rid, rid)
         status = rd.get("status", "?")
         legs = rd.get("legs") or []
+        # Kierroksen päivitykset puskuroidaan ja kirjoitetaan vasta kun
+        # kaikki legien HTTP-haut on tehty (ks. _flush_tr_updates).
+        pending: list[tuple[str, dict[str, Any]]] = []
         logger.info(
             "Travronden: round %d (%s %s) status=%s, %d legiä",
             rid, rd_date, rd.get("game_type", "?"), status, len(legs),
@@ -1103,8 +1155,28 @@ def _fetch_travronden_v_races(
                     f"  SELECT race_id FROM races WHERE race_date = :race_date"
                     f")"
                 )
-                result = session.execute(text(sql), params)
-                runners_updated += result.rowcount
+                pending.append((sql, params))
+
+        # Kirjoitus per kierros: yksittäisen kierroksen lukkovirhe ei enää
+        # hukkaa koko päivän dataa (aiemmin yksi poikkeus keskeytti skannauksen
+        # ja kaikki puskuroitu jäi committoimatta).
+        try:
+            runners_updated += _flush_tr_updates(session, pending)
+        except OperationalError as exc:
+            if first_failed_rid is None:
+                first_failed_rid = rid
+            logger.warning(
+                "Travronden: kierroksen %d kirjoitus epäonnistui, jatketaan: %s",
+                rid, exc,
+            )
+            continue
+        latest_rid = max(latest_rid, rid)
+
+    # Tilatiedosto siirtyy vain ensimmäistä epäonnistunutta kierrosta edeltävään
+    # kohtaan — muuten myöhempi onnistuminen hautaisi epäonnistuneen kierroksen
+    # skannausikkunan taakse eikä sitä haettaisi enää koskaan (at-least-once).
+    if first_failed_rid is not None:
+        latest_rid = min(latest_rid, first_failed_rid - 1) if latest_rid else 0
 
     if latest_rid > 0:
         _write_tr_last_round(latest_rid)
@@ -1260,12 +1332,15 @@ def fetch_daily_races(
             # Toinen päivitysmahdollisuus: refresh_day_runners (T-10min).
             if travronden is not None:
                 try:
-                    with Session_() as tr_session:
-                        tr_stats = _fetch_travronden_v_races(target, tr_session, travronden)
-                        tr_session.commit()
+                    # Käytetään ulompaa sessiota: erillinen rinnakkainen yhteys
+                    # samaan SQLiteen kilpaili kirjoituslukosta tämän saman jobin
+                    # kanssa. Commit ensin jotta ulompi transaktio ei ole auki.
+                    session.commit()
+                    tr_stats = _fetch_travronden_v_races(target, session, travronden)
                     stats["travronden_rounds"] = tr_stats["rounds_found"]
                     stats["travronden_runners"] = tr_stats["runners_updated"]
                 except Exception as exc:  # noqa: BLE001
+                    session.rollback()
                     logger.warning("Travronden V-peli-fetch epäonnistui: %s", exc)
     finally:
         if own_client:
